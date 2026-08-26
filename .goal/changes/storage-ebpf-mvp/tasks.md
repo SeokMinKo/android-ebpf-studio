@@ -6,7 +6,7 @@
 | TSK-002 | REQ-001, REQ-002, REQ-003, NFR-003 | TSK-001 | validated ADB orchestration; command construction tests | desktop unit tests | completed |
 | TSK-003 | REQ-005, REQ-010, NFR-001 | TSK-001, TSK-002 | live GUI and simulator | GUI-feature compile + bounded simulator path | completed |
 | TSK-004 | REQ-002, REQ-003, REQ-009 | TSK-001 | Android agent/eBPF crates and build/deploy scripts | Linux/BPF compile and real-device checklist | completed; hardware run blocked |
-| TSK-005 | all | TSK-001..004 | docs, CI, convergence and GitHub repository | CI and repository URL | blocked: GitHub browser login incomplete |
+| TSK-005 | all | TSK-001..004 | docs, CI, convergence and GitHub repository | CI and repository URL | completed |
 
 Single implementation stream; no concurrent file leases. Forbidden actions: phone mutation beyond `/data/local/tmp/android-ebpf-studio`, SELinux policy change, repository publication as public without a later user decision.
 

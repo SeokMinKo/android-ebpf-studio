@@ -18,3 +18,5 @@
 | 0014 | REQ-001, REQ-002, REQ-003, NFR-003, CON-001 | TSK-002/TST-005 | `cargo test -p android-ebpf-studio --test adb` | 0 | 3 ADB tests passed | selected-serial ADB behavior completion | spec@1 |
 | 0015 | REQ-001, REQ-002, REQ-003, NFR-003, CON-001 | TSK-002/TST-005 | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | workspace clippy passed | ADB refactor convergence | spec@1 |
 | 0016 | REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, NFR-002, CON-002, INV-001 | TSK-001/TST-001 | `cargo fmt --all -- --check` | 0 | workspace formatting passed | protocol refactor convergence | spec@1 |
+| 0017 | NFR-004 | TSK-005 | GitHub commit fetch for `0f032e93d087460ed130cdd3ef78b13894d6352c` | 0 | README and 43-file source commit visible on public `main` | repository publication | spec@1 |
+| 0018 | NFR-004 | TSK-005 | GitHub Actions run `32924015976` | 0 | Success; rust-tests, windows-gui, ebpf-object, android-agent all passed | remote cross-platform convergence | spec@1 |

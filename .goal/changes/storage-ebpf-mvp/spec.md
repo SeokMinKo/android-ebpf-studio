@@ -5,7 +5,7 @@ level: L3
 execution_mode: DURABLE
 route: DESIGN_FIRST
 confirmation: CONFIRMED-AUTO
-lifecycle: BLOCKED
+lifecycle: SATISFIED
 confirmed_by: user implementation request and adb-root clarification
 baseline: empty repository
 ---

@@ -4,24 +4,24 @@
   "level": "L3",
   "execution_mode": "DURABLE",
   "route": "DESIGN_FIRST",
-  "run_status": "BLOCKED",
-  "phase": "P10",
+  "run_status": "SATISFIED",
+  "phase": "P12",
   "max_active_streams": 1,
-  "evidence_order": ["0002", "0006", "0007", "0008", "0011", "0012", "0013", "0014", "0015", "0016"],
+  "evidence_order": ["0002", "0006", "0007", "0008", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018"],
   "required_spec_ids": ["REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "REQ-010", "NFR-001", "NFR-002", "NFR-003", "NFR-004", "CON-001", "CON-002", "INV-001"],
   "spec": {
     "path": "spec.md",
     "revision": 1,
-    "hash": "sha256:2a366008fd10cf1fd7673cb8306e1a3fc5aae95e8ff09d15334dbfd3a929ea43",
+    "hash": "sha256:d204368669359a545c5a495526a32c41d64965d1cb3de458449467120d5d1b62",
     "confirmation": "CONFIRMED-AUTO",
-    "lifecycle": "BLOCKED"
+    "lifecycle": "SATISFIED"
   },
   "artifacts": [
     {"id": "research", "role": "RESEARCH", "path": "research.md", "revision": 1, "status": "CONFIRMED", "current": true, "derived_from": ["spec@1"]},
     {"id": "design", "role": "DESIGN", "path": "design.md", "revision": 1, "status": "CONFIRMED", "current": true, "derived_from": ["spec@1", "research@1"]},
     {"id": "tasks", "role": "TASKS", "path": "tasks.md", "revision": 1, "status": "CONFIRMED", "current": true, "derived_from": ["spec@1", "design@1"]},
-    {"id": "worklog", "role": "WORKLOG", "path": "WORKLOG.md", "revision": 1, "status": "DRAFT", "current": true, "derived_from": ["spec@1", "tasks@1"]},
-    {"id": "evidence", "role": "EVIDENCE", "path": "evidence/ledger.md", "revision": 1, "status": "DRAFT", "current": true, "derived_from": ["spec@1", "tasks@1"]}
+    {"id": "worklog", "role": "WORKLOG", "path": "WORKLOG.md", "revision": 1, "status": "SATISFIED", "current": true, "derived_from": ["spec@1", "tasks@1"]},
+    {"id": "evidence", "role": "EVIDENCE", "path": "evidence/ledger.md", "revision": 1, "status": "SATISFIED", "current": true, "derived_from": ["spec@1", "tasks@1"]}
   ],
   "tasks": [
     {
@@ -94,29 +94,29 @@
       "id": "TSK-005",
       "spec_ids": ["NFR-004"],
       "depends_on": ["TSK-001", "TSK-002", "TSK-003", "TSK-004"],
-      "status": "blocked",
+      "status": "done",
       "stream_id": "release",
       "planned_paths": [".github/**", "README.md", "docs/**", ".goal/changes/storage-ebpf-mvp/**"],
       "leased_paths": [],
       "forbidden_paths": [],
       "tdd_required": false,
       "tdd_cycles": [],
-      "evidence": [],
-      "blocker": "GitHub secure browser login did not complete; the connector cannot create repositories.",
-      "resume": "After the user authorizes another secure sign-in request, create the private repository, upload the tree, and inspect all CI jobs."
+      "evidence": [
+        {"sequence_or_time": "0017", "spec_ids": ["NFR-004"], "task_id": "TSK-005", "test_ids": [], "command": "GitHub commit fetch for 0f032e93d087460ed130cdd3ef78b13894d6352c", "exit": 0, "raw_summary": "README and 43-file source commit visible on public main", "scope": "repository publication", "artifact_revision": "spec@1"},
+        {"sequence_or_time": "0018", "spec_ids": ["NFR-004"], "task_id": "TSK-005", "test_ids": [], "command": "GitHub Actions run 32924015976", "exit": 0, "raw_summary": "all four CI jobs passed", "scope": "remote cross-platform convergence", "artifact_revision": "spec@1"}
+      ]
     }
   ],
   "gaps": [
-    {"id": "GAP-001", "severity": "medium", "kind": "partial", "status": "open", "source": "REQ-003", "action": "Run the device checklist on the user's adb-root Android phone."},
-    {"id": "GAP-002", "severity": "medium", "kind": "partial", "status": "open", "source": "NFR-004", "action": "Create the GitHub repository and inspect CI after secure sign-in succeeds."}
+    {"id": "GAP-001", "severity": "medium", "kind": "partial", "status": "open", "source": "REQ-003", "action": "Run the device checklist on the user's adb-root Android phone."}
   ],
   "checkpoint": {
-    "seq": 3,
+    "seq": 4,
     "spec_revision": 1,
-    "completed_tasks": ["TSK-001", "TSK-002", "TSK-003", "TSK-004"],
-    "next_tasks": ["TSK-005"],
-    "blockers": ["GitHub secure browser login did not complete; the connector cannot create repositories."],
-    "evidence_cursor": "0016",
-    "resume": "After the user authorizes another secure sign-in request, create the private repository, upload the tree, and inspect all CI jobs."
+    "completed_tasks": ["TSK-001", "TSK-002", "TSK-003", "TSK-004", "TSK-005"],
+    "next_tasks": [],
+    "blockers": [],
+    "evidence_cursor": "0018",
+    "resume": "Run the device checklist when an adb-root Android phone is available."
   }
 }
