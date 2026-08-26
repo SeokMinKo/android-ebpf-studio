@@ -7,7 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 
@@ -82,6 +82,95 @@ pub struct FileIo {
     pub confidence: AttributionConfidence,
 }
 
+/// A storage-stack layer. `KernelSpace` is intentionally not a value: it is a
+/// visual container for VFS through UFS rather than an additive latency stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineLayer {
+    Syscall,
+    Vfs,
+    Filesystem,
+    BlockQueue,
+    BlockDevice,
+    Scsi,
+    Ufs,
+    UicContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelinePhase {
+    Begin,
+    End,
+    Instant,
+    Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrelationConfidence {
+    Exact,
+    Probable,
+    ContextOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineObservation {
+    pub ts_ns: u64,
+    #[serde(default)]
+    pub end_ts_ns: Option<u64>,
+    pub phase: PipelinePhase,
+    pub layer: PipelineLayer,
+    #[serde(default)]
+    pub correlation_id: Option<u64>,
+    #[serde(default)]
+    pub sector: Option<u64>,
+    #[serde(default)]
+    pub bytes: Option<u32>,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub tid: u32,
+    pub name: String,
+    pub confidence: CorrelationConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineSpan {
+    pub layer: PipelineLayer,
+    pub start_ts_ns: u64,
+    pub end_ts_ns: u64,
+    pub name: String,
+    pub confidence: CorrelationConfidence,
+    pub source: String,
+}
+
+impl PipelineSpan {
+    pub fn duration_ns(&self) -> u64 {
+        self.end_ts_ns.saturating_sub(self.start_ts_ns)
+    }
+
+    fn additive(&self) -> bool {
+        self.confidence != CorrelationConfidence::ContextOnly
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoPipeline {
+    pub request_id: u64,
+    pub start_ts_ns: u64,
+    pub end_ts_ns: u64,
+    pub accounted_ns: u64,
+    pub unaccounted_ns: u64,
+    pub spans: Vec<PipelineSpan>,
+}
+
+impl IoPipeline {
+    pub fn total_ns(&self) -> u64 {
+        self.end_ts_ns.saturating_sub(self.start_ts_ns)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum StorageEvent {
@@ -89,6 +178,7 @@ pub enum StorageEvent {
     BlockIssue(BlockIssue),
     BlockComplete(BlockComplete),
     FileIo(FileIo),
+    Pipeline(PipelineObservation),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +198,14 @@ pub struct ProbeCapabilities {
     pub ufs_events: Vec<String>,
     #[serde(default)]
     pub fs_events: Vec<String>,
+    #[serde(default)]
+    pub scsi_events: Vec<String>,
+    #[serde(default)]
+    pub ext4_events: Vec<String>,
+    #[serde(default)]
+    pub vfs_probe_candidates: Vec<String>,
+    #[serde(default)]
+    pub pipeline_layers: Vec<PipelineLayer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,6 +633,7 @@ pub struct AnalysisEngine {
     last_ts_ns: Option<u64>,
     completed: Vec<CompletedIo>,
     file_ios: Vec<FileIo>,
+    pipeline_observations: Vec<PipelineObservation>,
 }
 
 impl AnalysisEngine {
@@ -556,6 +655,7 @@ impl AnalysisEngine {
             last_ts_ns: None,
             completed: Vec::new(),
             file_ios: Vec::new(),
+            pipeline_observations: Vec::new(),
         }
     }
 
@@ -614,7 +714,34 @@ impl AnalysisEngine {
                 if self.file_ios.len() == MAX_ANALYSIS_SAMPLES {
                     self.file_ios.drain(..MAX_ANALYSIS_SAMPLES / 10);
                 }
+                if file.end_ts_ns >= file.start_ts_ns {
+                    self.pipeline_observations.push(PipelineObservation {
+                        ts_ns: file.start_ts_ns,
+                        end_ts_ns: Some(file.end_ts_ns),
+                        phase: PipelinePhase::Span,
+                        layer: PipelineLayer::Syscall,
+                        correlation_id: None,
+                        sector: None,
+                        bytes: u32::try_from(file.requested_bytes).ok(),
+                        pid: file.pid,
+                        tid: file.tid,
+                        name: format!("{:?} fd {}", file.operation, file.fd),
+                        confidence: CorrelationConfidence::Probable,
+                    });
+                }
                 self.file_ios.push(file);
+                None
+            }
+            StorageEvent::Pipeline(observation) => {
+                self.observe_ts(observation.ts_ns);
+                if let Some(end) = observation.end_ts_ns {
+                    self.observe_ts(end);
+                }
+                if self.pipeline_observations.len() == MAX_ANALYSIS_SAMPLES {
+                    self.pipeline_observations
+                        .drain(..MAX_ANALYSIS_SAMPLES / 10);
+                }
+                self.pipeline_observations.push(observation);
                 None
             }
         }
@@ -705,6 +832,21 @@ impl AnalysisEngine {
         &self.file_ios
     }
 
+    pub fn pipeline_observations(&self) -> &[PipelineObservation] {
+        &self.pipeline_observations
+    }
+
+    pub fn pipeline_for(&self, io: &CompletedIo) -> IoPipeline {
+        build_io_pipeline(io, &self.pipeline_observations)
+    }
+
+    pub fn pipelines(&self) -> Vec<IoPipeline> {
+        self.completed
+            .iter()
+            .map(|io| self.pipeline_for(io))
+            .collect()
+    }
+
     pub fn buckets(&self) -> Vec<TimeBucket> {
         self.buckets
             .iter()
@@ -720,6 +862,134 @@ impl AnalysisEngine {
                 max_queue_depth: value.max_queue_depth,
             })
             .collect()
+    }
+}
+
+/// Builds a bounded request view from measured observations. Nested spans are
+/// retained for the waterfall, while accounting uses their clipped union.
+pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation]) -> IoPipeline {
+    let block_start = io
+        .insert
+        .as_ref()
+        .map_or(io.issue.ts_ns, |value| value.ts_ns);
+    let block_end = io.completion.ts_ns;
+    let request_id = io.issue.request_id;
+    let probable_window_start = block_start.saturating_sub(10_000_000);
+    let probable_window_end = block_end.saturating_add(10_000_000);
+
+    let mut candidates: Vec<&PipelineObservation> = observations
+        .iter()
+        .filter(|value| {
+            let end = value.end_ts_ns.unwrap_or(value.ts_ns);
+            if end < value.ts_ns {
+                return false;
+            }
+            let exact = value.correlation_id == Some(request_id);
+            if exact {
+                return true;
+            }
+            if value.confidence == CorrelationConfidence::Exact {
+                return false;
+            }
+            let overlaps = value.ts_ns <= probable_window_end && end >= probable_window_start;
+            let storage_match = value.sector.is_some_and(|sector| sector == io.issue.sector)
+                && value.bytes.is_some_and(|bytes| bytes == io.issue.bytes);
+            let thread_match =
+                value.pid == io.issue.pid && (value.tid == 0 || value.tid == io.issue.tid);
+            overlaps && (storage_match || thread_match)
+        })
+        .collect();
+
+    // When an exact observation exists for a layer, probable candidates for the
+    // same layer are deliberately excluded to avoid ambiguous duplicate bars.
+    let exact_layers: std::collections::HashSet<_> = candidates
+        .iter()
+        .filter(|value| value.correlation_id == Some(request_id))
+        .map(|value| value.layer)
+        .collect();
+    candidates.retain(|value| {
+        value.correlation_id == Some(request_id) || !exact_layers.contains(&value.layer)
+    });
+
+    let mut spans: Vec<PipelineSpan> = candidates
+        .into_iter()
+        .filter_map(|value| {
+            let end = value.end_ts_ns.unwrap_or(value.ts_ns);
+            (end >= value.ts_ns).then(|| PipelineSpan {
+                layer: value.layer,
+                start_ts_ns: value.ts_ns,
+                end_ts_ns: end,
+                name: value.name.clone(),
+                confidence: if value.correlation_id == Some(request_id)
+                    && value.confidence != CorrelationConfidence::ContextOnly
+                {
+                    CorrelationConfidence::Exact
+                } else {
+                    value.confidence
+                },
+                source: match value.phase {
+                    PipelinePhase::Span => "measured span",
+                    PipelinePhase::Begin | PipelinePhase::End => "paired boundary",
+                    PipelinePhase::Instant => "context marker",
+                }
+                .into(),
+            })
+        })
+        .collect();
+
+    if let Some(insert) = &io.insert {
+        spans.push(PipelineSpan {
+            layer: PipelineLayer::BlockQueue,
+            start_ts_ns: insert.ts_ns,
+            end_ts_ns: io.issue.ts_ns,
+            name: "block queue".into(),
+            confidence: CorrelationConfidence::Exact,
+            source: "block_rq_insert → block_rq_issue".into(),
+        });
+    }
+    spans.push(PipelineSpan {
+        layer: PipelineLayer::BlockDevice,
+        start_ts_ns: io.issue.ts_ns,
+        end_ts_ns: io.completion.ts_ns,
+        name: "block device".into(),
+        confidence: CorrelationConfidence::Exact,
+        source: "block_rq_issue → block_rq_complete".into(),
+    });
+
+    let start_ts_ns = spans
+        .iter()
+        .filter(|span| span.confidence == CorrelationConfidence::Exact)
+        .map(|span| span.start_ts_ns)
+        .min()
+        .unwrap_or(block_start)
+        .min(block_start);
+    let end_ts_ns = spans
+        .iter()
+        .filter(|span| span.confidence == CorrelationConfidence::Exact)
+        .map(|span| span.end_ts_ns)
+        .max()
+        .unwrap_or(block_end)
+        .max(block_end);
+    spans.sort_by_key(|span| (span.layer, span.start_ts_ns, span.end_ts_ns));
+
+    let additive: Vec<_> = spans
+        .iter()
+        .filter(|span| span.additive())
+        .filter_map(|span| {
+            let start = span.start_ts_ns.max(start_ts_ns);
+            let end = span.end_ts_ns.min(end_ts_ns);
+            (end >= start).then_some((start, end))
+        })
+        .collect();
+    let total_ns = end_ts_ns.saturating_sub(start_ts_ns);
+    let accounted_ns = union_duration(&additive).min(total_ns);
+    IoPipeline {
+        request_id,
+        start_ts_ns,
+        end_ts_ns,
+        accounted_ns,
+        unaccounted_ns: total_ns.saturating_sub(accounted_ns),
+        spans,
     }
 }
 

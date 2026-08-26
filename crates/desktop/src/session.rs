@@ -149,6 +149,34 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 file.completed_bytes.to_string(),
                 String::new(),
             ])?,
+            StorageEvent::Pipeline(stage) => writer.write_record([
+                format!("pipeline_{:?}", stage.layer).to_lowercase(),
+                stage.end_ts_ns.unwrap_or(stage.ts_ns).to_string(),
+                stage.ts_ns.to_string(),
+                stage
+                    .correlation_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                String::new(),
+                stage
+                    .sector
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                stage
+                    .bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                String::new(),
+                stage.pid.to_string(),
+                stage.tid.to_string(),
+                stage.name.clone(),
+                String::new(),
+                String::new(),
+                format!("{:?}", stage.confidence).to_lowercase(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ])?,
         }
         engine.ingest(event);
     }

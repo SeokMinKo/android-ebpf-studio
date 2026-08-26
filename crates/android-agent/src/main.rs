@@ -13,7 +13,7 @@ use std::{
 use android_ebpf_agent::trace_format::{parse_layout, parse_raw_syscall_layout, validate_pair};
 use android_ebpf_protocol::{
     AttributionConfidence, BlockComplete, BlockInsert, BlockIssue, FileIo, IoOperation,
-    ProbeCapabilities, SCHEMA_VERSION, StorageEvent, WireRecord, write_record,
+    PipelineLayer, ProbeCapabilities, SCHEMA_VERSION, StorageEvent, WireRecord, write_record,
 };
 use android_ebpf_types::{
     KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO, KernelEvent,
@@ -212,6 +212,13 @@ fn capabilities() -> Result<CollectorConfig> {
         .zip(fs::read_to_string(SYS_EXIT_FORMAT).ok())
         .and_then(|(enter, exit)| parse_raw_syscall_layout(&enter, &exit).ok());
     let ufs_events = discover_events("ufs");
+    let mut pipeline_layers = vec![PipelineLayer::BlockDevice];
+    if insert.is_some() {
+        pipeline_layers.push(PipelineLayer::BlockQueue);
+    }
+    if syscall.is_some() {
+        pipeline_layers.push(PipelineLayer::Syscall);
+    }
     Ok(CollectorConfig {
         capabilities: ProbeCapabilities {
             bpf_syscall: true,
@@ -224,6 +231,19 @@ fn capabilities() -> Result<CollectorConfig> {
             exact_request_correlation: exact,
             ufs_events,
             fs_events: discover_events("f2fs"),
+            scsi_events: discover_events("scsi"),
+            ext4_events: discover_events("ext4"),
+            vfs_probe_candidates: if Path::new("/sys/kernel/btf/vmlinux").is_file() {
+                vec![
+                    "vfs_read".into(),
+                    "vfs_write".into(),
+                    "vfs_iter_read".into(),
+                    "vfs_iter_write".into(),
+                ]
+            } else {
+                Vec::new()
+            },
+            pipeline_layers,
         },
         issue,
         complete,

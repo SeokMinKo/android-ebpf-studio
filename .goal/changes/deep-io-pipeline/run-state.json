@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "change_id": "deep-io-pipeline",
+  "level": "L3",
+  "execution_mode": "DURABLE",
+  "route": "DESIGN_FIRST",
+  "run_status": "ACTIVE",
+  "phase": "P9",
+  "max_active_streams": 1,
+  "evidence_order": [],
+  "required_spec_ids": ["REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006", "REQ-007", "NFR-001", "NFR-002", "NFR-003"],
+  "spec": {"path":"spec.md","revision":2,"hash":"sha256:b84fa5955f16af285c35983e9f3229622a7c53d5b65a151338683332137307e2","confirmation":"CONFIRMED-AUTO","lifecycle":"CONFIRMED"},
+  "artifacts": [
+    {"id":"research","role":"RESEARCH","path":"research.md","revision":1,"status":"CONFIRMED","current":true,"derived_from":["spec@2"]},
+    {"id":"design","role":"DESIGN","path":"design.md","revision":1,"status":"CONFIRMED","current":true,"derived_from":["spec@2"]},
+    {"id":"tasks","role":"TASKS","path":"tasks.md","revision":2,"status":"CONFIRMED","current":true,"derived_from":["spec@2","design@1"]},
+    {"id":"worklog","role":"WORKLOG","path":"WORKLOG.md","revision":2,"status":"DRAFT","current":true,"derived_from":["spec@2","tasks@2"]},
+    {"id":"evidence","role":"EVIDENCE","path":"evidence/ledger.md","revision":1,"status":"DRAFT","current":true,"derived_from":["spec@2","tasks@2"]}
+  ],
+  "tasks": [
+    {
+      "id":"TSK-001","spec_ids":["REQ-001","REQ-002","REQ-003","NFR-001","NFR-002","NFR-003"],"depends_on":[],"status":"in_progress","stream_id":"deep-pipeline",
+      "planned_paths":["crates/protocol/**","crates/desktop/**","crates/android-agent/**","README.md","docs/**",".goal/changes/deep-io-pipeline/**"],
+      "leased_paths":["crates/protocol/src/lib.rs","crates/protocol/tests/pipeline_stages.rs","crates/desktop/src/adb.rs","crates/desktop/src/app.rs","crates/desktop/src/artifacts.rs","crates/desktop/src/lib.rs","crates/desktop/src/session.rs","crates/desktop/src/simulator.rs","crates/desktop/tests/artifacts.rs","crates/android-agent/src/main.rs","README.md","docs/DEVICE_RUNBOOK.md","docs/PROTOCOL.md",".goal/changes/deep-io-pipeline/spec.md",".goal/changes/deep-io-pipeline/research.md",".goal/changes/deep-io-pipeline/design.md",".goal/changes/deep-io-pipeline/tasks.md",".goal/changes/deep-io-pipeline/WORKLOG.md",".goal/changes/deep-io-pipeline/evidence/ledger.md",".goal/changes/deep-io-pipeline/run-state.json"],
+      "forbidden_paths":["crates/android-ebpf/**"],"tdd_required":true,
+      "tdd_cycles":[{"test_id":"TST-001","kind":"NEW_BEHAVIOR","state":"ACTIVE"}],
+      "evidence":[]
+    },
+    {"id":"TSK-002","spec_ids":["REQ-003","REQ-006"],"depends_on":["TSK-001"],"status":"pending","stream_id":"deep-pipeline","planned_paths":["crates/desktop/src/simulator.rs"],"leased_paths":[],"forbidden_paths":["crates/android-ebpf/**"],"tdd_required":true,"tdd_cycles":[],"evidence":[]},
+    {"id":"TSK-003","spec_ids":["REQ-004"],"depends_on":["TSK-001"],"status":"pending","stream_id":"deep-pipeline","planned_paths":["crates/android-agent/**","crates/desktop/src/adb.rs"],"leased_paths":[],"forbidden_paths":["crates/android-ebpf/**"],"tdd_required":true,"tdd_cycles":[],"evidence":[]},
+    {"id":"TSK-004","spec_ids":["REQ-005"],"depends_on":["TSK-002"],"status":"pending","stream_id":"deep-pipeline","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/android-ebpf/**"],"tdd_required":true,"tdd_cycles":[],"evidence":[]},
+    {"id":"TSK-005","spec_ids":["REQ-001","REQ-002","REQ-003","REQ-004","REQ-005","REQ-006","REQ-007"],"depends_on":["TSK-003","TSK-004","TSK-006"],"status":"pending","stream_id":"deep-pipeline","planned_paths":["README.md","docs/**",".goal/changes/deep-io-pipeline/**"],"leased_paths":[],"forbidden_paths":["crates/android-ebpf/**"],"tdd_required":false,"tdd_cycles":[],"evidence":[]},
+    {"id":"TSK-006","spec_ids":["REQ-007"],"depends_on":["TSK-001"],"status":"pending","stream_id":"deep-pipeline","planned_paths":["crates/desktop/src/artifacts.rs","crates/desktop/tests/artifacts.rs","crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/android-ebpf/**"],"tdd_required":true,"tdd_cycles":[],"evidence":[]}
+  ],
+  "gaps":[{"id":"GAP-001","severity":"medium","kind":"partial","status":"open","source":"REQ-004","action":"verify optional SCSI/UFS tracepoint attachment on a rooted target device"}],
+  "checkpoint":{"seq":2,"spec_revision":2,"completed_tasks":[],"next_tasks":["TSK-001"],"blockers":[],"evidence_cursor":null,"resume":"Run workflow gate, inspect diff, push a verification branch and use CI evidence."}
+}

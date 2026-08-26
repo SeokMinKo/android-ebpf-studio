@@ -8,8 +8,9 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AttributionConfidence, BlockComplete, BlockInsert, BlockIssue, FileIo, IoOperation,
-    SCHEMA_VERSION, StorageEvent, WireRecord,
+    AttributionConfidence, BlockComplete, BlockInsert, BlockIssue, CorrelationConfidence, FileIo,
+    IoOperation, PipelineLayer, PipelineObservation, PipelinePhase, SCHEMA_VERSION, StorageEvent,
+    WireRecord,
 };
 use crossbeam_channel::Sender;
 
@@ -56,6 +57,78 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             *stream_sector += (bytes / 512) as u64;
             let insert_ts = ts_ns;
             let issue_ts = ts_ns + 100_000 + (sequence % 4) * 50_000;
+            let latency_ns = 200_000 + (sequence % 20) * 100_000;
+            let completion_ts = issue_ts + latency_ns;
+            let pipeline_spans = [
+                (
+                    PipelineLayer::Syscall,
+                    insert_ts.saturating_sub(400_000),
+                    completion_ts + 80_000,
+                    "read/write syscall",
+                    CorrelationConfidence::Exact,
+                ),
+                (
+                    PipelineLayer::Vfs,
+                    insert_ts.saturating_sub(320_000),
+                    issue_ts.saturating_sub(80_000),
+                    "vfs_iter_read/write",
+                    CorrelationConfidence::Exact,
+                ),
+                (
+                    PipelineLayer::Filesystem,
+                    insert_ts.saturating_sub(240_000),
+                    issue_ts.saturating_sub(100_000),
+                    "f2fs/ext4 file operation",
+                    CorrelationConfidence::Exact,
+                ),
+                (
+                    PipelineLayer::Scsi,
+                    issue_ts + 30_000,
+                    completion_ts.saturating_sub(20_000),
+                    "SCSI command",
+                    CorrelationConfidence::Probable,
+                ),
+                (
+                    PipelineLayer::Ufs,
+                    issue_ts + 60_000,
+                    completion_ts.saturating_sub(40_000),
+                    "UFS command",
+                    CorrelationConfidence::Probable,
+                ),
+                (
+                    PipelineLayer::UicContext,
+                    issue_ts + 10_000,
+                    issue_ts + 10_000,
+                    "UIC link active",
+                    CorrelationConfidence::ContextOnly,
+                ),
+            ];
+            for (layer, start_ts_ns, end_ts_ns, name, confidence) in pipeline_spans {
+                let event = StorageEvent::Pipeline(PipelineObservation {
+                    ts_ns: start_ts_ns,
+                    end_ts_ns: Some(end_ts_ns.max(start_ts_ns)),
+                    phase: if layer == PipelineLayer::UicContext {
+                        PipelinePhase::Instant
+                    } else {
+                        PipelinePhase::Span
+                    },
+                    layer,
+                    correlation_id: Some(sequence),
+                    sector: Some(sector),
+                    bytes: Some(bytes),
+                    pid: 4242,
+                    tid: 4242,
+                    name: name.into(),
+                    confidence,
+                });
+                tx.send(HostMessage::Record(WireRecord::Event {
+                    schema_version: SCHEMA_VERSION,
+                    sequence: record_sequence,
+                    event,
+                }))
+                .ok();
+                record_sequence += 1;
+            }
             let insert = StorageEvent::BlockInsert(BlockInsert {
                 ts_ns: insert_ts,
                 request_id: sequence,
@@ -94,9 +167,8 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             }))
             .ok();
             record_sequence += 1;
-            let latency_ns = 200_000 + (sequence % 20) * 100_000;
             let completion = StorageEvent::BlockComplete(BlockComplete {
-                ts_ns: issue_ts + latency_ns,
+                ts_ns: completion_ts,
                 request_id: sequence,
                 device_major: 259,
                 device_minor: 0,
@@ -112,7 +184,7 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             if sequence.is_multiple_of(4) {
                 let file = StorageEvent::FileIo(FileIo {
                     start_ts_ns: insert_ts.saturating_sub(50_000),
-                    end_ts_ns: issue_ts + latency_ns + 50_000,
+                    end_ts_ns: completion_ts + 50_000,
                     operation,
                     fd: 7,
                     requested_bytes: bytes as u64,
