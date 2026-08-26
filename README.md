@@ -52,7 +52,7 @@ Android kernel eBPF
 
 ### Release 다운로드(권장)
 
-[GitHub Releases](https://github.com/SeokMinKo/android-ebpf-studio/releases/latest)에서 `android-ebpf-studio-v0.1.0.zip`을 내려받아 압축을 풉니다. ZIP에는 다음 파일이 들어 있습니다.
+[GitHub Releases](https://github.com/SeokMinKo/android-ebpf-studio/releases/latest)에서 `android-ebpf-studio-v0.2.0.zip`을 내려받아 압축을 풉니다. ZIP에는 다음 파일이 들어 있습니다.
 
 - `android-ebpf-studio.exe`: Windows GUI
 - `android-ebpf-agent`: Android arm64 collector
