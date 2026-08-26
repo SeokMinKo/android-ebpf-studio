@@ -4,6 +4,7 @@ use android_ebpf_protocol::{
 };
 
 fn node(id: u64, kind: IoNodeKind, start: u64, end: u64) -> IoNode {
+    let is_file_operation = kind == IoNodeKind::FileOperation;
     IoNode {
         node_id: id,
         transaction_id: Some(77),
@@ -11,14 +12,14 @@ fn node(id: u64, kind: IoNodeKind, start: u64, end: u64) -> IoNode {
         start_ts_ns: start,
         end_ts_ns: Some(end),
         origin: IoOrigin::File,
-        file: Some(FileIdentity {
+        file: is_file_operation.then(|| FileIdentity {
             fs_device_major: 259,
             fs_device_minor: 7,
             inode: 100 + id,
             inode_generation: None,
             mount_id: Some(42),
         }),
-        path: Some(PathSnapshot {
+        path: is_file_operation.then(|| PathSnapshot {
             path: Some(format!("/data/file-{id}.bin")),
             source: PathSource::ProcFd,
             captured_ts_ns: start,
