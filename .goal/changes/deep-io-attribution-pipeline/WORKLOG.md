@@ -90,3 +90,11 @@
 - Git diff gate가 보고한 Markdown trailing whitespace/EOF blank만 제거함. 요구사항 의미는 변경되지 않았으므로 downstream artifacts는 current 상태를 유지함.
 - Spec SHA-256을 `6b596a1c...c7aff`로 갱신함.
 - 배포 순서: feature branch CI → 오류 수정/재검증 → main 반영 → v0.5.0 Release workflow.
+
+## 0014 GITHUB CI GREEN — 2026-08-26T23:14:00Z
+
+- Feature branch: `feature/deep-io-pipeline-v0.5`; PR: `#2`; verified head: `aad7d92c02670c1bd4e2eb90b31a07acf776b07a`.
+- GitHub Actions CI run `33022453624`에서 Rust format, Clippy `-D warnings`, workspace tests, Windows GUI check, Android arm64 agent build, eBPF object build가 모두 성공.
+- CI에서 발견된 rustfmt, derivable default, argument-count lint, collapsible-if, multi-origin fixture 오류를 각각 수정하고 전체 suite를 다시 실행함.
+- 로컬 toolchain 부재 차단은 GitHub CI evidence로 해소. Android 실제 단말 verifier/SELinux/vendor tracepoint/overhead와 Windows 렌더링 육안 검증은 계속 별도 gap으로 유지.
+- 다음 단계: PR #2를 main에 병합하고 release workflow로 v0.5.0 자산을 생성·검증.

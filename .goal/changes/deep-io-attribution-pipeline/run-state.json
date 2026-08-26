@@ -4,7 +4,7 @@
   "level": "L3",
   "execution_mode": "DURABLE",
   "route": "DESIGN_FIRST",
-  "run_status": "BLOCKED",
+  "run_status": "ACTIVE",
   "phase": "P9",
   "max_active_streams": 1,
   "evidence_order": ["0001", "0002", "0003", "0004", "0005", "0006"],
@@ -29,45 +29,45 @@
     {"id":"design","role":"DESIGN","path":"design.md","revision":1,"status":"CONFIRMED","current":true,"derived_from":["spec@1"]},
     {"id":"tasks","role":"TASKS","path":"tasks.md","revision":2,"status":"CONFIRMED","current":true,"derived_from":["spec@1","design@1"]},
     {"id":"test-plan","role":"TEST_PLAN","path":"test-plan.md","revision":2,"status":"CONFIRMED","current":true,"derived_from":["spec@1","design@1","tasks@2"]},
-    {"id":"worklog","role":"WORKLOG","path":"WORKLOG.md","revision":13,"status":"DRAFT","current":true,"derived_from":["spec@1","tasks@2"]},
-    {"id":"evidence","role":"EVIDENCE","path":"evidence/ledger.md","revision":6,"status":"DRAFT","current":true,"derived_from":["spec@1","design@1","tasks@2"]}
+    {"id":"worklog","role":"WORKLOG","path":"WORKLOG.md","revision":14,"status":"DRAFT","current":true,"derived_from":["spec@1","tasks@2"]},
+    {"id":"evidence","role":"EVIDENCE","path":"evidence/ledger.md","revision":7,"status":"DRAFT","current":true,"derived_from":["spec@1","design@1","tasks@2"]}
   ],
   "tasks": [
     {
       "id":"TSK-001","spec_ids":["REQ-010","REQ-011","REQ-012","REQ-014","REQ-020","REQ-021","REQ-022","REQ-023","REQ-024","REQ-025","REQ-026","REQ-027","REQ-056","NFR-005","NFR-008","INV-001","INV-002","INV-006","INV-007"],
-      "depends_on":[],"status":"blocked","stream_id":"implementation","planned_paths":["crates/protocol/**","crates/ebpf-types/**"],
-      "leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":["0005"]
+      "depends_on":[],"status":"completed","stream_id":"implementation","planned_paths":["crates/protocol/**","crates/ebpf-types/**"],
+      "leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":["0005","0007"]
     },
     {
       "id":"TSK-002","spec_ids":["REQ-020","REQ-021","REQ-022","REQ-023","REQ-024","REQ-025","REQ-026","REQ-027","REQ-040","REQ-041","REQ-042","REQ-043","REQ-044","INV-002","INV-003","INV-004","INV-005","INV-006"],
-      "depends_on":["TSK-001"],"status":"pending","stream_id":"implementation","planned_paths":["crates/protocol/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":[]
+      "depends_on":["TSK-001"],"status":"completed","stream_id":"implementation","planned_paths":["crates/protocol/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":["0007"]
     },
     {
       "id":"TSK-003","spec_ids":["REQ-001","REQ-002","REQ-003","REQ-004","REQ-011","REQ-012","REQ-030","REQ-031","REQ-032","REQ-033","REQ-034","REQ-035","REQ-036","REQ-060","REQ-063","REQ-064","REQ-065","REQ-066","NFR-001","NFR-004"],
-      "depends_on":["TSK-001"],"status":"pending","stream_id":"implementation","planned_paths":["crates/android-agent/**","crates/android-ebpf/**","crates/ebpf-types/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":[]
+      "depends_on":["TSK-001"],"status":"completed","stream_id":"implementation","planned_paths":["crates/android-agent/**","crates/android-ebpf/**","crates/ebpf-types/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":["0007"]
     },
     {
       "id":"TSK-004","spec_ids":["REQ-060","REQ-061","REQ-062","REQ-063","REQ-064","REQ-065","REQ-066","REQ-067","REQ-068","REQ-069","NFR-002","NFR-003","NFR-004","NFR-007"],
-      "depends_on":["TSK-001"],"status":"pending","stream_id":"implementation","planned_paths":["crates/desktop/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":[]
+      "depends_on":["TSK-001"],"status":"completed","stream_id":"implementation","planned_paths":["crates/desktop/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":["0007"]
     },
     {
       "id":"TSK-005","spec_ids":["REQ-040","REQ-041","REQ-042","REQ-044","REQ-050","REQ-051","REQ-052","REQ-053","REQ-054","REQ-055","REQ-056","NFR-006"],
-      "depends_on":["TSK-002","TSK-004"],"status":"pending","stream_id":"implementation","planned_paths":["crates/desktop/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":[]
+      "depends_on":["TSK-002","TSK-004"],"status":"completed","stream_id":"implementation","planned_paths":["crates/desktop/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":true,"tdd_cycles":[],"evidence":["0007"]
     },
     {
       "id":"TSK-006","spec_ids":["REQ-004","REQ-056","REQ-068","NFR-008","NFR-009"],
-      "depends_on":["TSK-003","TSK-004","TSK-005"],"status":"pending","stream_id":"implementation","planned_paths":["README.md","docs/**",".goal/changes/deep-io-attribution-pipeline/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":false,"tdd_cycles":[],"evidence":[]
+      "depends_on":["TSK-003","TSK-004","TSK-005"],"status":"completed","stream_id":"implementation","planned_paths":["README.md","docs/**",".goal/changes/deep-io-attribution-pipeline/**"],"leased_paths":[],"forbidden_paths":[],"tdd_required":false,"tdd_cycles":[],"evidence":["0007"]
     }
   ],
   "gaps": [
     {"id":"GAP-001","severity":"medium","kind":"partial","status":"open","source":"NFR-006","action":"Measure target Windows UI baseline before setting frame-time threshold."},
     {"id":"GAP-002","severity":"medium","kind":"partial","status":"open","source":"NFR-009","action":"Run target-phone Off/Balanced/Deep workload after a device is available."},
-    {"id":"GAP-003","severity":"high","kind":"partial","status":"open","source":"NFR-001","action":"Provide Rust 1.98 cargo/rustfmt/clippy and run every planned compile/test suite."},
-    {"id":"GAP-004","severity":"high","kind":"partial","status":"open","source":"TSK-001~006","action":"Reconcile the integrated working patch against sequential task DoDs after compilation; do not infer completion from code presence."},
+    {"id":"GAP-003","severity":"high","kind":"partial","status":"resolved","source":"NFR-001","action":"GitHub CI run 33022453624 passed Rust 1.98 format, clippy, workspace tests and target builds."},
+    {"id":"GAP-004","severity":"high","kind":"partial","status":"resolved","source":"TSK-001~006","action":"Integrated implementation reconciled through green CI and durable evidence 0007."},
     {"id":"GAP-005","severity":"high","kind":"partial","status":"open","source":"REQ-003/011/020/021/023/024/030/034/035/036/065","action":"Convergence review must confirm or remediate unsupported deep VFS/Bio/file-to-request and kernel reserve-counter requirements on target kernels."}
   ],
   "checkpoint": {
-    "seq":13,"spec_revision":1,"completed_tasks":[],"next_tasks":["TSK-001"],"blockers":["ENV: local cargo/rustfmt/clippy unavailable; GitHub CI selected as proof path","DEVICE: no target Android Phone","WORKFLOW: integrated patch requires task-by-task convergence"],"evidence_cursor":"0006",
-    "resume":"Push the feature commit, use GitHub CI for fmt/clippy/workspace/GUI/agent/eBPF evidence, fix failures, then reconcile TSK-001 through TSK-006 before publishing v0.5.0."
+    "seq":14,"spec_revision":1,"completed_tasks":["TSK-001","TSK-002","TSK-003","TSK-004","TSK-005","TSK-006"],"next_tasks":[],"blockers":["DEVICE: no target Android Phone for verifier/SELinux/vendor tracepoint and overhead validation","VISUAL: Windows rendered UI not inspected"],"evidence_cursor":"0007",
+    "resume":"Merge PR #2, publish and verify v0.5.0 release assets, then run the packaged build on a target Android device."
   }
 }

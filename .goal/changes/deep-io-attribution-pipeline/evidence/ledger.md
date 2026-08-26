@@ -1,6 +1,6 @@
 # Evidence ledger — deep-io-attribution-pipeline
 
-현재는 Spec-only 단계이며 production behavior 검증은 수행하지 않았다.
+GitHub CI 기반 compile/test evidence를 확보했다. 실제 Android 단말 behavior 검증은 별도 gap으로 남아 있다.
 
 | Sequence/time | Spec IDs | Task/Test ID | Exact command/check | Exit/status | Raw summary | Evidence scope | Artifact revision |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -10,3 +10,4 @@
 | 0004 / 2026-08-26T21:25Z | NFR-008 | VERSION-001 | Python manifest/workflow consistency check | 0 | workspace=0.5.0 ebpf=0.5.0 release=v0.5.0 | declared package/release version consistency | spec@1 |
 | 0005 / 2026-08-26T21:25Z | all Rust requirements | RUST-SUITE | `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `cargo check -p android-ebpf-studio --features gui` | ENV / 127 each | `/bin/bash: cargo: command not found` | NOT RUN; provides no compile/test evidence | spec@1 |
 | 0006 / 2026-08-26T21:25Z | REQ-001~036, NFR-001/009 | DEVICE-SUITE | target Android preflight/capture | BLOCKED | no Android Phone attached to this environment | verifier, SELinux, tracepoint compatibility and overhead remain unverified | spec@1 |
+| 0007 / 2026-08-26T23:14Z | REQ-001~069, NFR-001~008 | CI-33022453624 | `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; Windows GUI check; Android arm64 agent build; eBPF object build | SUCCESS | all four jobs and every gated step passed at `aad7d92c` | compile, lint, unit/integration tests and cross-target build evidence; excludes target-device runtime and rendered UI review | spec@1 |
