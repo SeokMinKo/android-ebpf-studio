@@ -11,3 +11,4 @@
 | S7 | REQ-104/105 | TST-105 | `cargo clippy -p android-ebpf-studio --all-targets --features gui -- -D warnings` | 0 | GUI compiled without warnings | Linux GUI compile boundary | working tree |
 | S8 | REQ-102/103 | TST-104 | `cargo +nightly build --manifest-path crates/android-ebpf/Cargo.toml --target bpfel-unknown-none -Z build-std=core --release` | 0 | optimized eBPF object built | eBPF compile boundary; no phone verifier | working tree |
 | S9 | all local | TST-106 | `cargo fmt --all -- --check` and eBPF manifest fmt check | 0 | no format diff | Formatting | working tree |
+| S10 | all | TST-106 | GitHub Actions run `32938921488` | 0 | rust-tests, windows-gui, ebpf-object, android-agent all completed with success | Remote cross-platform convergence | `2916dc41` |
