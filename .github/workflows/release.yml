@@ -1,0 +1,119 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        default: v0.1.0
+  push:
+    paths:
+      - .github/workflows/release.yml
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || 'v0.1.0' }}
+
+jobs:
+  windows-gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Build Windows GUI
+        run: cargo +1.98.0 build --release -p android-ebpf-studio --features gui
+      - name: Stage Windows executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\android-ebpf-studio.exe dist\android-ebpf-studio.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui
+          path: dist/android-ebpf-studio.exe
+          if-no-files-found: error
+
+  android-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust target
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup target add aarch64-linux-android --toolchain 1.98.0
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" >> "$GITHUB_ENV"
+      - name: Build Android arm64 agent
+        run: cargo +1.98.0 build --release -p android-ebpf-agent --target aarch64-linux-android
+      - name: Stage Android agent
+        run: |
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/android-ebpf-agent dist/android-ebpf-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-agent
+          path: dist/android-ebpf-agent
+          if-no-files-found: error
+
+  ebpf-object:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - name: Install pinned bpf-linker
+        run: |
+          curl -L --fail --silent --show-error \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst \
+            -o /tmp/bpf-linker.tar.zst
+          echo "10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450  /tmp/bpf-linker.tar.zst" | sha256sum -c -
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C "$HOME/.cargo/bin"
+      - name: Build eBPF object
+        run: ./scripts/build-ebpf.sh
+      - name: Stage eBPF object
+        run: |
+          mkdir -p dist
+          cp crates/android-ebpf/target/bpfel-unknown-none/release/android-storage-ebpf dist/android-storage-ebpf.o
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebpf-object
+          path: dist/android-storage-ebpf.o
+          if-no-files-found: error
+
+  publish:
+    needs: [windows-gui, android-agent, ebpf-object]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release bundle and checksums
+        run: |
+          mkdir -p bundle release
+          cp dist/android-ebpf-studio.exe bundle/
+          cp dist/android-ebpf-agent bundle/
+          cp dist/android-storage-ebpf.o bundle/
+          cp README.md docs/DEVICE_RUNBOOK.md bundle/
+          chmod +x bundle/android-ebpf-agent
+          (cd bundle && zip -9 -r "../release/android-ebpf-studio-${RELEASE_TAG}.zip" .)
+          cp dist/android-ebpf-studio.exe release/
+          cp dist/android-ebpf-agent release/
+          cp dist/android-storage-ebpf.o release/
+          (cd release && sha256sum android-ebpf-studio.exe android-ebpf-agent android-storage-ebpf.o "android-ebpf-studio-${RELEASE_TAG}.zip" > SHA256SUMS.txt)
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release/* \
+              --target "$GITHUB_SHA" \
+              --title "Android eBPF Storage Studio ${RELEASE_TAG}" \
+              --notes "Windows GUI, Android arm64 agent, and Android eBPF storage collector. Download the ZIP for the complete package. Verify downloads with SHA256SUMS.txt."
+          fi

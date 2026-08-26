@@ -49,6 +49,17 @@ Android kernel eBPF
 
 ## 빠른 시작
 
+### Release 다운로드(권장)
+
+[GitHub Releases](https://github.com/SeokMinKo/android-ebpf-studio/releases/latest)에서 `android-ebpf-studio-v0.1.0.zip`을 내려받아 압축을 풉니다. ZIP에는 다음 파일이 들어 있습니다.
+
+- `android-ebpf-studio.exe`: Windows GUI
+- `android-ebpf-agent`: Android arm64 collector
+- `android-storage-ebpf.o`: Android kernel에 로드할 eBPF object
+- `DEVICE_RUNBOOK.md`: 장비 연결 및 실행 절차
+
+다운로드 무결성은 Release에 함께 게시된 `SHA256SUMS.txt`로 확인할 수 있습니다.
+
 ### 1. Windows GUI 빌드
 
 ```powershell
