@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "android-ebpf-agent"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "android-ebpf-protocol",
  "android-ebpf-types",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "android-ebpf-protocol"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -88,10 +88,11 @@ dependencies = [
 
 [[package]]
 name = "android-ebpf-studio"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "android-ebpf-protocol",
  "anyhow",
+ "chrono",
  "crossbeam-channel",
  "csv",
  "eframe",
@@ -107,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "android-ebpf-types"
-version = "0.2.0"
+version = "0.5.0"
 
 [[package]]
 name = "android-properties"

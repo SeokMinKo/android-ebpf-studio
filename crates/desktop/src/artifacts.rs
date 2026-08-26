@@ -6,9 +6,13 @@ use std::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturePaths {
+    pub session_id: String,
     pub agent: PathBuf,
     pub bpf_object: PathBuf,
     pub session: PathBuf,
+    pub log_directory: PathBuf,
+    pub host_log: PathBuf,
+    pub agent_log: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -77,11 +81,27 @@ impl CapturePaths {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let session = session_root.join(format!("android-storage-{timestamp}.ndjson"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let session = session_root.join(format!("android-storage-{timestamp}-{session_id}.ndjson"));
+        let log_directory = session_root
+            .parent()
+            .unwrap_or(session_root)
+            .join("logs")
+            .join(&session_id);
+        fs::create_dir_all(&log_directory).map_err(|source| {
+            CapturePathError::SessionDirectory {
+                path: log_directory.display().to_string(),
+                source,
+            }
+        })?;
         Ok(Self {
+            session_id,
             agent,
             bpf_object,
             session,
+            host_log: log_directory.join("host.jsonl"),
+            agent_log: log_directory.join("agent.jsonl"),
+            log_directory,
         })
     }
 }

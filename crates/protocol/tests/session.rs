@@ -54,6 +54,11 @@ fn file_io_event_round_trips_with_attribution_confidence() {
             comm: "reader".into(),
             path: Some("/data/local/tmp/input.bin".into()),
             confidence: AttributionConfidence::Attributed,
+            file_identity: None,
+            path_snapshot: None,
+            offset: None,
+            io_mode: Default::default(),
+            node_id: None,
         }),
     };
     let json = serde_json::to_string(&record).unwrap();
@@ -80,4 +85,16 @@ fn unknown_json_fields_are_forward_compatible() {
     let loaded = SessionReader::default().read(Cursor::new(input)).unwrap();
     assert_eq!(loaded.health.len(), 1);
     assert_eq!(loaded.rejected_lines, 0);
+}
+
+#[test]
+fn footer_reports_integrity_and_partial_completion_without_inventing_success() {
+    let input = concat!(
+        "{\"record\":\"footer\",\"schema_version\":4,",
+        "\"events_seen\":5,\"events_persisted\":3,\"events_dropped\":1,",
+        "\"events_rejected\":1,\"graceful\":false}\n"
+    );
+    let loaded = SessionReader::default().read(Cursor::new(input)).unwrap();
+    assert_eq!(loaded.integrity_ok, Some(true));
+    assert_eq!(loaded.graceful, Some(false));
 }

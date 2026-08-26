@@ -8,8 +8,9 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AccessPattern, AnalysisEngine, CompletedIo, CorrelationConfidence, IoOperation, IoSizeClass,
-    PipelineLayer, SCHEMA_VERSION, WireRecord,
+    AccessPattern, AnalysisEngine, CompletedIo, CorrelationConfidence, DiagnosticLevel,
+    DiagnosticRecord, EdgeConfidence, IoNodeKind, IoOperation, IoSizeClass, PipelineLayer,
+    ProbeCapabilities, SCHEMA_VERSION, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -19,6 +20,7 @@ use crate::{
     adb::{AdbClient, AdbDevice, DeviceState, PreflightReport},
     artifacts::{CapturePaths, create_default_session_path},
     capture::{self, CaptureHandle, HostMessage},
+    diagnostics::{RotatingJsonl, export_bundle, host_record},
     session::{self, SessionWriter},
     simulator,
 };
@@ -42,6 +44,7 @@ enum Page {
     Explorer,
     Events,
     Files,
+    Diagnostics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,10 +65,13 @@ enum AxisMetric {
     DeviceLatencyMs,
     Pid,
     QueueDepth,
+    FilesystemLatencyMs,
+    UfsLatencyMs,
+    CriticalPathMs,
 }
 
 impl AxisMetric {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 12] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
@@ -75,6 +81,9 @@ impl AxisMetric {
         Self::DeviceLatencyMs,
         Self::Pid,
         Self::QueueDepth,
+        Self::FilesystemLatencyMs,
+        Self::UfsLatencyMs,
+        Self::CriticalPathMs,
     ];
 
     fn label(self) -> &'static str {
@@ -88,10 +97,13 @@ impl AxisMetric {
             Self::DeviceLatencyMs => "Device latency (ms)",
             Self::Pid => "PID",
             Self::QueueDepth => "Queue depth",
+            Self::FilesystemLatencyMs => "Filesystem latency (ms)",
+            Self::UfsLatencyMs => "UFS latency (ms)",
+            Self::CriticalPathMs => "Critical path (ms)",
         }
     }
 
-    fn value(self, io: &CompletedIo, origin_ns: u64) -> Option<f64> {
+    fn value(self, analyzer: &AnalysisEngine, io: &CompletedIo, origin_ns: u64) -> Option<f64> {
         match self {
             Self::TimeMs => Some(io.completion.ts_ns.saturating_sub(origin_ns) as f64 / 1e6),
             Self::Sector => Some(io.issue.sector as f64),
@@ -102,6 +114,16 @@ impl AxisMetric {
             Self::DeviceLatencyMs => Some(io.device_latency_ns as f64 / 1e6),
             Self::Pid => Some(io.issue.pid as f64),
             Self::QueueDepth => Some(io.queue_depth_after as f64),
+            Self::FilesystemLatencyMs => graph_kind_duration_ms(
+                &analyzer.transaction_for(io),
+                IoNodeKind::Filesystem,
+            ),
+            Self::UfsLatencyMs => {
+                graph_kind_duration_ms(&analyzer.transaction_for(io), IoNodeKind::UfsCommand)
+            }
+            Self::CriticalPathMs => {
+                Some(analyzer.transaction_for(io).metrics().critical_path_ns as f64 / 1e6)
+            }
         }
     }
 }
@@ -113,15 +135,21 @@ enum GroupBy {
     AccessPattern,
     SizeClass,
     Process,
+    File,
+    Origin,
+    Confidence,
 }
 
 impl GroupBy {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 8] = [
         Self::None,
         Self::Direction,
         Self::AccessPattern,
         Self::SizeClass,
         Self::Process,
+        Self::File,
+        Self::Origin,
+        Self::Confidence,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -130,15 +158,34 @@ impl GroupBy {
             Self::AccessPattern => "Sequential / Random",
             Self::SizeClass => "Small / Large",
             Self::Process => "Process",
+            Self::File => "File / inode",
+            Self::Origin => "Origin",
+            Self::Confidence => "Attribution confidence",
         }
     }
-    fn key(self, io: &CompletedIo) -> String {
+    fn key(self, analyzer: &AnalysisEngine, io: &CompletedIo) -> String {
         match self {
             Self::None => "All I/O".into(),
             Self::Direction => operation_label(io.issue.operation).into(),
             Self::AccessPattern => access_label(io.access_pattern).into(),
             Self::SizeClass => size_label(io.size_class).into(),
             Self::Process => format!("{} ({})", io.issue.comm, io.issue.pid),
+            Self::File | Self::Origin | Self::Confidence => {
+                let graph = analyzer.transaction_for(io);
+                let Some(request) = graph.nodes.iter().find(|node| node.kind == IoNodeKind::BlockRequest) else {
+                    return "Unattributed".into();
+                };
+                let origins = graph.file_origins_for(request.node_id);
+                match self {
+                    Self::File => origins.first().map_or_else(
+                        || "Unattributed".into(),
+                        |origin| origin.path.as_ref().and_then(|path| path.path.clone()).unwrap_or_else(|| origin.file.fallback_label()),
+                    ),
+                    Self::Origin => if origins.is_empty() { "Unknown".into() } else if origins.len() > 1 { "Multiple files".into() } else { "File".into() },
+                    Self::Confidence => origins.first().map_or_else(|| "Unattributed".into(), |origin| edge_confidence_label(origin.confidence).into()),
+                    _ => unreachable!(),
+                }
+            }
         }
     }
 }
@@ -151,15 +198,25 @@ pub struct StudioApp {
     selected_serial: Option<String>,
     preflight: Option<PreflightReport>,
     status: String,
-    diagnostics: VecDeque<String>,
+    diagnostics: VecDeque<DiagnosticRecord>,
     analyzer: AnalysisEngine,
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
     simulator_stop: Option<Arc<AtomicBool>>,
     writer: Option<SessionWriter>,
     session_path: Option<PathBuf>,
+    session_id: Option<String>,
+    log_directory: Option<PathBuf>,
+    include_raw_session_in_bundle: bool,
+    diagnostic_filter: String,
+    capture_log_level: DiagnosticLevel,
+    capabilities: Option<ProbeCapabilities>,
+    host_diagnostic_writer: Option<RotatingJsonl>,
     received_events: u64,
     rejected_records: u64,
+    last_sequence: Option<u64>,
+    agent_footer_seen: bool,
+    agent_graceful: Option<bool>,
     page: Page,
     x_axis: AxisMetric,
     y_axis: AxisMetric,
@@ -185,8 +242,18 @@ impl Default for StudioApp {
             simulator_stop: None,
             writer: None,
             session_path: None,
+            session_id: None,
+            log_directory: None,
+            include_raw_session_in_bundle: false,
+            diagnostic_filter: String::new(),
+            capture_log_level: DiagnosticLevel::Info,
+            capabilities: None,
+            host_diagnostic_writer: None,
             received_events: 0,
             rejected_records: 0,
+            last_sequence: None,
+            agent_footer_seen: false,
+            agent_graceful: None,
             page: Page::Summary,
             x_axis: AxisMetric::TimeMs,
             y_axis: AxisMetric::TotalLatencyMs,
@@ -261,21 +328,37 @@ impl StudioApp {
                 return;
             }
         };
+        self.status = format!("Auto-configured capture → {}", paths.session.display());
+        self.session_id = Some(paths.session_id.clone());
+        self.log_directory = Some(paths.log_directory.clone());
+        let host_writer = match RotatingJsonl::create(paths.host_log.clone()) {
+            Ok(writer) => writer,
+            Err(error) => {
+                self.push_diagnostic(format!("cannot create host diagnostic log: {error}"));
+                return;
+            }
+        };
+        self.host_diagnostic_writer = Some(host_writer);
         if !self.create_session_at(paths.session.clone()) {
+            self.host_diagnostic_writer = None;
             return;
         }
-        self.status = format!("Auto-configured capture → {}", paths.session.display());
         self.reset_analysis();
         self.capture = Some(capture::start_adb(
             self.adb.clone(),
             serial,
             paths.agent,
             paths.bpf_object,
+            paths.session_id,
+            paths.agent_log,
+            diagnostic_level_arg(self.capture_log_level).into(),
             self.tx.clone(),
         ));
     }
 
     fn start_simulator(&mut self) {
+        self.session_id = None;
+        self.log_directory = None;
         let path = match create_default_session_path() {
             Ok(path) => path,
             Err(error) => {
@@ -293,26 +376,38 @@ impl StudioApp {
     }
 
     fn stop(&mut self) {
+        let mut stopping = false;
         if let Some(handle) = self.capture.take() {
             handle.stop();
+            stopping = true;
         }
         if let Some(stop) = self.simulator_stop.take() {
             stop.store(true, Ordering::Release);
+            stopping = true;
         }
-        self.finish_session();
-        self.status = "Stopped".into();
+        if stopping {
+            // The reader thread owns stream completion. Keep the writer alive
+            // until its Ended message so records already in the pipes are not
+            // silently lost during a user-requested stop.
+            self.status = "Stopping capture…".into();
+        } else {
+            self.finish_session();
+            self.status = "Stopped".into();
+        }
     }
 
     fn finish_session(&mut self) {
         if let Some(writer) = self.writer.take() {
             let persisted = writer.persisted;
             let rejected = writer.rejected + self.rejected_records;
+            let dropped = self.received_events.saturating_sub(persisted + rejected);
             let footer = WireRecord::Footer {
                 schema_version: SCHEMA_VERSION,
-                events_seen: self.received_events,
+                events_seen: persisted + dropped + rejected,
                 events_persisted: persisted,
-                events_dropped: self.received_events.saturating_sub(persisted + rejected),
+                events_dropped: dropped,
                 events_rejected: rejected,
+                graceful: Some(self.agent_graceful == Some(true)),
             };
             if let Err(error) = writer.finish(&footer) {
                 self.push_diagnostic(error.to_string());
@@ -321,6 +416,18 @@ impl StudioApp {
     }
 
     fn open_session(&mut self) {
+        if self.capture.is_some() || self.simulator_stop.is_some() {
+            self.stop();
+            self.push_diagnostic_record(host_record(
+                self.session_id.as_deref().unwrap_or("session"),
+                DiagnosticLevel::Info,
+                "session.open",
+                "SESSION_OPEN_DEFERRED",
+                "waiting",
+                Some("capture is stopping; open the session after capture completion".into()),
+            ));
+            return;
+        }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("NDJSON session", &["ndjson"])
             .pick_file()
@@ -328,9 +435,8 @@ impl StudioApp {
             return;
         };
         match session::load_analysis(&path) {
-            Ok((engine, rejected)) => {
-                self.stop();
-                self.recent = engine
+            Ok(loaded) => {
+                self.recent = loaded.engine
                     .completed_ios()
                     .iter()
                     .rev()
@@ -340,10 +446,19 @@ impl StudioApp {
                     .into_iter()
                     .rev()
                     .collect();
-                self.analyzer = engine;
-                self.rejected_records = rejected;
+                self.analyzer = loaded.engine;
+                self.rejected_records = loaded.rejected_lines;
+                self.capabilities = loaded.capabilities;
                 self.session_path = Some(path);
-                self.status = "Offline session loaded".into();
+                self.session_id = None;
+                self.log_directory = None;
+                self.host_diagnostic_writer = None;
+                self.status = match (loaded.integrity_ok, loaded.graceful) {
+                    (Some(true), Some(true)) => "Offline session loaded · integrity OK".into(),
+                    (Some(true), _) => "Offline partial session loaded".into(),
+                    (Some(false), _) => "Offline session loaded · integrity mismatch".into(),
+                    (None, _) => "Offline legacy/partial session loaded".into(),
+                };
             }
             Err(error) => self.push_diagnostic(error.to_string()),
         }
@@ -395,34 +510,95 @@ impl StudioApp {
                 }
                 HostMessage::Status(status) => self.status = status,
                 HostMessage::Record(record) => self.ingest_record(record),
-                HostMessage::Diagnostic(value) => self.push_diagnostic(value),
+                HostMessage::Diagnostic(value) => self.push_diagnostic_record(value),
                 HostMessage::Ended(result) => {
                     if let Err(error) = result {
                         self.push_diagnostic(error);
                     }
+                    if !self.agent_footer_seen {
+                        self.push_diagnostic_record(host_record(
+                            self.session_id.as_deref().unwrap_or("session"),
+                            DiagnosticLevel::Warn,
+                            "session.integrity",
+                            "SESSION_PARTIAL",
+                            "partial",
+                            Some(format!(
+                                "footer missing; last_sequence={}",
+                                self.last_sequence.map_or_else(|| "none".into(), |value| value.to_string())
+                            )),
+                        ));
+                    }
                     self.finish_session();
                     self.capture = None;
                     self.simulator_stop = None;
+                    self.host_diagnostic_writer = None;
                 }
             }
         }
     }
 
     fn ingest_record(&mut self, record: WireRecord) {
-        if let Some(writer) = self.writer.as_mut()
+        if let WireRecord::Footer { graceful, .. } = &record {
+            self.agent_footer_seen = true;
+            self.agent_graceful = *graceful;
+        }
+        if !matches!(&record, WireRecord::Footer { .. })
+            && let Some(writer) = self.writer.as_mut()
             && let Err(error) = writer.append(&record)
         {
             self.rejected_records += 1;
             self.push_diagnostic(error.to_string());
         }
-        if let WireRecord::Event { event, .. } = record {
-            self.received_events += 1;
-            if let Some(completed) = self.analyzer.ingest(event) {
-                if self.recent.len() == MAX_RECENT {
-                    self.recent.pop_front();
+        match record {
+            WireRecord::Event { sequence, event, .. } => {
+                if let Some(previous) = self.last_sequence
+                    && sequence != previous.saturating_add(1)
+                {
+                    self.push_diagnostic_record(host_record(
+                        self.session_id.as_deref().unwrap_or("session"),
+                        DiagnosticLevel::Warn,
+                        "measurement.sequence",
+                        "EVENT_SEQUENCE_GAP",
+                        "degraded",
+                        Some(format!("expected={} actual={sequence}", previous.saturating_add(1))),
+                    ));
                 }
-                self.recent.push_back(completed);
+                self.last_sequence = Some(sequence);
+                self.received_events += 1;
+                if let Some(completed) = self.analyzer.ingest(event) {
+                    if self.recent.len() == MAX_RECENT {
+                        self.recent.pop_front();
+                    }
+                    self.recent.push_back(completed);
+                }
             }
+            WireRecord::Health {
+                emitted_events,
+                kernel_drops,
+                userspace_drops,
+                correlation_ambiguous,
+                correlation_expired,
+                key_reused,
+                ..
+            } => {
+                let mut record = host_record(
+                    self.session_id.as_deref().unwrap_or("session"),
+                    DiagnosticLevel::Info,
+                    "capture.health",
+                    "CAPTURE_HEALTH",
+                    "observed",
+                    Some(format!(
+                        "emitted={emitted_events} kernel_drops={} userspace_drops={userspace_drops} ambiguous={correlation_ambiguous} expired={correlation_expired} key_reused={key_reused}",
+                        kernel_drops.map_or_else(|| "unavailable".into(), |value| value.to_string())
+                    )),
+                );
+                record.count = Some(emitted_events);
+                self.push_diagnostic_record(record);
+            }
+            WireRecord::Capabilities { capabilities, .. } => {
+                self.capabilities = Some(capabilities);
+            }
+            _ => {}
         }
     }
 
@@ -431,14 +607,92 @@ impl StudioApp {
         self.recent.clear();
         self.received_events = 0;
         self.rejected_records = 0;
+        self.last_sequence = None;
+        self.agent_footer_seen = false;
+        self.agent_graceful = None;
+        self.capabilities = None;
         self.selected_pipeline_request = None;
     }
 
     fn push_diagnostic(&mut self, value: String) {
+        let record = host_record(
+            self.session_id.as_deref().unwrap_or("desktop"),
+            DiagnosticLevel::Error,
+            "desktop.operation",
+            "DESKTOP_OPERATION_FAILED",
+            "failed",
+            Some(value),
+        );
+        self.push_diagnostic_record(record);
+    }
+
+    fn push_diagnostic_record(&mut self, value: DiagnosticRecord) {
+        let write_error = self
+            .host_diagnostic_writer
+            .as_mut()
+            .and_then(|writer| writer.append(&value).err());
+        if let Some(error) = write_error {
+            self.host_diagnostic_writer = None;
+            if self.diagnostics.len() == 200 {
+                self.diagnostics.pop_front();
+            }
+            self.diagnostics.push_back(host_record(
+                self.session_id.as_deref().unwrap_or("session"),
+                DiagnosticLevel::Error,
+                "host.diagnostic.write",
+                "LOG_WRITE_FAILED",
+                "failed",
+                Some(error.to_string()),
+            ));
+        }
         if self.diagnostics.len() == 200 {
             self.diagnostics.pop_front();
         }
         self.diagnostics.push_back(value);
+    }
+
+    fn export_diagnostic_bundle(&mut self) {
+        let Some(log_directory) = self.log_directory.clone() else {
+            self.push_diagnostic("No device-capture diagnostics are available".into());
+            return;
+        };
+        let Some(parent) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let destination = parent.join(format!(
+            "android-ebpf-diagnostics-{}",
+            self.session_id.as_deref().unwrap_or("session")
+        ));
+        let metadata = serde_json::json!({
+            "session_id": self.session_id,
+            "capture": {
+                "log_level": diagnostic_level_arg(self.capture_log_level),
+                "last_sequence": self.last_sequence,
+                "agent_footer_seen": self.agent_footer_seen,
+                "agent_graceful": self.agent_graceful,
+                "received_events": self.received_events,
+                "rejected_records": self.rejected_records,
+            },
+            "device_profile": self.preflight.as_ref().map(|value| serde_json::json!({
+                "abi": value.abi,
+                "android_version": value.android_version,
+                "kernel_release": value.kernel_release,
+                "btf": value.btf,
+                "tracefs": value.tracefs,
+                "root": value.root,
+            })),
+            "capabilities": self.capabilities,
+        });
+        match export_bundle(
+            &destination,
+            &log_directory,
+            self.session_path.as_deref(),
+            self.include_raw_session_in_bundle,
+            Some(&metadata),
+        ) {
+            Ok(path) => self.status = format!("Diagnostic bundle exported → {}", path.display()),
+            Err(error) => self.push_diagnostic(error.to_string()),
+        }
     }
 
     fn metrics_ui(&self, ui: &mut egui::Ui) {
@@ -532,13 +786,13 @@ impl StudioApp {
         let mut groups: BTreeMap<String, Vec<[f64; 2]>> = BTreeMap::new();
         for io in samples.iter().rev().take(50_000).rev() {
             let (Some(x), Some(y)) = (
-                self.x_axis.value(io, origin_ns),
-                self.y_axis.value(io, origin_ns),
+                self.x_axis.value(&self.analyzer, io, origin_ns),
+                self.y_axis.value(&self.analyzer, io, origin_ns),
             ) else {
                 continue;
             };
             groups
-                .entry(self.group_by.key(io))
+                .entry(self.group_by.key(&self.analyzer, io))
                 .or_default()
                 .push([x, y]);
         }
@@ -606,6 +860,18 @@ impl StudioApp {
                 "File attribution",
                 format!("{} / {}", summary.attributed_file_ios, summary.file_ios),
             );
+        });
+        ui.add_space(18.0);
+        section_header(
+            ui,
+            "Block attribution health",
+            "Per-request file correlation; ambiguous candidates remain unattributed.",
+        );
+        ui.columns(4, |columns| {
+            summary_card(&mut columns[0], "Exact", summary.attribution.exact.to_string());
+            summary_card(&mut columns[1], "Probable", summary.attribution.probable.to_string());
+            summary_card(&mut columns[2], "Async probable", summary.attribution.probable_async.to_string());
+            summary_card(&mut columns[3], "Unattributed", summary.attribution.unattributed.to_string());
         });
         ui.add_space(18.0);
         section_header(
@@ -693,6 +959,14 @@ impl StudioApp {
         };
         self.selected_pipeline_request = Some(io.issue.request_id);
         let pipeline = self.analyzer.pipeline_for(&io);
+        let graph = self.analyzer.transaction_for(&io);
+        let graph_metrics = graph.metrics();
+        let origins = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == IoNodeKind::BlockRequest)
+            .map(|node| graph.file_origins_for(node.node_id))
+            .unwrap_or_default();
 
         card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -740,7 +1014,55 @@ impl StudioApp {
                         AMBER
                     }),
                 );
+                ui.label(format!(
+                    "Critical path {}",
+                    format_duration(graph_metrics.critical_path_ns)
+                ));
+                if !graph_metrics.unaccounted.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} unaccounted interval(s): {:?}",
+                            graph_metrics.unaccounted.len(),
+                            graph_metrics.unaccounted[0].reason
+                        ))
+                        .color(AMBER),
+                    );
+                }
             });
+        });
+        ui.add_space(10.0);
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("FILE ORIGIN").size(10.0).strong().color(MUTED));
+            if origins.is_empty() {
+                ui.label(RichText::new("Unattributed — no unique evidence").color(AMBER));
+            } else {
+                for origin in &origins {
+                    let label = origin
+                        .path
+                        .as_ref()
+                        .and_then(|path| path.path.clone())
+                        .unwrap_or_else(|| origin.file.fallback_label());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(label).monospace().color(TEXT));
+                        status_pill(ui, edge_confidence_label(origin.confidence), match origin.confidence {
+                            EdgeConfidence::Exact => GREEN,
+                            EdgeConfidence::Probable | EdgeConfidence::ProbableAsync => AMBER,
+                            EdgeConfidence::ContextOnly => MUTED,
+                        });
+                    });
+                }
+            }
+            if let Some(reason) = self.analyzer.why_slow(&io) {
+                ui.separator();
+                ui.label(RichText::new("WHY SLOW?").size(10.0).strong().color(MUTED));
+                ui.label(format!(
+                    "{} is {} above the cohort median ({} samples, {}).",
+                    reason.stage,
+                    format_duration(reason.delta_ns),
+                    reason.cohort_samples,
+                    edge_confidence_label(reason.confidence)
+                ));
+            }
         });
         ui.add_space(10.0);
 
@@ -775,7 +1097,7 @@ impl StudioApp {
                 .striped(true)
                 .spacing([18.0, 8.0])
                 .show(ui, |ui| {
-                    for heading in ["Layer", "Duration", "Confidence", "Source"] {
+                    for heading in ["Layer", "Duration", "Confidence", "Source", "Command"] {
                         ui.strong(heading);
                     }
                     ui.end_row();
@@ -784,9 +1106,55 @@ impl StudioApp {
                         ui.label(format_duration(span.duration_ns()));
                         ui.label(confidence_label(span.confidence));
                         ui.label(&span.source);
+                        let command = match (span.opcode, span.status) {
+                            (Some(opcode), Some(status)) => {
+                                format!("opcode 0x{opcode:02x} · status {status}")
+                            }
+                            (Some(opcode), None) => format!("opcode 0x{opcode:02x}"),
+                            (None, Some(status)) => format!("status {status}"),
+                            (None, None) => "—".into(),
+                        };
+                        ui.label(command);
                         ui.end_row();
                     }
                 });
+        });
+        ui.add_space(10.0);
+        card_frame().show(ui, |ui| {
+            ui.collapsing(
+                format!("Transaction graph · {} nodes / {} edges", graph.nodes.len(), graph.edges.len()),
+                |ui| {
+                    egui::Grid::new("transaction-graph-nodes")
+                        .striped(true)
+                        .spacing([14.0, 7.0])
+                        .show(ui, |ui| {
+                            for heading in ["Node", "Kind", "Duration", "Exclusive", "Origin", "Critical"] {
+                                ui.strong(heading);
+                            }
+                            ui.end_row();
+                            for node in &graph.nodes {
+                                ui.label(node.node_id.to_string());
+                                ui.label(format!("{:?}", node.kind));
+                                ui.label(format_duration(node.duration_ns()));
+                                ui.label(format_duration(graph_metrics.exclusive_ns.get(&node.node_id).copied().unwrap_or(0)));
+                                ui.label(format!("{:?}", node.origin));
+                                ui.label(if graph_metrics.critical_path.contains(&node.node_id) { "●" } else { "" });
+                                ui.end_row();
+                            }
+                        });
+                    ui.separator();
+                    for edge in &graph.edges {
+                        ui.label(format!(
+                            "{} → {} · {:?} · {} · evidence {}",
+                            edge.from_node_id,
+                            edge.to_node_id,
+                            edge.relation,
+                            edge_confidence_label(edge.confidence),
+                            edge.evidence.len()
+                        ));
+                    }
+                },
+            );
         });
     }
 
@@ -816,7 +1184,8 @@ impl StudioApp {
                             "PID",
                             "FD",
                             "Confidence",
-                            "Path",
+                            "Identity",
+                            "Path snapshot",
                         ] {
                             ui.strong(heading);
                         }
@@ -832,7 +1201,8 @@ impl StudioApp {
                             ui.label(file.pid.to_string());
                             ui.label(file.fd.to_string());
                             ui.label(format!("{:?}", file.confidence));
-                            ui.label(file.path.as_deref().unwrap_or("<unresolved>"));
+                            ui.label(file.file_identity.as_ref().map_or_else(|| "<unknown>".into(), |identity| identity.fallback_label()));
+                            ui.label(file.path_snapshot.as_ref().and_then(|snapshot| snapshot.path.as_deref()).or(file.path.as_deref()).unwrap_or("<unresolved>"));
                             ui.end_row();
                         }
                     });
@@ -856,7 +1226,7 @@ impl StudioApp {
                         .show(ui, |ui| {
                             for heading in [
                                 "Time ns", "Op", "Access", "Size", "Bytes", "Sector", "Queue",
-                                "Device", "Total", "PID", "Comm",
+                                "Device", "Total", "File / Origin", "PID", "Comm",
                             ] {
                                 ui.strong(heading);
                             }
@@ -871,12 +1241,99 @@ impl StudioApp {
                                 ui.label(format_latency(io.queue_latency_ns));
                                 ui.label(format_latency(Some(io.device_latency_ns)));
                                 ui.label(format_latency(Some(io.total_latency_ns)));
+                                let graph = self.analyzer.transaction_for(io);
+                                let origins = graph.nodes.iter().find(|node| node.kind == IoNodeKind::BlockRequest).map(|node| graph.file_origins_for(node.node_id)).unwrap_or_default();
+                                ui.label(if origins.is_empty() {
+                                    "Unattributed".into()
+                                } else if origins.len() > 1 {
+                                    format!("{} files", origins.len())
+                                } else {
+                                    origins[0].path.as_ref().and_then(|path| path.path.clone()).unwrap_or_else(|| origins[0].file.fallback_label())
+                                });
                                 ui.label(io.issue.pid.to_string());
                                 ui.label(&io.issue.comm);
                                 ui.end_row();
                             }
                         });
                 });
+        });
+    }
+
+    fn diagnostics_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(
+            ui,
+            "Structured diagnostics",
+            "Capture, probe, decode and correlation records for the current session.",
+        );
+        card_frame().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Filter");
+                ui.text_edit_singleline(&mut self.diagnostic_filter);
+                ui.checkbox(
+                    &mut self.include_raw_session_in_bundle,
+                    "Include raw session in bundle",
+                );
+                if ui
+                    .add_enabled(self.log_directory.is_some(), egui::Button::new("Export diagnostic bundle"))
+                    .clicked()
+                {
+                    self.export_diagnostic_bundle();
+                }
+            });
+        });
+        if let Some(capabilities) = &self.capabilities {
+            ui.add_space(10.0);
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("PROBE STATUS").size(10.0).strong().color(MUTED));
+                egui::Grid::new("probe-status")
+                    .striped(true)
+                    .spacing([14.0, 7.0])
+                    .show(ui, |ui| {
+                        for heading in ["Layer", "Probe", "State", "Format", "Reason"] {
+                            ui.strong(heading);
+                        }
+                        ui.end_row();
+                        for plan in &capabilities.attach_plan {
+                            ui.label(pipeline_layer_label(plan.layer));
+                            ui.label(format!("{}/{}", plan.group, plan.event_or_function));
+                            ui.label(format!("{:?}", plan.state));
+                            ui.label(plan.format_hash.as_deref().unwrap_or("—"));
+                            ui.label(plan.reason.as_deref().unwrap_or(""));
+                            ui.end_row();
+                        }
+                    });
+            });
+        }
+        ui.add_space(10.0);
+        let filter = self.diagnostic_filter.to_ascii_lowercase();
+        card_frame().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("structured-diagnostics")
+                    .striped(true)
+                    .spacing([14.0, 8.0])
+                    .show(ui, |ui| {
+                        for heading in ["Time", "Level", "Component", "Code", "Event", "Outcome", "Detail"] {
+                            ui.strong(heading);
+                        }
+                        ui.end_row();
+                        for record in self.diagnostics.iter().rev().filter(|record| {
+                            filter.is_empty()
+                                || record.component.to_ascii_lowercase().contains(&filter)
+                                || record.code.to_ascii_lowercase().contains(&filter)
+                                || record.event.to_ascii_lowercase().contains(&filter)
+                                || record.correlation_id.is_some_and(|id| id.to_string().contains(&filter))
+                        }) {
+                            ui.label(record.ts_unix_ms.to_string());
+                            ui.label(format!("{:?}", record.level));
+                            ui.label(&record.component);
+                            ui.label(&record.code);
+                            ui.label(&record.event);
+                            ui.label(&record.outcome);
+                            ui.label(record.detail.as_deref().unwrap_or(""));
+                            ui.end_row();
+                        }
+                    });
+            });
         });
     }
 }
@@ -1014,6 +1471,24 @@ impl eframe::App for StudioApp {
                     self.preflight();
                 }
                 ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("LOG LEVEL").size(10.0).color(MUTED));
+                    egui::ComboBox::from_id_salt("capture-log-level")
+                        .selected_text(diagnostic_level_arg(self.capture_log_level))
+                        .show_ui(ui, |ui| {
+                            for level in [
+                                DiagnosticLevel::Info,
+                                DiagnosticLevel::Debug,
+                                DiagnosticLevel::Trace,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.capture_log_level,
+                                    level,
+                                    diagnostic_level_arg(level),
+                                );
+                            }
+                        });
+                });
                 let can_start = self
                     .preflight
                     .as_ref()
@@ -1095,6 +1570,14 @@ impl eframe::App for StudioApp {
                     "File I/O",
                     "Syscall path attribution",
                 );
+                nav_item(
+                    ui,
+                    &mut self.page,
+                    Page::Diagnostics,
+                    "⚙",
+                    "Diagnostics",
+                    "Probe and correlation logs",
+                );
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.label(
@@ -1132,7 +1615,22 @@ impl eframe::App for StudioApp {
                         .max_height(110.0)
                         .show(ui, |ui| {
                             for value in self.diagnostics.iter().rev() {
-                                ui.label(RichText::new(value).monospace().size(10.0).color(RED));
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{:?} {} {} {}",
+                                        value.level,
+                                        value.component,
+                                        value.code,
+                                        value.detail.as_deref().unwrap_or("")
+                                    ))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(match value.level {
+                                        DiagnosticLevel::Error => RED,
+                                        DiagnosticLevel::Warn => AMBER,
+                                        _ => MUTED,
+                                    }),
+                                );
                             }
                         });
                 });
@@ -1154,6 +1652,7 @@ impl eframe::App for StudioApp {
                         Page::Explorer => self.explorer_ui(ui),
                         Page::Events => self.table_ui(ui),
                         Page::Files => self.files_ui(ui),
+                        Page::Diagnostics => self.diagnostics_ui(ui),
                     }
                     if let Some(report) = &self.preflight {
                         ui.add_space(14.0);
@@ -1407,6 +1906,9 @@ fn pipeline_layer_label(value: PipelineLayer) -> &'static str {
         PipelineLayer::Syscall => "UserSpace / Syscall",
         PipelineLayer::Vfs => "Kernel / VFS",
         PipelineLayer::Filesystem => "Kernel / Filesystem",
+        PipelineLayer::PageCache => "Kernel / Page Cache",
+        PipelineLayer::Writeback => "Kernel / Writeback",
+        PipelineLayer::Bio => "Kernel / Bio",
         PipelineLayer::BlockQueue => "Kernel / Block Queue",
         PipelineLayer::BlockDevice => "Kernel / Block Device",
         PipelineLayer::Scsi => "Kernel / SCSI",
@@ -1417,9 +1919,12 @@ fn pipeline_layer_label(value: PipelineLayer) -> &'static str {
 
 fn pipeline_layer_y(value: PipelineLayer) -> f64 {
     match value {
-        PipelineLayer::Syscall => 8.0,
-        PipelineLayer::Vfs => 7.0,
-        PipelineLayer::Filesystem => 6.0,
+        PipelineLayer::Syscall => 11.0,
+        PipelineLayer::Vfs => 10.0,
+        PipelineLayer::Filesystem => 9.0,
+        PipelineLayer::PageCache => 8.0,
+        PipelineLayer::Writeback => 7.0,
+        PipelineLayer::Bio => 6.0,
         PipelineLayer::BlockQueue => 5.0,
         PipelineLayer::BlockDevice => 4.0,
         PipelineLayer::Scsi => 3.0,
@@ -1433,6 +1938,9 @@ fn pipeline_layer_color(value: PipelineLayer) -> Color32 {
         PipelineLayer::Syscall => Color32::from_rgb(108, 174, 255),
         PipelineLayer::Vfs => Color32::from_rgb(88, 211, 181),
         PipelineLayer::Filesystem => Color32::from_rgb(116, 220, 120),
+        PipelineLayer::PageCache => Color32::from_rgb(92, 205, 150),
+        PipelineLayer::Writeback => Color32::from_rgb(174, 205, 92),
+        PipelineLayer::Bio => Color32::from_rgb(219, 210, 96),
         PipelineLayer::BlockQueue => Color32::from_rgb(244, 197, 92),
         PipelineLayer::BlockDevice => Color32::from_rgb(255, 153, 85),
         PipelineLayer::Scsi => Color32::from_rgb(235, 118, 137),
@@ -1447,6 +1955,42 @@ fn confidence_label(value: CorrelationConfidence) -> &'static str {
         CorrelationConfidence::Probable => "Probable",
         CorrelationConfidence::ContextOnly => "Context only",
     }
+}
+
+fn edge_confidence_label(value: EdgeConfidence) -> &'static str {
+    match value {
+        EdgeConfidence::Exact => "Exact",
+        EdgeConfidence::Probable => "Probable",
+        EdgeConfidence::ProbableAsync => "Probable async",
+        EdgeConfidence::ContextOnly => "Context only",
+    }
+}
+
+fn diagnostic_level_arg(value: DiagnosticLevel) -> &'static str {
+    match value {
+        DiagnosticLevel::Trace => "trace",
+        DiagnosticLevel::Debug => "debug",
+        DiagnosticLevel::Info => "info",
+        DiagnosticLevel::Warn => "warn",
+        DiagnosticLevel::Error => "error",
+    }
+}
+
+fn graph_kind_duration_ms(
+    graph: &android_ebpf_protocol::IoTransactionGraph,
+    kind: IoNodeKind,
+) -> Option<f64> {
+    let mut found = false;
+    let duration = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == kind)
+        .map(|node| {
+            found = true;
+            node.duration_ns()
+        })
+        .sum::<u64>();
+    found.then_some(duration as f64 / 1e6)
 }
 
 fn axis_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut AxisMetric) {

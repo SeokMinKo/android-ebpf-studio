@@ -20,6 +20,10 @@ fn release_bundle_artifacts_and_session_path_are_automatic() {
         paths.session.extension().and_then(|value| value.to_str()),
         Some("ndjson")
     );
+    assert!(paths.log_directory.is_dir());
+    assert_eq!(paths.host_log.file_name().unwrap(), "host.jsonl");
+    assert_eq!(paths.agent_log.file_name().unwrap(), "agent.jsonl");
+    assert!(!paths.session_id.is_empty());
     fs::remove_dir_all(root).ok();
 }
 

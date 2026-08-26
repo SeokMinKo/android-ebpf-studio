@@ -307,7 +307,12 @@ impl AdbClient {
         Ok(())
     }
 
-    pub fn start_capture(&self, serial: &str) -> Result<Child, AdbError> {
+    pub fn start_capture(
+        &self,
+        serial: &str,
+        session_id: &str,
+        log_level: &str,
+    ) -> Result<Child, AdbError> {
         let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
         let spec = builder.shell(&[
             REMOTE_AGENT,
@@ -316,6 +321,10 @@ impl AdbClient {
             REMOTE_BPF,
             "--health-interval-ms",
             "1000",
+            "--session-id",
+            session_id,
+            "--log-level",
+            log_level,
         ]);
         Ok(Command::new(spec.program)
             .args(spec.args)

@@ -82,6 +82,28 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
                     CorrelationConfidence::Exact,
                 ),
                 (
+                    if operation == IoOperation::Read {
+                        PipelineLayer::PageCache
+                    } else {
+                        PipelineLayer::Writeback
+                    },
+                    insert_ts.saturating_sub(180_000),
+                    issue_ts.saturating_sub(110_000),
+                    if operation == IoOperation::Read {
+                        "page-cache miss / readahead"
+                    } else {
+                        "buffered writeback"
+                    },
+                    CorrelationConfidence::Probable,
+                ),
+                (
+                    PipelineLayer::Bio,
+                    issue_ts.saturating_sub(100_000),
+                    issue_ts.saturating_sub(40_000),
+                    "bio submit",
+                    CorrelationConfidence::Probable,
+                ),
+                (
                     PipelineLayer::Scsi,
                     issue_ts + 30_000,
                     completion_ts.saturating_sub(20_000),
@@ -114,8 +136,11 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
                     },
                     layer,
                     correlation_id: Some(sequence),
+                    stage_key: None,
                     sector: Some(sector),
                     bytes: Some(bytes),
+                    opcode: None,
+                    status: None,
                     pid: 4242,
                     tid: 4242,
                     name: name.into(),
@@ -198,6 +223,17 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
                         "/data/local/tmp/write.bin".into()
                     }),
                     confidence: AttributionConfidence::Attributed,
+                    file_identity: Some(android_ebpf_protocol::FileIdentity {
+                        fs_device_major: 259,
+                        fs_device_minor: 7,
+                        inode: 10_000 + sequence,
+                        inode_generation: None,
+                        mount_id: Some(1),
+                    }),
+                    path_snapshot: None,
+                    offset: Some(sector.saturating_mul(512)),
+                    io_mode: android_ebpf_protocol::FileIoMode::Buffered,
+                    node_id: Some(1_000_000 + sequence),
                 });
                 tx.send(HostMessage::Record(WireRecord::Event {
                     schema_version: SCHEMA_VERSION,
@@ -211,6 +247,16 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             ts_ns += 5_000_000;
             thread::sleep(Duration::from_millis(5));
         }
+        let events = record_sequence.saturating_sub(1);
+        tx.send(HostMessage::Record(WireRecord::Footer {
+            schema_version: SCHEMA_VERSION,
+            events_seen: events,
+            events_persisted: events,
+            events_dropped: 0,
+            events_rejected: 0,
+            graceful: Some(true),
+        }))
+        .ok();
         tx.send(HostMessage::Ended(Ok(()))).ok();
     });
 }

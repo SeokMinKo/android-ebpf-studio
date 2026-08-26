@@ -2,9 +2,10 @@
 #![no_main]
 
 use android_ebpf_types::{
-    FileStart, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO, KernelEvent,
-    OFFSET_MISSING, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, RawSyscallLayout,
-    TraceLayout,
+    FileStart, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO,
+    KIND_PIPELINE, KernelEvent, LAYER_FILESYSTEM, LAYER_SCSI, LAYER_UFS, LAYER_UIC, OFFSET_MISSING,
+    OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END, PHASE_INSTANT,
+    PipelineTraceLayout, RawSyscallLayout, TraceLayout,
 };
 use aya_ebpf::{
     helpers::{
@@ -26,6 +27,21 @@ static INSERT_LAYOUT: Array<TraceLayout> = Array::with_max_entries(1, 0);
 
 #[map]
 static RAW_SYSCALL_LAYOUT: Array<RawSyscallLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static UFS_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static SCSI_START_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static SCSI_DONE_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static FS_START_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static FS_DONE_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0);
 
 #[map]
 static FILE_STARTS: HashMap<u64, FileStart> = HashMap::with_max_entries(32_768, 0);
@@ -56,6 +72,160 @@ pub fn raw_sys_enter(ctx: TracePointContext) -> u32 {
 #[tracepoint]
 pub fn raw_sys_exit(ctx: TracePointContext) -> u32 {
     capture_sys_exit(ctx).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn ufs_command(ctx: TracePointContext) -> u32 {
+    // A task tag is controller-local and reusable. Until a controller identity
+    // is captured alongside it, the pair is measured but cannot be advertised
+    // as an exact globally scoped correlation key.
+    emit_pipeline_dynamic(ctx, LAYER_UFS, &UFS_LAYOUT, false).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn scsi_dispatch_start(ctx: TracePointContext) -> u32 {
+    emit_pipeline(ctx, LAYER_SCSI, PHASE_BEGIN, &SCSI_START_LAYOUT, true).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn scsi_dispatch_done(ctx: TracePointContext) -> u32 {
+    emit_pipeline(ctx, LAYER_SCSI, PHASE_END, &SCSI_DONE_LAYOUT, true).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn fs_data_start(ctx: TracePointContext) -> u32 {
+    emit_pipeline(ctx, LAYER_FILESYSTEM, PHASE_BEGIN, &FS_START_LAYOUT, false).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn fs_data_done(ctx: TracePointContext) -> u32 {
+    emit_pipeline(ctx, LAYER_FILESYSTEM, PHASE_END, &FS_DONE_LAYOUT, false).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn ufs_context(ctx: TracePointContext) -> u32 {
+    emit_context(ctx, LAYER_UIC).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn fs_context(ctx: TracePointContext) -> u32 {
+    emit_context(ctx, LAYER_FILESYSTEM).unwrap_or(0)
+}
+
+fn emit_context(_ctx: TracePointContext, layer: u8) -> Result<u32, i32> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let event = KernelEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        start_ts_ns: 0,
+        request_id: 0,
+        sector: 0,
+        requested_bytes: 0,
+        return_value: 0,
+        device: 0,
+        sectors: 0,
+        bytes: 0,
+        pid: (pid_tgid >> 32) as u32,
+        tid: pid_tgid as u32,
+        cpu: unsafe { bpf_get_smp_processor_id() },
+        status: 0,
+        fd: -1,
+        kind: KIND_PIPELINE,
+        operation: OP_OTHER,
+        correlation_exact: 0,
+        pipeline_layer: layer,
+        pipeline_phase: PHASE_INSTANT,
+        reserved: 0,
+        comm: bpf_get_current_comm().unwrap_or([0; 16]),
+    };
+    let mut entry = EVENTS.reserve::<KernelEvent>(0).ok_or(2_i32)?;
+    entry.write(event);
+    entry.submit(0);
+    Ok(0)
+}
+
+fn emit_pipeline_dynamic(
+    ctx: TracePointContext,
+    layer: u8,
+    layouts: &Array<PipelineTraceLayout>,
+    exact: bool,
+) -> Result<u32, i32> {
+    let layout = layouts.get(0).ok_or(1_i32)?;
+    let phase = if layout.state_offset == OFFSET_MISSING {
+        PHASE_INSTANT
+    } else {
+        let location = read_u32(&ctx, layout.state_offset)?;
+        let offset = (location & 0xffff) as usize;
+        match read_u8_at(&ctx, offset)? {
+            b's' | b'S' => PHASE_BEGIN,
+            b'c' | b'C' => PHASE_END,
+            _ => PHASE_INSTANT,
+        }
+    };
+    emit_pipeline(ctx, layer, phase, layouts, exact)
+}
+
+fn emit_pipeline(
+    ctx: TracePointContext,
+    layer: u8,
+    phase: u8,
+    layouts: &Array<PipelineTraceLayout>,
+    exact: bool,
+) -> Result<u32, i32> {
+    let layout = layouts.get(0).ok_or(1_i32)?;
+    let request_id = if layout.key_size == 8 {
+        read_u64(&ctx, layout.key_offset)?
+    } else {
+        read_u32(&ctx, layout.key_offset)? as u64
+    };
+    let sector = if layout.sector_offset == OFFSET_MISSING {
+        0
+    } else {
+        read_u64(&ctx, layout.sector_offset)?
+    };
+    let bytes = if layout.bytes_offset == OFFSET_MISSING {
+        0
+    } else {
+        read_u32(&ctx, layout.bytes_offset)?
+    };
+    let operation = if layout.operation_offset == OFFSET_MISSING {
+        OP_OTHER
+    } else {
+        read_u8(&ctx, layout.operation_offset)?
+    };
+    let status = if layout.status_offset == OFFSET_MISSING {
+        0
+    } else {
+        read_i32(&ctx, layout.status_offset)?
+    };
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let event = KernelEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        start_ts_ns: 0,
+        request_id,
+        sector,
+        requested_bytes: 0,
+        return_value: 0,
+        device: 0,
+        sectors: 0,
+        bytes,
+        pid: (pid_tgid >> 32) as u32,
+        tid: pid_tgid as u32,
+        cpu: unsafe { bpf_get_smp_processor_id() },
+        status,
+        fd: -1,
+        kind: KIND_PIPELINE,
+        operation,
+        correlation_exact: u8::from(exact),
+        pipeline_layer: layer,
+        pipeline_phase: phase,
+        reserved: u8::from(layout.status_offset != OFFSET_MISSING)
+            | (u8::from(layout.operation_offset != OFFSET_MISSING) << 1),
+        comm: bpf_get_current_comm().unwrap_or([0; 16]),
+    };
+    let mut entry = EVENTS.reserve::<KernelEvent>(0).ok_or(2_i32)?;
+    entry.write(event);
+    entry.submit(0);
+    Ok(0)
 }
 
 fn emit(ctx: TracePointContext, kind: u8, layouts: &Array<TraceLayout>) -> Result<u32, i32> {
@@ -102,6 +272,8 @@ fn emit(ctx: TracePointContext, kind: u8, layouts: &Array<TraceLayout>) -> Resul
         kind,
         operation,
         correlation_exact,
+        pipeline_layer: 0,
+        pipeline_phase: 0,
         reserved: 0,
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
     };
@@ -164,6 +336,8 @@ fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
         kind: KIND_FILE_IO,
         operation: start.operation,
         correlation_exact: 0,
+        pipeline_layer: 0,
+        pipeline_phase: 0,
         reserved: 0,
         comm: start.comm,
     };
@@ -175,6 +349,10 @@ fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
 
 fn read_u8(ctx: &TracePointContext, offset: u16) -> Result<u8, i32> {
     unsafe { ctx.read_at(offset as usize) }
+}
+
+fn read_u8_at(ctx: &TracePointContext, offset: usize) -> Result<u8, i32> {
+    unsafe { ctx.read_at(offset) }
 }
 
 fn read_u32(ctx: &TracePointContext, offset: u16) -> Result<u32, i32> {

@@ -5,7 +5,7 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AnalysisEngine, AnalysisSummary, SessionError, SessionReader, StorageEvent, WireRecord,
+    AnalysisEngine, AnalysisSummary, ProbeCapabilities, SessionError, SessionReader, StorageEvent, WireRecord,
     write_record,
 };
 
@@ -39,13 +39,27 @@ impl SessionWriter {
     }
 }
 
-pub fn load_analysis(path: &Path) -> Result<(AnalysisEngine, u64), SessionError> {
+pub struct LoadedAnalysis {
+    pub engine: AnalysisEngine,
+    pub rejected_lines: u64,
+    pub integrity_ok: Option<bool>,
+    pub graceful: Option<bool>,
+    pub capabilities: Option<ProbeCapabilities>,
+}
+
+pub fn load_analysis(path: &Path) -> Result<LoadedAnalysis, SessionError> {
     let loaded = SessionReader::default().read(BufReader::new(File::open(path)?))?;
     let mut engine = AnalysisEngine::new();
     for event in loaded.events {
         engine.ingest(event);
     }
-    Ok((engine, loaded.rejected_lines))
+    Ok(LoadedAnalysis {
+        engine,
+        rejected_lines: loaded.rejected_lines,
+        integrity_ok: loaded.integrity_ok,
+        graceful: loaded.graceful,
+        capabilities: loaded.capabilities,
+    })
 }
 
 pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<PathBuf> {
@@ -70,6 +84,7 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
         "requested_bytes",
         "completed_bytes",
         "status",
+        "details_json",
     ])?;
     for event in loaded.events {
         match &event {
@@ -91,6 +106,7 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 String::new(),
                 String::new(),
                 String::new(),
+                serde_json::to_string(issue)?,
             ])?,
             StorageEvent::BlockInsert(insert) => writer.write_record([
                 "block_insert".to_owned(),
@@ -110,6 +126,7 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 String::new(),
                 String::new(),
                 String::new(),
+                serde_json::to_string(insert)?,
             ])?,
             StorageEvent::BlockComplete(complete) => writer.write_record([
                 "block_complete".to_owned(),
@@ -129,6 +146,7 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 String::new(),
                 String::new(),
                 complete.status.to_string(),
+                serde_json::to_string(complete)?,
             ])?,
             StorageEvent::FileIo(file) => writer.write_record([
                 "file_io".to_owned(),
@@ -148,6 +166,7 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 file.requested_bytes.to_string(),
                 file.completed_bytes.to_string(),
                 String::new(),
+                serde_json::to_string(file)?,
             ])?,
             StorageEvent::Pipeline(stage) => writer.write_record([
                 format!("pipeline_{:?}", stage.layer).to_lowercase(),
@@ -176,6 +195,50 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 String::new(),
                 String::new(),
                 String::new(),
+                serde_json::to_string(stage)?,
+            ])?,
+            StorageEvent::Node(node) => writer.write_record([
+                format!("node_{:?}", node.kind).to_lowercase(),
+                node.end_or_start().to_string(),
+                node.start_ts_ns.to_string(),
+                node.node_id.to_string(),
+                node.file
+                    .as_ref()
+                    .map(|file| format!("{}:{}:{}", file.fs_device_major, file.fs_device_minor, file.inode))
+                    .unwrap_or_default(),
+                String::new(),
+                node.bytes.map(|value| value.to_string()).unwrap_or_default(),
+                node.operation.map(|value| format!("{value:?}").to_lowercase()).unwrap_or_default(),
+                node.pid.to_string(),
+                node.tid.to_string(),
+                node.name.clone(),
+                String::new(),
+                node.path.as_ref().and_then(|value| value.path.clone()).unwrap_or_default(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                serde_json::to_string(node)?,
+            ])?,
+            StorageEvent::Edge(edge) => writer.write_record([
+                "edge".to_owned(),
+                String::new(),
+                String::new(),
+                edge.edge_id.to_string(),
+                format!("{}->{}", edge.from_node_id, edge.to_node_id),
+                String::new(),
+                String::new(),
+                format!("{:?}", edge.relation).to_lowercase(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                format!("{:?}", edge.confidence).to_lowercase(),
+                String::new(),
+                String::new(),
+                String::new(),
+                serde_json::to_string(edge)?,
             ])?,
         }
         engine.ingest(event);
@@ -213,6 +276,11 @@ fn write_summary(path: &Path, summary: &AnalysisSummary) -> anyhow::Result<()> {
             "attributed_file_ios",
             summary.attributed_file_ios.to_string(),
         ),
+        ("block_attribution_exact", summary.attribution.exact.to_string()),
+        ("block_attribution_probable", summary.attribution.probable.to_string()),
+        ("block_attribution_probable_async", summary.attribution.probable_async.to_string()),
+        ("block_attribution_unattributed", summary.attribution.unattributed.to_string()),
+        ("block_attribution_multi_origin", summary.attribution.multi_origin.to_string()),
         ("max_queue_depth", summary.max_queue_depth.to_string()),
         (
             "p50_latency_ns",
