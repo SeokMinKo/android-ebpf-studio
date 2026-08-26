@@ -3,5 +3,6 @@ pub mod adb;
 pub mod app;
 pub mod artifacts;
 pub mod capture;
+pub mod diagnostics;
 pub mod session;
 pub mod simulator;

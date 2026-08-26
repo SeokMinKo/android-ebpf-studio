@@ -1,13 +1,13 @@
 //! Platform-independent event protocol and storage analysis core.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     io::{self, BufRead, Write},
 };
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 3;
+pub const SCHEMA_VERSION: u16 = 4;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 
@@ -67,6 +67,56 @@ pub enum AttributionConfidence {
     System,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FileIdentity {
+    pub fs_device_major: u32,
+    pub fs_device_minor: u32,
+    pub inode: u64,
+    #[serde(default)]
+    pub inode_generation: Option<u32>,
+    #[serde(default)]
+    pub mount_id: Option<u64>,
+}
+
+impl FileIdentity {
+    pub fn fallback_label(&self) -> String {
+        format!(
+            "<inode {}:{}:{}>",
+            self.fs_device_major, self.fs_device_minor, self.inode
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathSource {
+    BpfDPath,
+    ProcFd,
+    InodeOnly,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathSnapshot {
+    pub path: Option<String>,
+    pub source: PathSource,
+    pub captured_ts_ns: u64,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FileIoMode {
+    #[default]
+    Unknown,
+    Buffered,
+    Direct,
+    Sync,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileIo {
     pub start_ts_ns: u64,
@@ -80,6 +130,479 @@ pub struct FileIo {
     pub comm: String,
     pub path: Option<String>,
     pub confidence: AttributionConfidence,
+    #[serde(default)]
+    pub file_identity: Option<FileIdentity>,
+    #[serde(default)]
+    pub path_snapshot: Option<PathSnapshot>,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub io_mode: FileIoMode,
+    #[serde(default)]
+    pub node_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoNodeKind {
+    FileOperation,
+    Syscall,
+    Vfs,
+    Filesystem,
+    PageCache,
+    Writeback,
+    Bio,
+    BlockQueue,
+    BlockRequest,
+    ScsiCommand,
+    UfsCommand,
+    UicContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoOrigin {
+    File,
+    FilesystemMetadata,
+    Journal,
+    GarbageCollection,
+    Checkpoint,
+    Writeback,
+    Readahead,
+    Swap,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeConfidence {
+    Exact,
+    Probable,
+    ProbableAsync,
+    ContextOnly,
+}
+
+impl EdgeConfidence {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Exact => 3,
+            Self::Probable => 2,
+            Self::ProbableAsync => 1,
+            Self::ContextOnly => 0,
+        }
+    }
+
+    fn weakest(self, other: Self) -> Self {
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoRelation {
+    Calls,
+    Contains,
+    Submits,
+    SplitsInto,
+    MergedInto,
+    RemapsTo,
+    Dispatches,
+    CompletesInto,
+    CausesAsync,
+    ContextFor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrelationEvidence {
+    pub match_type: String,
+    #[serde(default)]
+    pub opaque_key: Option<u64>,
+    #[serde(default)]
+    pub delta_ns: Option<u64>,
+    #[serde(default)]
+    pub candidate_count: u32,
+    #[serde(default)]
+    pub sector_match: bool,
+    #[serde(default)]
+    pub bytes_match: bool,
+    #[serde(default)]
+    pub task_match: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoNode {
+    pub node_id: u64,
+    /// Owning block transaction when the capture source can identify it.
+    /// This is deliberately separate from `node_id`: pointers and tags may be
+    /// reused, while a transaction is scoped to the current boot/session.
+    #[serde(default)]
+    pub transaction_id: Option<u64>,
+    pub kind: IoNodeKind,
+    pub start_ts_ns: u64,
+    #[serde(default)]
+    pub end_ts_ns: Option<u64>,
+    pub origin: IoOrigin,
+    #[serde(default)]
+    pub file: Option<FileIdentity>,
+    #[serde(default)]
+    pub path: Option<PathSnapshot>,
+    #[serde(default)]
+    pub operation: Option<IoOperation>,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub tid: u32,
+    pub name: String,
+}
+
+impl IoNode {
+    pub fn end_or_start(&self) -> u64 {
+        self.end_ts_ns.unwrap_or(self.start_ts_ns)
+    }
+
+    pub fn duration_ns(&self) -> u64 {
+        self.end_or_start().saturating_sub(self.start_ts_ns)
+    }
+
+    fn additive(&self) -> bool {
+        self.kind != IoNodeKind::UicContext
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoEdge {
+    pub edge_id: u64,
+    #[serde(default)]
+    pub transaction_id: Option<u64>,
+    pub from_node_id: u64,
+    pub to_node_id: u64,
+    pub relation: IoRelation,
+    pub confidence: EdgeConfidence,
+    #[serde(default)]
+    pub evidence: Vec<CorrelationEvidence>,
+}
+
+impl IoEdge {
+    pub fn exact(edge_id: u64, from_node_id: u64, to_node_id: u64, relation: IoRelation) -> Self {
+        Self {
+            edge_id,
+            transaction_id: None,
+            from_node_id,
+            to_node_id,
+            relation,
+            confidence: EdgeConfidence::Exact,
+            evidence: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOriginView {
+    pub file: FileIdentity,
+    pub path: Option<PathSnapshot>,
+    pub confidence: EdgeConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GraphMetrics {
+    pub start_ts_ns: u64,
+    pub end_ts_ns: u64,
+    pub total_ns: u64,
+    pub accounted_ns: u64,
+    pub unaccounted_ns: u64,
+    pub exclusive_ns: BTreeMap<u64, u64>,
+    pub critical_path: Vec<u64>,
+    pub critical_path_ns: u64,
+    pub unaccounted: Vec<UnaccountedInterval>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnaccountedReason {
+    ProbeUnavailable,
+    EventLost,
+    Ambiguous,
+    ClockInvalid,
+    VendorInternal,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnaccountedInterval {
+    pub start_ts_ns: u64,
+    pub end_ts_ns: u64,
+    pub reason: UnaccountedReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AttributionSummary {
+    pub exact: u64,
+    pub probable: u64,
+    pub probable_async: u64,
+    pub unattributed: u64,
+    pub multi_origin: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlowReason {
+    pub node_kind: IoNodeKind,
+    pub stage: String,
+    pub selected_ns: u64,
+    pub cohort_median_ns: u64,
+    pub delta_ns: u64,
+    pub confidence: EdgeConfidence,
+    pub cohort_samples: usize,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum GraphError {
+    #[error("node {0} already exists")]
+    DuplicateNode(u64),
+    #[error("edge {0} already exists")]
+    DuplicateEdge(u64),
+    #[error("node {0} does not exist")]
+    MissingNode(u64),
+    #[error("node {0} has an invalid time range")]
+    InvalidTime(u64),
+    #[error("edge would introduce a graph cycle")]
+    Cycle,
+    #[error("edge {0} points backward in monotonic time")]
+    ReverseTime(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoTransactionGraph {
+    pub transaction_id: u64,
+    pub nodes: Vec<IoNode>,
+    pub edges: Vec<IoEdge>,
+}
+
+impl IoTransactionGraph {
+    pub fn new(transaction_id: u64) -> Self {
+        Self {
+            transaction_id,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    pub fn add_node(&mut self, node: IoNode) -> Result<(), GraphError> {
+        if node.end_or_start() < node.start_ts_ns {
+            return Err(GraphError::InvalidTime(node.node_id));
+        }
+        if self.nodes.iter().any(|value| value.node_id == node.node_id) {
+            return Err(GraphError::DuplicateNode(node.node_id));
+        }
+        self.nodes.push(node);
+        Ok(())
+    }
+
+    pub fn add_edge(&mut self, edge: IoEdge) -> Result<(), GraphError> {
+        if self.edges.iter().any(|value| value.edge_id == edge.edge_id) {
+            return Err(GraphError::DuplicateEdge(edge.edge_id));
+        }
+        for node_id in [edge.from_node_id, edge.to_node_id] {
+            if !self.nodes.iter().any(|value| value.node_id == node_id) {
+                return Err(GraphError::MissingNode(node_id));
+            }
+        }
+        let from = self
+            .nodes
+            .iter()
+            .find(|value| value.node_id == edge.from_node_id)
+            .expect("validated source node");
+        let to = self
+            .nodes
+            .iter()
+            .find(|value| value.node_id == edge.to_node_id)
+            .expect("validated target node");
+        if from.start_ts_ns > to.end_or_start() {
+            return Err(GraphError::ReverseTime(edge.edge_id));
+        }
+        if edge.from_node_id == edge.to_node_id
+            || self.reachable(edge.to_node_id, edge.from_node_id)
+        {
+            return Err(GraphError::Cycle);
+        }
+        self.edges.push(edge);
+        Ok(())
+    }
+
+    fn reachable(&self, start: u64, target: u64) -> bool {
+        let mut queue = VecDeque::from([start]);
+        let mut seen = HashSet::new();
+        while let Some(node) = queue.pop_front() {
+            if node == target {
+                return true;
+            }
+            if !seen.insert(node) {
+                continue;
+            }
+            queue.extend(
+                self.edges
+                    .iter()
+                    .filter(|edge| edge.from_node_id == node)
+                    .map(|edge| edge.to_node_id),
+            );
+        }
+        false
+    }
+
+    pub fn file_origins_for(&self, node_id: u64) -> Vec<FileOriginView> {
+        let mut queue = VecDeque::from([(node_id, EdgeConfidence::Exact)]);
+        let mut seen = HashSet::new();
+        let mut origins = BTreeMap::<FileIdentity, FileOriginView>::new();
+        while let Some((current, confidence)) = queue.pop_front() {
+            if !seen.insert((current, confidence)) {
+                continue;
+            }
+            if let Some(node) = self.nodes.iter().find(|node| node.node_id == current)
+                && let Some(file) = &node.file
+            {
+                let candidate = FileOriginView {
+                    file: file.clone(),
+                    path: node.path.clone(),
+                    confidence,
+                };
+                origins
+                    .entry(file.clone())
+                    .and_modify(|existing| {
+                        if candidate.confidence.rank() > existing.confidence.rank() {
+                            *existing = candidate.clone();
+                        }
+                    })
+                    .or_insert(candidate);
+            }
+            for edge in self.edges.iter().filter(|edge| edge.to_node_id == current) {
+                queue.push_back((edge.from_node_id, confidence.weakest(edge.confidence)));
+            }
+        }
+        origins.into_values().collect()
+    }
+
+    pub fn metrics(&self) -> GraphMetrics {
+        if self.nodes.is_empty() {
+            return GraphMetrics::default();
+        }
+        let start_ts_ns = self
+            .nodes
+            .iter()
+            .map(|node| node.start_ts_ns)
+            .min()
+            .unwrap_or_default();
+        let end_ts_ns = self
+            .nodes
+            .iter()
+            .map(IoNode::end_or_start)
+            .max()
+            .unwrap_or(start_ts_ns);
+        let intervals: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| node.additive())
+            .map(|node| (node.start_ts_ns, node.end_or_start()))
+            .collect();
+        let accounted_ns = union_duration(&intervals);
+        let mut exclusive_ns = BTreeMap::new();
+        for node in &self.nodes {
+            if !node.additive() {
+                exclusive_ns.insert(node.node_id, 0);
+                continue;
+            }
+            let end = node.end_or_start();
+            let children: Vec<_> = self
+                .edges
+                .iter()
+                .filter(|edge| edge.from_node_id == node.node_id)
+                .filter_map(|edge| {
+                    self.nodes
+                        .iter()
+                        .find(|child| child.node_id == edge.to_node_id)
+                })
+                .filter(|child| child.additive())
+                .filter_map(|child| {
+                    let start = child.start_ts_ns.max(node.start_ts_ns);
+                    let child_end = child.end_or_start().min(end);
+                    (child_end >= start).then_some((start, child_end))
+                })
+                .collect();
+            exclusive_ns.insert(
+                node.node_id,
+                node.duration_ns().saturating_sub(union_duration(&children)),
+            );
+        }
+        let (critical_path, critical_path_ns) = self.longest_path(&exclusive_ns);
+        let total_ns = end_ts_ns.saturating_sub(start_ts_ns);
+        GraphMetrics {
+            start_ts_ns,
+            end_ts_ns,
+            total_ns,
+            accounted_ns: accounted_ns.min(total_ns),
+            unaccounted_ns: total_ns.saturating_sub(accounted_ns.min(total_ns)),
+            exclusive_ns,
+            critical_path,
+            critical_path_ns,
+            unaccounted: uncovered_intervals(start_ts_ns, end_ts_ns, &intervals),
+        }
+    }
+
+    fn longest_path(&self, weights: &BTreeMap<u64, u64>) -> (Vec<u64>, u64) {
+        let mut indegree = HashMap::<u64, usize>::new();
+        for node in &self.nodes {
+            indegree.insert(node.node_id, 0);
+        }
+        for edge in self
+            .edges
+            .iter()
+            .filter(|edge| edge.confidence != EdgeConfidence::ContextOnly)
+        {
+            *indegree.entry(edge.to_node_id).or_default() += 1;
+        }
+        let mut queue: VecDeque<_> = indegree
+            .iter()
+            .filter_map(|(&id, &degree)| (degree == 0).then_some(id))
+            .collect();
+        let mut score = HashMap::<u64, u64>::new();
+        let mut previous = HashMap::<u64, u64>::new();
+        while let Some(id) = queue.pop_front() {
+            let duration = weights.get(&id).copied().unwrap_or(0);
+            score.entry(id).or_insert(duration);
+            let base = score[&id];
+            for edge in self.edges.iter().filter(|edge| {
+                edge.from_node_id == id && edge.confidence != EdgeConfidence::ContextOnly
+            }) {
+                let child = weights.get(&edge.to_node_id).copied().unwrap_or(0);
+                let candidate = base.saturating_add(child);
+                if candidate > score.get(&edge.to_node_id).copied().unwrap_or(0) {
+                    score.insert(edge.to_node_id, candidate);
+                    previous.insert(edge.to_node_id, id);
+                }
+                if let Some(value) = indegree.get_mut(&edge.to_node_id) {
+                    *value = value.saturating_sub(1);
+                    if *value == 0 {
+                        queue.push_back(edge.to_node_id);
+                    }
+                }
+            }
+        }
+        let Some((&end, &value)) = score.iter().max_by_key(|(_, value)| *value) else {
+            return (Vec::new(), 0);
+        };
+        let mut path = vec![end];
+        let mut current = end;
+        while let Some(&parent) = previous.get(&current) {
+            path.push(parent);
+            current = parent;
+        }
+        path.reverse();
+        (path, value)
+    }
 }
 
 /// A storage-stack layer. `KernelSpace` is intentionally not a value: it is a
@@ -90,6 +613,9 @@ pub enum PipelineLayer {
     Syscall,
     Vfs,
     Filesystem,
+    PageCache,
+    Writeback,
+    Bio,
     BlockQueue,
     BlockDevice,
     Scsi,
@@ -123,10 +649,18 @@ pub struct PipelineObservation {
     pub layer: PipelineLayer,
     #[serde(default)]
     pub correlation_id: Option<u64>,
+    /// Stage-local command/tag identity. It can pair begin/end exactly inside
+    /// one layer but does not by itself prove a block-request association.
+    #[serde(default)]
+    pub stage_key: Option<u64>,
     #[serde(default)]
     pub sector: Option<u64>,
     #[serde(default)]
     pub bytes: Option<u32>,
+    #[serde(default)]
+    pub opcode: Option<u32>,
+    #[serde(default)]
+    pub status: Option<i32>,
     #[serde(default)]
     pub pid: u32,
     #[serde(default)]
@@ -143,6 +677,10 @@ pub struct PipelineSpan {
     pub name: String,
     pub confidence: CorrelationConfidence,
     pub source: String,
+    #[serde(default)]
+    pub opcode: Option<u32>,
+    #[serde(default)]
+    pub status: Option<i32>,
 }
 
 impl PipelineSpan {
@@ -179,6 +717,8 @@ pub enum StorageEvent {
     BlockComplete(BlockComplete),
     FileIo(FileIo),
     Pipeline(PipelineObservation),
+    Node(IoNode),
+    Edge(IoEdge),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +746,100 @@ pub struct ProbeCapabilities {
     pub vfs_probe_candidates: Vec<String>,
     #[serde(default)]
     pub pipeline_layers: Vec<PipelineLayer>,
+    #[serde(default)]
+    pub attach_plan: Vec<ProbePlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbePlan {
+    pub layer: PipelineLayer,
+    pub probe_kind: String,
+    pub group: String,
+    pub event_or_function: String,
+    pub state: CapabilityState,
+    #[serde(default)]
+    pub format_hash: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityState {
+    Measured,
+    Derived,
+    Context,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProbeHealth {
+    pub emitted: u64,
+    pub reserve_failures: u64,
+    pub paired: u64,
+    pub unpaired: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticRecord {
+    pub schema_version: u16,
+    pub ts_unix_ms: i64,
+    pub level: DiagnosticLevel,
+    pub component: String,
+    pub event: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub boot_id: String,
+    pub outcome: String,
+    pub code: String,
+    #[serde(default)]
+    pub correlation_id: Option<u64>,
+    #[serde(default)]
+    pub node_id: Option<u64>,
+    #[serde(default)]
+    pub probe: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub count: Option<u64>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl DiagnosticRecord {
+    pub fn bounded(mut self) -> Self {
+        truncate_string(&mut self.component, 128);
+        truncate_string(&mut self.event, 128);
+        truncate_string(&mut self.session_id, 128);
+        truncate_string(&mut self.boot_id, 128);
+        truncate_string(&mut self.outcome, 64);
+        truncate_string(&mut self.code, 128);
+        if let Some(probe) = &mut self.probe {
+            truncate_string(probe, 256);
+        }
+        if let Some(detail) = &mut self.detail
+            && detail.len() > 4096
+        {
+            detail.truncate(detail.floor_char_boundary(4096));
+        }
+        self
+    }
+}
+
+fn truncate_string(value: &mut String, limit: usize) {
+    if value.len() > limit {
+        value.truncate(value.floor_char_boundary(limit));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,8 +863,16 @@ pub enum WireRecord {
     Health {
         schema_version: u16,
         emitted_events: u64,
-        kernel_drops: u64,
+        kernel_drops: Option<u64>,
         userspace_drops: u64,
+        #[serde(default)]
+        probe_health: BTreeMap<String, ProbeHealth>,
+        #[serde(default)]
+        correlation_ambiguous: u64,
+        #[serde(default)]
+        correlation_expired: u64,
+        #[serde(default)]
+        key_reused: u64,
     },
     Footer {
         schema_version: u16,
@@ -238,6 +880,8 @@ pub enum WireRecord {
         events_persisted: u64,
         events_dropped: u64,
         events_rejected: u64,
+        #[serde(default)]
+        graceful: Option<bool>,
     },
 }
 
@@ -250,6 +894,8 @@ pub struct SessionLoad {
     pub footer: Option<WireRecord>,
     pub total_lines: u64,
     pub rejected_lines: u64,
+    pub integrity_ok: Option<bool>,
+    pub graceful: Option<bool>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -294,7 +940,25 @@ impl SessionReader {
                 }
                 Ok(WireRecord::Event { event, .. }) => loaded.events.push(event),
                 Ok(record @ WireRecord::Health { .. }) => loaded.health.push(record),
-                Ok(record @ WireRecord::Footer { .. }) => loaded.footer = Some(record),
+                Ok(
+                    record @ WireRecord::Footer {
+                        events_seen,
+                        events_persisted,
+                        events_dropped,
+                        events_rejected,
+                        graceful,
+                        ..
+                    },
+                ) => {
+                    loaded.integrity_ok = Some(
+                        events_seen
+                            == events_persisted
+                                .saturating_add(events_dropped)
+                                .saturating_add(events_rejected),
+                    );
+                    loaded.graceful = graceful;
+                    loaded.footer = Some(record);
+                }
                 Err(_) => loaded.rejected_lines += 1,
             }
         }
@@ -593,6 +1257,8 @@ pub struct AnalysisSummary {
     pub idle_ns: u64,
     pub file_ios: u64,
     pub attributed_file_ios: u64,
+    #[serde(default)]
+    pub attribution: AttributionSummary,
     pub category_summaries: Vec<CategorySummary>,
 }
 
@@ -634,6 +1300,10 @@ pub struct AnalysisEngine {
     completed: Vec<CompletedIo>,
     file_ios: Vec<FileIo>,
     pipeline_observations: Vec<PipelineObservation>,
+    pending_pipeline: HashMap<(PipelineLayer, u64, String), PipelineObservation>,
+    ambiguous_pipeline: HashMap<(PipelineLayer, u64, String), u64>,
+    graph_nodes: Vec<IoNode>,
+    graph_edges: Vec<IoEdge>,
 }
 
 impl AnalysisEngine {
@@ -656,6 +1326,10 @@ impl AnalysisEngine {
             completed: Vec::new(),
             file_ios: Vec::new(),
             pipeline_observations: Vec::new(),
+            pending_pipeline: HashMap::new(),
+            ambiguous_pipeline: HashMap::new(),
+            graph_nodes: Vec::new(),
+            graph_edges: Vec::new(),
         }
     }
 
@@ -721,8 +1395,11 @@ impl AnalysisEngine {
                         phase: PipelinePhase::Span,
                         layer: PipelineLayer::Syscall,
                         correlation_id: None,
+                        stage_key: None,
                         sector: None,
                         bytes: u32::try_from(file.requested_bytes).ok(),
+                        opcode: None,
+                        status: None,
                         pid: file.pid,
                         tid: file.tid,
                         name: format!("{:?} fd {}", file.operation, file.fd),
@@ -737,11 +1414,65 @@ impl AnalysisEngine {
                 if let Some(end) = observation.end_ts_ns {
                     self.observe_ts(end);
                 }
-                if self.pipeline_observations.len() == MAX_ANALYSIS_SAMPLES {
-                    self.pipeline_observations
-                        .drain(..MAX_ANALYSIS_SAMPLES / 10);
+                let key = observation
+                    .correlation_id
+                    .or(observation.stage_key)
+                    .map(|id| (observation.layer, id, observation.name.clone()));
+                match (observation.phase, key) {
+                    (PipelinePhase::Begin, Some(key)) => {
+                        if self.pending_pipeline.remove(&key).is_some() {
+                            self.ambiguous_pipeline.insert(key, observation.ts_ns);
+                        } else if !self.ambiguous_pipeline.contains_key(&key) {
+                            self.pending_pipeline.insert(key, observation);
+                        }
+                    }
+                    (PipelinePhase::End, Some(key)) => {
+                        if self.ambiguous_pipeline.remove(&key).is_some() {
+                            self.pending_pipeline.remove(&key);
+                            return None;
+                        }
+                        if let Some(begin) = self.pending_pipeline.remove(&key)
+                            && observation.ts_ns >= begin.ts_ns
+                        {
+                            bounded_push(
+                                &mut self.pipeline_observations,
+                                PipelineObservation {
+                                    ts_ns: begin.ts_ns,
+                                    end_ts_ns: Some(observation.ts_ns),
+                                    phase: PipelinePhase::Span,
+                                    layer: begin.layer,
+                                    correlation_id: begin.correlation_id,
+                                    stage_key: begin.stage_key,
+                                    sector: begin.sector.or(observation.sector),
+                                    bytes: begin.bytes.or(observation.bytes),
+                                    opcode: begin.opcode.or(observation.opcode),
+                                    status: observation.status.or(begin.status),
+                                    pid: begin.pid,
+                                    tid: begin.tid,
+                                    name: begin.name,
+                                    confidence: begin.confidence,
+                                },
+                            );
+                        }
+                    }
+                    _ => bounded_push(&mut self.pipeline_observations, observation),
                 }
-                self.pipeline_observations.push(observation);
+                let newest = self.last_ts_ns.unwrap_or_default();
+                self.pending_pipeline
+                    .retain(|_, begin| newest.saturating_sub(begin.ts_ns) <= 30_000_000_000);
+                self.ambiguous_pipeline.retain(|_, observed_ts_ns| {
+                    newest.saturating_sub(*observed_ts_ns) <= 30_000_000_000
+                });
+                None
+            }
+            StorageEvent::Node(node) => {
+                self.observe_ts(node.start_ts_ns);
+                self.observe_ts(node.end_or_start());
+                bounded_push(&mut self.graph_nodes, node);
+                None
+            }
+            StorageEvent::Edge(edge) => {
+                bounded_push(&mut self.graph_edges, edge);
                 None
             }
         }
@@ -822,6 +1553,31 @@ impl AnalysisEngine {
                 }
             })
             .collect();
+        for io in &self.completed {
+            let graph = self.transaction_for(io);
+            let Some(request) = graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == IoNodeKind::BlockRequest)
+            else {
+                summary.attribution.unattributed += 1;
+                continue;
+            };
+            let origins = graph.file_origins_for(request.node_id);
+            if origins.len() > 1 {
+                summary.attribution.multi_origin += 1;
+            }
+            match origins
+                .iter()
+                .map(|origin| origin.confidence)
+                .max_by_key(|confidence| confidence.rank())
+            {
+                Some(EdgeConfidence::Exact) => summary.attribution.exact += 1,
+                Some(EdgeConfidence::Probable) => summary.attribution.probable += 1,
+                Some(EdgeConfidence::ProbableAsync) => summary.attribution.probable_async += 1,
+                Some(EdgeConfidence::ContextOnly) | None => summary.attribution.unattributed += 1,
+            }
+        }
         summary
     }
 
@@ -838,6 +1594,84 @@ impl AnalysisEngine {
 
     pub fn pipeline_for(&self, io: &CompletedIo) -> IoPipeline {
         build_io_pipeline(io, &self.pipeline_observations)
+    }
+
+    pub fn transaction_for(&self, io: &CompletedIo) -> IoTransactionGraph {
+        build_transaction_graph(
+            io,
+            &self.file_ios,
+            &self.pipeline_observations,
+            &self.graph_nodes,
+            &self.graph_edges,
+        )
+    }
+
+    pub fn transactions(&self) -> Vec<IoTransactionGraph> {
+        self.completed
+            .iter()
+            .map(|io| self.transaction_for(io))
+            .collect()
+    }
+
+    /// Explains only a measured positive stage delta against requests in the
+    /// same operation/access/size cohort. Returning `None` is preferable to a
+    /// cause claim with insufficient evidence.
+    pub fn why_slow(&self, selected: &CompletedIo) -> Option<SlowReason> {
+        let selected_graph = self.transaction_for(selected);
+        let selected_durations = durations_by_kind(&selected_graph);
+        let cohort: Vec<_> = self
+            .completed
+            .iter()
+            .filter(|io| {
+                io.issue.operation == selected.issue.operation
+                    && io.access_pattern == selected.access_pattern
+                    && io.size_class == selected.size_class
+            })
+            .collect();
+        if cohort.len() < 3 {
+            return None;
+        }
+        let mut best: Option<SlowReason> = None;
+        for (&kind, &selected_ns) in &selected_durations {
+            let mut values: Vec<_> = cohort
+                .iter()
+                .map(|io| {
+                    durations_by_kind(&self.transaction_for(io))
+                        .get(&kind)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .collect();
+            values.sort_unstable();
+            let median = percentile(&values, 50).unwrap_or(0);
+            let delta = selected_ns.saturating_sub(median);
+            if delta == 0 || best.as_ref().is_some_and(|value| value.delta_ns >= delta) {
+                continue;
+            }
+            let confidence = selected_graph
+                .edges
+                .iter()
+                .filter(|edge| {
+                    selected_graph.nodes.iter().any(|node| {
+                        node.kind == kind
+                            && (node.node_id == edge.from_node_id
+                                || node.node_id == edge.to_node_id)
+                    })
+                })
+                .map(|edge| edge.confidence)
+                .min_by_key(|confidence| confidence.rank())
+                .unwrap_or(EdgeConfidence::Exact);
+            best = Some(SlowReason {
+                node_kind: kind,
+                stage: format!("{kind:?}"),
+                selected_ns,
+                cohort_median_ns: median,
+                delta_ns: delta,
+                confidence,
+                cohort_samples: cohort.len(),
+            });
+        }
+        best
     }
 
     pub fn pipelines(&self) -> Vec<IoPipeline> {
@@ -865,6 +1699,296 @@ impl AnalysisEngine {
     }
 }
 
+fn durations_by_kind(graph: &IoTransactionGraph) -> BTreeMap<IoNodeKind, u64> {
+    let mut intervals = BTreeMap::<IoNodeKind, Vec<(u64, u64)>>::new();
+    for node in graph.nodes.iter().filter(|node| node.additive()) {
+        intervals
+            .entry(node.kind)
+            .or_default()
+            .push((node.start_ts_ns, node.end_or_start()));
+    }
+    intervals
+        .into_iter()
+        .map(|(kind, values)| (kind, union_duration(&values)))
+        .collect()
+}
+
+fn bounded_push<T>(values: &mut Vec<T>, value: T) {
+    if values.len() == MAX_ANALYSIS_SAMPLES {
+        values.drain(..MAX_ANALYSIS_SAMPLES / 10);
+    }
+    values.push(value);
+}
+
+fn synthetic_node_id(tag: u8, request_id: u64) -> u64 {
+    request_id.rotate_left(17) ^ ((tag as u64) << 56) ^ 0x9e37_79b9_7f4a_7c15
+}
+
+fn pipeline_node_kind(layer: PipelineLayer) -> IoNodeKind {
+    match layer {
+        PipelineLayer::Syscall => IoNodeKind::Syscall,
+        PipelineLayer::Vfs => IoNodeKind::Vfs,
+        PipelineLayer::Filesystem => IoNodeKind::Filesystem,
+        PipelineLayer::PageCache => IoNodeKind::PageCache,
+        PipelineLayer::Writeback => IoNodeKind::Writeback,
+        PipelineLayer::Bio => IoNodeKind::Bio,
+        PipelineLayer::BlockQueue => IoNodeKind::BlockQueue,
+        PipelineLayer::BlockDevice => IoNodeKind::BlockRequest,
+        PipelineLayer::Scsi => IoNodeKind::ScsiCommand,
+        PipelineLayer::Ufs => IoNodeKind::UfsCommand,
+        PipelineLayer::UicContext => IoNodeKind::UicContext,
+    }
+}
+
+/// Builds a direction-preserving graph for one completed block request. Legacy
+/// v1-v3 observations are promoted to nodes without fabricating direct keys.
+pub fn build_transaction_graph(
+    io: &CompletedIo,
+    files: &[FileIo],
+    observations: &[PipelineObservation],
+    raw_nodes: &[IoNode],
+    raw_edges: &[IoEdge],
+) -> IoTransactionGraph {
+    let request_id = io.issue.request_id;
+    let block_start = io.insert.as_ref().map_or(io.issue.ts_ns, |item| item.ts_ns);
+    let block_end = io.completion.ts_ns;
+    let mut graph = IoTransactionGraph::new(request_id);
+    let request_node_id = synthetic_node_id(9, request_id);
+    let mut queue_id = None;
+    let _ = graph.add_node(IoNode {
+        node_id: request_node_id,
+        transaction_id: Some(request_id),
+        kind: IoNodeKind::BlockRequest,
+        start_ts_ns: io.issue.ts_ns,
+        end_ts_ns: Some(block_end),
+        origin: IoOrigin::Unknown,
+        file: None,
+        path: None,
+        operation: Some(io.issue.operation),
+        bytes: Some(io.issue.bytes as u64),
+        pid: io.issue.pid,
+        tid: io.issue.tid,
+        name: format!("block request {request_id}"),
+    });
+    if let Some(insert) = &io.insert {
+        let queue_node_id = synthetic_node_id(8, request_id);
+        queue_id = Some(queue_node_id);
+        let _ = graph.add_node(IoNode {
+            node_id: queue_node_id,
+            transaction_id: Some(request_id),
+            kind: IoNodeKind::BlockQueue,
+            start_ts_ns: insert.ts_ns,
+            end_ts_ns: Some(io.issue.ts_ns),
+            origin: IoOrigin::Unknown,
+            file: None,
+            path: None,
+            operation: Some(io.issue.operation),
+            bytes: Some(io.issue.bytes as u64),
+            pid: io.issue.pid,
+            tid: io.issue.tid,
+            name: "block queue".into(),
+        });
+        let _ = graph.add_edge(IoEdge::exact(
+            synthetic_node_id(18, request_id),
+            queue_node_id,
+            request_node_id,
+            IoRelation::Dispatches,
+        ));
+    }
+
+    let probable_window_start = block_start.saturating_sub(10_000_000);
+    let probable_window_end = block_end.saturating_add(10_000_000);
+    let file_candidates: Vec<_> = files
+        .iter()
+        .filter(|file| file.operation == io.issue.operation)
+        .filter(|file| {
+            file.start_ts_ns <= probable_window_end && file.end_ts_ns >= probable_window_start
+        })
+        .filter(|file| {
+            file.requested_bytes >= io.issue.bytes as u64
+                || file.completed_bytes.unsigned_abs() >= io.issue.bytes as u64
+        })
+        .filter(|file| file.pid == io.issue.pid || (file.tid != 0 && file.tid == io.issue.tid))
+        .collect();
+    if file_candidates.len() == 1 {
+        let file = file_candidates[0];
+        let file_node_id = file
+            .node_id
+            .unwrap_or_else(|| synthetic_node_id(1, request_id));
+        let snapshot = file.path_snapshot.clone().or_else(|| {
+            file.path.clone().map(|path| PathSnapshot {
+                deleted: path.ends_with(" (deleted)"),
+                path: Some(path),
+                source: PathSource::ProcFd,
+                captured_ts_ns: file.end_ts_ns,
+            })
+        });
+        if graph
+            .add_node(IoNode {
+                node_id: file_node_id,
+                transaction_id: Some(request_id),
+                kind: IoNodeKind::FileOperation,
+                start_ts_ns: file.start_ts_ns,
+                end_ts_ns: Some(file.end_ts_ns),
+                origin: IoOrigin::File,
+                file: file.file_identity.clone(),
+                path: snapshot,
+                operation: Some(file.operation),
+                bytes: Some(file.requested_bytes),
+                pid: file.pid,
+                tid: file.tid,
+                name: file
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| format!("fd {}", file.fd)),
+            })
+            .is_ok()
+        {
+            let delta_ns = block_start.saturating_sub(file.start_ts_ns);
+            let _ = graph.add_edge(IoEdge {
+                edge_id: synthetic_node_id(19, request_id),
+                transaction_id: Some(request_id),
+                from_node_id: file_node_id,
+                to_node_id: request_node_id,
+                relation: if file.io_mode == FileIoMode::Buffered && block_start > file.end_ts_ns {
+                    IoRelation::CausesAsync
+                } else {
+                    IoRelation::Submits
+                },
+                confidence: if file.io_mode == FileIoMode::Buffered && block_start > file.end_ts_ns
+                {
+                    EdgeConfidence::ProbableAsync
+                } else {
+                    EdgeConfidence::Probable
+                },
+                evidence: vec![CorrelationEvidence {
+                    match_type: "unique_time_task_operation".into(),
+                    opaque_key: None,
+                    delta_ns: Some(delta_ns),
+                    candidate_count: 1,
+                    sector_match: false,
+                    bytes_match: file.requested_bytes == io.issue.bytes as u64,
+                    task_match: true,
+                }],
+            });
+        }
+    }
+
+    let pipeline = build_io_pipeline(io, observations);
+    let mut upper_prior = None;
+    let mut upper_last = None;
+    let mut lower_prior = None;
+    let mut lower_first = None;
+    for (index, span) in pipeline
+        .spans
+        .iter()
+        .filter(|span| {
+            !matches!(
+                span.layer,
+                PipelineLayer::BlockQueue | PipelineLayer::BlockDevice
+            )
+        })
+        .enumerate()
+    {
+        let confidence = match span.confidence {
+            CorrelationConfidence::Exact => EdgeConfidence::Exact,
+            CorrelationConfidence::Probable => EdgeConfidence::Probable,
+            CorrelationConfidence::ContextOnly => EdgeConfidence::ContextOnly,
+        };
+        let node_id = synthetic_node_id(32_u8.saturating_add(index as u8), request_id);
+        if graph
+            .add_node(IoNode {
+                node_id,
+                transaction_id: Some(request_id),
+                kind: pipeline_node_kind(span.layer),
+                start_ts_ns: span.start_ts_ns,
+                end_ts_ns: Some(span.end_ts_ns),
+                origin: IoOrigin::Unknown,
+                file: None,
+                path: None,
+                operation: Some(io.issue.operation),
+                bytes: Some(io.issue.bytes as u64),
+                pid: io.issue.pid,
+                tid: io.issue.tid,
+                name: span.name.clone(),
+            })
+            .is_ok()
+        {
+            let upper = span.layer <= PipelineLayer::Bio;
+            let prior = if upper { upper_prior } else { lower_prior };
+            if let Some(parent) = prior {
+                let _ = graph.add_edge(IoEdge {
+                    edge_id: synthetic_node_id(64_u8.saturating_add(index as u8), request_id),
+                    transaction_id: Some(request_id),
+                    from_node_id: parent,
+                    to_node_id: node_id,
+                    relation: if confidence == EdgeConfidence::ContextOnly {
+                        IoRelation::ContextFor
+                    } else {
+                        IoRelation::Calls
+                    },
+                    confidence,
+                    evidence: Vec::new(),
+                });
+            }
+            if upper {
+                upper_prior = Some(node_id);
+                upper_last = Some((node_id, confidence));
+            } else {
+                lower_first.get_or_insert((node_id, confidence));
+                lower_prior = Some(node_id);
+            }
+        }
+    }
+    if let Some((node_id, confidence)) = upper_last {
+        let _ = graph.add_edge(IoEdge {
+            edge_id: synthetic_node_id(90, request_id),
+            transaction_id: Some(request_id),
+            from_node_id: node_id,
+            to_node_id: queue_id.unwrap_or(request_node_id),
+            relation: IoRelation::Submits,
+            confidence,
+            evidence: Vec::new(),
+        });
+    }
+    if let Some((node_id, confidence)) = lower_first {
+        let _ = graph.add_edge(IoEdge {
+            edge_id: synthetic_node_id(91, request_id),
+            transaction_id: Some(request_id),
+            from_node_id: request_node_id,
+            to_node_id: node_id,
+            relation: if confidence == EdgeConfidence::ContextOnly {
+                IoRelation::ContextFor
+            } else {
+                IoRelation::Dispatches
+            },
+            confidence,
+            evidence: Vec::new(),
+        });
+    }
+
+    for node in raw_nodes {
+        if node.transaction_id == Some(request_id) {
+            let _ = graph.add_node(node.clone());
+        }
+    }
+    for edge in raw_edges {
+        if edge.transaction_id == Some(request_id)
+            && graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == edge.from_node_id)
+            && graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == edge.to_node_id)
+        {
+            let _ = graph.add_edge(edge.clone());
+        }
+    }
+    graph
+}
+
 /// Builds a bounded request view from measured observations. Nested spans are
 /// retained for the waterfall, while accounting uses their clipped union.
 pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation]) -> IoPipeline {
@@ -888,15 +2012,15 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             if exact {
                 return true;
             }
-            if value.confidence == CorrelationConfidence::Exact {
-                return false;
-            }
             let overlaps = value.ts_ns <= probable_window_end && end >= probable_window_start;
             let storage_match = value.sector.is_some_and(|sector| sector == io.issue.sector)
                 && value.bytes.is_some_and(|bytes| bytes == io.issue.bytes);
             let thread_match =
                 value.pid == io.issue.pid && (value.tid == 0 || value.tid == io.issue.tid);
-            overlaps && (storage_match || thread_match)
+            overlaps
+                && (value.confidence == CorrelationConfidence::ContextOnly
+                    || storage_match
+                    || thread_match)
         })
         .collect();
 
@@ -924,6 +2048,10 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
                     && value.confidence != CorrelationConfidence::ContextOnly
                 {
                     CorrelationConfidence::Exact
+                } else if value.confidence == CorrelationConfidence::Exact {
+                    // A tag/pointer may pair the lower-layer span exactly, but
+                    // the edge to this block request is still field-derived.
+                    CorrelationConfidence::Probable
                 } else {
                     value.confidence
                 },
@@ -933,6 +2061,8 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
                     PipelinePhase::Instant => "context marker",
                 }
                 .into(),
+                opcode: value.opcode,
+                status: value.status,
             })
         })
         .collect();
@@ -945,6 +2075,8 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             name: "block queue".into(),
             confidence: CorrelationConfidence::Exact,
             source: "block_rq_insert → block_rq_issue".into(),
+            opcode: None,
+            status: None,
         });
     }
     spans.push(PipelineSpan {
@@ -954,6 +2086,8 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
         name: "block device".into(),
         confidence: CorrelationConfidence::Exact,
         source: "block_rq_issue → block_rq_complete".into(),
+        opcode: None,
+        status: Some(io.completion.status),
     });
 
     let start_ts_ns = spans
@@ -1028,6 +2162,39 @@ fn union_duration(intervals: &[(u64, u64)]) -> u64 {
         }
     }
     total.saturating_add(end.saturating_sub(start))
+}
+
+fn uncovered_intervals(
+    bounds_start: u64,
+    bounds_end: u64,
+    intervals: &[(u64, u64)],
+) -> Vec<UnaccountedInterval> {
+    let mut values: Vec<_> = intervals
+        .iter()
+        .map(|&(start, end)| (start.max(bounds_start), end.min(bounds_end)))
+        .filter(|(start, end)| end > start)
+        .collect();
+    values.sort_unstable();
+    let mut result = Vec::new();
+    let mut cursor = bounds_start;
+    for (start, end) in values {
+        if start > cursor {
+            result.push(UnaccountedInterval {
+                start_ts_ns: cursor,
+                end_ts_ns: start,
+                reason: UnaccountedReason::Unknown,
+            });
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < bounds_end {
+        result.push(UnaccountedInterval {
+            start_ts_ns: cursor,
+            end_ts_ns: bounds_end,
+            reason: UnaccountedReason::Unknown,
+        });
+    }
+    result
 }
 
 fn merge_interval(intervals: &mut Vec<(u64, u64)>, (mut start, mut end): (u64, u64)) {

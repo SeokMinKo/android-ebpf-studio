@@ -24,7 +24,9 @@ adb -s SERIAL shell test -r /sys/kernel/btf/vmlinux
 Release ZIP을 한 폴더에 그대로 풀면 GUI가 실행 파일 옆의 `android-ebpf-agent`와 `android-storage-ebpf.o`를 자동으로 찾습니다. 캡처 출력은 기본적으로 다음 위치에 생성됩니다.
 
 ```text
-%LOCALAPPDATA%\AndroidEbpfStudio\sessions\android-storage-<unix-time>.ndjson
+%LOCALAPPDATA%\AndroidEbpfStudio\sessions\android-storage-<unix-time>-<session-id>.ndjson
+%LOCALAPPDATA%\AndroidEbpfStudio\logs\<session-id>\host.jsonl
+%LOCALAPPDATA%\AndroidEbpfStudio\logs\<session-id>\agent.jsonl
 ```
 
 파일이 빠졌다면 임의 파일 선택 창을 띄우지 않고 어떤 bundle 파일이 누락됐는지 Diagnostics에 표시합니다.
@@ -37,10 +39,10 @@ adb -s SERIAL push android-ebpf-agent /data/local/tmp/android-ebpf-studio/agent
 adb -s SERIAL push android-storage-ebpf /data/local/tmp/android-ebpf-studio/storage-ebpf.o
 adb -s SERIAL shell chmod 0755 /data/local/tmp/android-ebpf-studio/agent
 adb -s SERIAL shell /data/local/tmp/android-ebpf-studio/agent probe
-adb -s SERIAL shell /data/local/tmp/android-ebpf-studio/agent capture --bpf-object /data/local/tmp/android-ebpf-studio/storage-ebpf.o
+adb -s SERIAL shell /data/local/tmp/android-ebpf-studio/agent capture --bpf-object /data/local/tmp/android-ebpf-studio/storage-ebpf.o --session-id manual --log-level info
 ```
 
-stdout은 NDJSON protocol 전용입니다. verifier 또는 attach 오류는 stderr로 확인합니다.
+stdout은 measurement NDJSON 전용이고 stderr는 structured diagnostic JSONL 전용입니다. `--log-level debug|trace`는 짧은 재현 capture에서만 사용합니다.
 
 ## Failure guide
 
