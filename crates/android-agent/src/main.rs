@@ -667,8 +667,7 @@ fn capabilities() -> Result<CollectorConfig> {
     if let Some(event) = ufs_events
         .iter()
         .find(|event| event.ends_with("/ufshcd_command"))
-    {
-        if let Some(probe) = build_pipeline_probe(
+        && let Some(probe) = build_pipeline_probe(
             "ufs_command",
             "UFS_LAYOUT",
             event,
@@ -679,9 +678,9 @@ fn capabilities() -> Result<CollectorConfig> {
             &["opcode"],
             &["status", "result", "scsi_status"],
             &["str"],
-        ) {
-            pipeline_probes.push(probe);
-        }
+        )
+    {
+        pipeline_probes.push(probe);
     }
     if let Some(event) = ufs_events.iter().find(|event| {
         let lower = event.to_ascii_lowercase();
