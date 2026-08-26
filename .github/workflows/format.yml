@@ -1,0 +1,29 @@
+name: Format Rust
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/format.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rustfmt
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+      - name: Format workspace
+        run: cargo +1.98.0 fmt
+      - name: Commit formatting
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- '*.rs'
+          if ! git diff --cached --quiet; then
+            git commit -m "style: format redesigned desktop UI"
+            git push
+          fi
