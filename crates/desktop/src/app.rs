@@ -198,7 +198,11 @@ impl StudioApp {
     }
 
     fn setup_step(&self) -> SetupStep {
-        if self.is_running() || self.preflight.as_ref().is_some_and(PreflightReport::full_ebpf_ready)
+        if self.is_running()
+            || self
+                .preflight
+                .as_ref()
+                .is_some_and(PreflightReport::full_ebpf_ready)
         {
             SetupStep::Capture
         } else if self.selected_serial.is_some() {
@@ -440,45 +444,86 @@ impl StudioApp {
     fn metrics_ui(&self, ui: &mut egui::Ui) {
         let summary = self.analyzer.summary();
         ui.columns(3, |columns| {
-            metric_card(&mut columns[0], "COMPLETED I/O", summary.completed_ios.to_string(), "requests", ACCENT);
+            metric_card(
+                &mut columns[0],
+                "COMPLETED I/O",
+                summary.completed_ios.to_string(),
+                "requests",
+                ACCENT,
+            );
             metric_card(
                 &mut columns[1],
                 "READ / WRITE",
-                format!("{} / {}", format_bytes(summary.read_bytes), format_bytes(summary.write_bytes)),
-                "transferred", GREEN,
+                format!(
+                    "{} / {}",
+                    format_bytes(summary.read_bytes),
+                    format_bytes(summary.write_bytes)
+                ),
+                "transferred",
+                GREEN,
             );
-            metric_card(&mut columns[2], "P95 LATENCY", format_latency(summary.p95_latency_ns), "end-to-end", AMBER);
+            metric_card(
+                &mut columns[2],
+                "P95 LATENCY",
+                format_latency(summary.p95_latency_ns),
+                "end-to-end",
+                AMBER,
+            );
         });
         ui.add_space(8.0);
         ui.columns(3, |columns| {
-            metric_card(&mut columns[0], "P50 LATENCY", format_latency(summary.p50_latency_ns), "median", GREEN);
-            metric_card(&mut columns[1], "P99 LATENCY", format_latency(summary.p99_latency_ns), "tail", RED);
-            metric_card(&mut columns[2], "MAX QUEUE DEPTH", summary.max_queue_depth.to_string(), "in-flight requests", ACCENT);
+            metric_card(
+                &mut columns[0],
+                "P50 LATENCY",
+                format_latency(summary.p50_latency_ns),
+                "median",
+                GREEN,
+            );
+            metric_card(
+                &mut columns[1],
+                "P99 LATENCY",
+                format_latency(summary.p99_latency_ns),
+                "tail",
+                RED,
+            );
+            metric_card(
+                &mut columns[2],
+                "MAX QUEUE DEPTH",
+                summary.max_queue_depth.to_string(),
+                "in-flight requests",
+                ACCENT,
+            );
         });
     }
 
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
-        section_header(ui, "Interactive explorer", "Choose any dimensions, then pan and zoom directly on the plot.");
+        section_header(
+            ui,
+            "Interactive explorer",
+            "Choose any dimensions, then pan and zoom directly on the plot.",
+        );
         card_frame().show(ui, |ui| {
-          ui.horizontal_wrapped(|ui| {
-            axis_combo(ui, "x-axis", "X AXIS", &mut self.x_axis);
-            ui.add_space(8.0);
-            axis_combo(ui, "y-axis", "Y AXIS", &mut self.y_axis);
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-              ui.label(RichText::new("GROUP BY").size(10.0).color(MUTED));
-            egui::ComboBox::from_id_salt("group-by")
-                .selected_text(self.group_by.label())
-                .width(180.0)
-                .show_ui(ui, |ui| {
-                    for group in GroupBy::ALL {
-                        ui.selectable_value(&mut self.group_by, group, group.label());
-                    }
+            ui.horizontal_wrapped(|ui| {
+                axis_combo(ui, "x-axis", "X AXIS", &mut self.x_axis);
+                ui.add_space(8.0);
+                axis_combo(ui, "y-axis", "Y AXIS", &mut self.y_axis);
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("GROUP BY").size(10.0).color(MUTED));
+                    egui::ComboBox::from_id_salt("group-by")
+                        .selected_text(self.group_by.label())
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for group in GroupBy::ALL {
+                                ui.selectable_value(&mut self.group_by, group, group.label());
+                            }
+                        });
                 });
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("Drag: pan  •  Wheel: zoom  •  Double-click: reset").color(MUTED),
+                );
             });
-            ui.add_space(12.0);
-            ui.label(RichText::new("Drag: pan  •  Wheel: zoom  •  Double-click: reset").color(MUTED));
-          });
         });
         ui.add_space(10.0);
 
@@ -527,7 +572,11 @@ impl StudioApp {
 
     fn summary_ui(&self, ui: &mut egui::Ui) {
         let summary = self.analyzer.summary();
-        section_header(ui, "Session overview", "A concise view of utilization, attribution, and latency by workload class.");
+        section_header(
+            ui,
+            "Session overview",
+            "A concise view of utilization, attribution, and latency by workload class.",
+        );
         ui.columns(4, |columns| {
             summary_card(
                 &mut columns[0],
@@ -559,40 +608,94 @@ impl StudioApp {
             );
         });
         ui.add_space(18.0);
-        section_header(ui, "Workload breakdown", "Read/Write × Sequential/Random × Small/Large (32 KiB threshold)");
+        section_header(
+            ui,
+            "Workload breakdown",
+            "Read/Write × Sequential/Random × Small/Large (32 KiB threshold)",
+        );
         card_frame().show(ui, |ui| {
-        egui::ScrollArea::vertical()
-            .max_height(ui.available_height().max(340.0))
-            .show(ui, |ui| {
-                egui::Grid::new("category-summary")
+            egui::ScrollArea::vertical()
+                .max_height(ui.available_height().max(340.0))
+                .show(ui, |ui| {
+                    egui::Grid::new("category-summary")
+                        .striped(true)
+                        .min_col_width(92.0)
+                        .spacing([18.0, 10.0])
+                        .show(ui, |ui| {
+                            for heading in [
+                                "Direction",
+                                "Access",
+                                "Size",
+                                "I/O",
+                                "Bytes",
+                                "Avg chunk",
+                                "p50",
+                                "p95",
+                                "p99",
+                            ] {
+                                ui.strong(heading);
+                            }
+                            ui.end_row();
+                            for row in &summary.category_summaries {
+                                ui.label(operation_label(row.operation));
+                                ui.label(access_label(row.access_pattern));
+                                ui.label(size_label(row.size_class));
+                                ui.label(row.completed_ios.to_string());
+                                ui.label(format_bytes(row.bytes));
+                                ui.label(format_bytes(row.average_chunk_bytes));
+                                ui.label(format_latency(row.p50_latency_ns));
+                                ui.label(format_latency(row.p95_latency_ns));
+                                ui.label(format_latency(row.p99_latency_ns));
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    }
+
+    fn files_ui(&self, ui: &mut egui::Ui) {
+        section_header(
+            ui,
+            "File I/O attribution",
+            "Which process and file descriptor initiated a read or write syscall.",
+        );
+        info_banner(
+            ui,
+            "File paths are resolved from /proc/<pid>/fd/<fd> at syscall time. Buffered writeback cannot be claimed as exact block-request correlation.",
+        );
+        ui.add_space(10.0);
+        card_frame().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("file-ios")
                     .striped(true)
-                    .min_col_width(92.0)
-                    .spacing([18.0, 10.0])
+                    .spacing([16.0, 9.0])
                     .show(ui, |ui| {
                         for heading in [
-                            "Direction",
-                            "Access",
-                            "Size",
-                            "I/O",
-                            "Bytes",
-                            "Avg chunk",
-                            "p50",
-                            "p95",
-                            "p99",
+                            "End ns",
+                            "Op",
+                            "Requested",
+                            "Completed",
+                            "Latency",
+                            "PID",
+                            "FD",
+                            "Confidence",
+                            "Path",
                         ] {
                             ui.strong(heading);
                         }
                         ui.end_row();
-                        for row in &summary.category_summaries {
-                            ui.label(operation_label(row.operation));
-                            ui.label(access_label(row.access_pattern));
-                            ui.label(size_label(row.size_class));
-                            ui.label(row.completed_ios.to_string());
-                            ui.label(format_bytes(row.bytes));
-                            ui.label(format_bytes(row.average_chunk_bytes));
-                            ui.label(format_latency(row.p50_latency_ns));
-                            ui.label(format_latency(row.p95_latency_ns));
-                            ui.label(format_latency(row.p99_latency_ns));
+                        for file in self.analyzer.file_ios().iter().rev().take(1_000) {
+                            ui.label(file.end_ts_ns.to_string());
+                            ui.label(operation_label(file.operation));
+                            ui.label(format_bytes(file.requested_bytes));
+                            ui.label(file.completed_bytes.to_string());
+                            ui.label(format_duration(
+                                file.end_ts_ns.saturating_sub(file.start_ts_ns),
+                            ));
+                            ui.label(file.pid.to_string());
+                            ui.label(file.fd.to_string());
+                            ui.label(format!("{:?}", file.confidence));
+                            ui.label(file.path.as_deref().unwrap_or("<unresolved>"));
                             ui.end_row();
                         }
                     });
@@ -600,76 +703,43 @@ impl StudioApp {
         });
     }
 
-    fn files_ui(&self, ui: &mut egui::Ui) {
-        section_header(ui, "File I/O attribution", "Which process and file descriptor initiated a read or write syscall.");
-        info_banner(ui, "File paths are resolved from /proc/<pid>/fd/<fd> at syscall time. Buffered writeback cannot be claimed as exact block-request correlation.");
-        ui.add_space(10.0);
-        card_frame().show(ui, |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("file-ios").striped(true).spacing([16.0, 9.0]).show(ui, |ui| {
-                for heading in [
-                    "End ns",
-                    "Op",
-                    "Requested",
-                    "Completed",
-                    "Latency",
-                    "PID",
-                    "FD",
-                    "Confidence",
-                    "Path",
-                ] {
-                    ui.strong(heading);
-                }
-                ui.end_row();
-                for file in self.analyzer.file_ios().iter().rev().take(1_000) {
-                    ui.label(file.end_ts_ns.to_string());
-                    ui.label(operation_label(file.operation));
-                    ui.label(format_bytes(file.requested_bytes));
-                    ui.label(file.completed_bytes.to_string());
-                    ui.label(format_duration(
-                        file.end_ts_ns.saturating_sub(file.start_ts_ns),
-                    ));
-                    ui.label(file.pid.to_string());
-                    ui.label(file.fd.to_string());
-                    ui.label(format!("{:?}", file.confidence));
-                    ui.label(file.path.as_deref().unwrap_or("<unresolved>"));
-                    ui.end_row();
-                }
-            });
-        });
-        });
-    }
-
     fn table_ui(&self, ui: &mut egui::Ui) {
-        section_header(ui, "Completed block I/O", "Newest completed requests from the current or loaded session.");
+        section_header(
+            ui,
+            "Completed block I/O",
+            "Newest completed requests from the current or loaded session.",
+        );
         card_frame().show(ui, |ui| {
-        egui::ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                egui::Grid::new("recent-ios").striped(true).spacing([15.0, 9.0]).show(ui, |ui| {
-                    for heading in [
-                        "Time ns", "Op", "Access", "Size", "Bytes", "Sector", "Queue", "Device",
-                        "Total", "PID", "Comm",
-                    ] {
-                        ui.strong(heading);
-                    }
-                    ui.end_row();
-                    for io in self.recent.iter().rev().take(200) {
-                        ui.label(io.completion.ts_ns.to_string());
-                        ui.label(format!("{:?}", io.issue.operation));
-                        ui.label(access_label(io.access_pattern));
-                        ui.label(size_label(io.size_class));
-                        ui.label(io.issue.bytes.to_string());
-                        ui.label(io.issue.sector.to_string());
-                        ui.label(format_latency(io.queue_latency_ns));
-                        ui.label(format_latency(Some(io.device_latency_ns)));
-                        ui.label(format_latency(Some(io.total_latency_ns)));
-                        ui.label(io.issue.pid.to_string());
-                        ui.label(&io.issue.comm);
-                        ui.end_row();
-                    }
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    egui::Grid::new("recent-ios")
+                        .striped(true)
+                        .spacing([15.0, 9.0])
+                        .show(ui, |ui| {
+                            for heading in [
+                                "Time ns", "Op", "Access", "Size", "Bytes", "Sector", "Queue",
+                                "Device", "Total", "PID", "Comm",
+                            ] {
+                                ui.strong(heading);
+                            }
+                            ui.end_row();
+                            for io in self.recent.iter().rev().take(200) {
+                                ui.label(io.completion.ts_ns.to_string());
+                                ui.label(format!("{:?}", io.issue.operation));
+                                ui.label(access_label(io.access_pattern));
+                                ui.label(size_label(io.size_class));
+                                ui.label(io.issue.bytes.to_string());
+                                ui.label(io.issue.sector.to_string());
+                                ui.label(format_latency(io.queue_latency_ns));
+                                ui.label(format_latency(Some(io.device_latency_ns)));
+                                ui.label(format_latency(Some(io.total_latency_ns)));
+                                ui.label(io.issue.pid.to_string());
+                                ui.label(&io.issue.comm);
+                                ui.end_row();
+                            }
+                        });
                 });
-            });
         });
     }
 }
@@ -682,17 +752,41 @@ impl eframe::App for StudioApp {
         apply_theme(ui.ctx());
 
         egui::TopBottomPanel::top("app-header")
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(22, 14)).stroke(Stroke::new(1.0, BORDER)))
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(egui::Margin::symmetric(22, 14))
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("◈").size(26.0).color(ACCENT));
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("ANDROID eBPF STUDIO").size(18.0).strong().color(TEXT));
-                        ui.label(RichText::new("Storage observability workspace").size(11.0).color(MUTED));
+                        ui.label(
+                            RichText::new("ANDROID eBPF STUDIO")
+                                .size(18.0)
+                                .strong()
+                                .color(TEXT),
+                        );
+                        ui.label(
+                            RichText::new("Storage observability workspace")
+                                .size(11.0)
+                                .color(MUTED),
+                        );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        status_pill(ui, &self.status, if self.is_running() { GREEN } else { ACCENT });
-                        if ui.add_enabled(self.session_path.is_some(), egui::Button::new("Export CSV")).clicked() {
+                        status_pill(
+                            ui,
+                            &self.status,
+                            if self.is_running() { GREEN } else { ACCENT },
+                        );
+                        if ui
+                            .add_enabled(
+                                self.session_path.is_some(),
+                                egui::Button::new("Export CSV"),
+                            )
+                            .clicked()
+                        {
                             self.export_csv();
                         }
                         if ui.button("Open session").clicked() {
@@ -705,45 +799,117 @@ impl eframe::App for StudioApp {
         egui::SidePanel::left("navigation")
             .exact_width(244.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::same(16)).stroke(Stroke::new(1.0, BORDER)))
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(egui::Margin::same(16))
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
             .show_inside(ui, |ui| {
                 ui.label(RichText::new("WORKFLOW").size(10.0).strong().color(MUTED));
                 ui.add_space(10.0);
-                workflow_step(ui, 1, "Connect device", self.setup_step() == SetupStep::Connect, self.selected_serial.is_some());
-                workflow_step(ui, 2, "Verify capabilities", self.setup_step() == SetupStep::Verify, self.preflight.as_ref().is_some_and(PreflightReport::full_ebpf_ready));
-                workflow_step(ui, 3, "Capture & analyze", self.setup_step() == SetupStep::Capture, self.is_running());
+                workflow_step(
+                    ui,
+                    1,
+                    "Connect device",
+                    self.setup_step() == SetupStep::Connect,
+                    self.selected_serial.is_some(),
+                );
+                workflow_step(
+                    ui,
+                    2,
+                    "Verify capabilities",
+                    self.setup_step() == SetupStep::Verify,
+                    self.preflight
+                        .as_ref()
+                        .is_some_and(PreflightReport::full_ebpf_ready),
+                );
+                workflow_step(
+                    ui,
+                    3,
+                    "Capture & analyze",
+                    self.setup_step() == SetupStep::Capture,
+                    self.is_running(),
+                );
                 ui.add_space(18.0);
 
-                ui.label(RichText::new("TARGET DEVICE").size(10.0).strong().color(MUTED));
+                ui.label(
+                    RichText::new("TARGET DEVICE")
+                        .size(10.0)
+                        .strong()
+                        .color(MUTED),
+                );
                 ui.add_space(7.0);
                 egui::ComboBox::from_id_salt("device")
-                    .selected_text(self.selected_serial.as_deref().unwrap_or("No device selected"))
+                    .selected_text(
+                        self.selected_serial
+                            .as_deref()
+                            .unwrap_or("No device selected"),
+                    )
                     .width(210.0)
                     .show_ui(ui, |ui| {
                         for device in &self.devices {
                             ui.selectable_value(
                                 &mut self.selected_serial,
                                 Some(device.serial.clone()),
-                                format!("{} · {}", device.model.as_deref().unwrap_or("Android"), device.serial),
+                                format!(
+                                    "{} · {}",
+                                    device.model.as_deref().unwrap_or("Android"),
+                                    device.serial
+                                ),
                             );
                         }
                     });
                 ui.add_space(8.0);
-                if ui.add_sized([210.0, 34.0], egui::Button::new("↻  Refresh ADB devices")).clicked() {
+                if ui
+                    .add_sized([210.0, 34.0], egui::Button::new("↻  Refresh ADB devices"))
+                    .clicked()
+                {
                     self.refresh();
                 }
-                if ui.add_enabled(self.selected_serial.is_some(), egui::Button::new("✓  Run preflight").min_size(egui::vec2(210.0, 34.0))).clicked() {
+                if ui
+                    .add_enabled(
+                        self.selected_serial.is_some(),
+                        egui::Button::new("✓  Run preflight").min_size(egui::vec2(210.0, 34.0)),
+                    )
+                    .clicked()
+                {
                     self.preflight();
                 }
                 ui.add_space(8.0);
-                let can_start = self.preflight.as_ref().is_some_and(PreflightReport::full_ebpf_ready) && !self.is_running();
-                if ui.add_enabled(can_start, egui::Button::new(RichText::new("▶  Start eBPF capture").color(TEXT)).fill(ACCENT).min_size(egui::vec2(210.0, 38.0))).clicked() {
+                let can_start = self
+                    .preflight
+                    .as_ref()
+                    .is_some_and(PreflightReport::full_ebpf_ready)
+                    && !self.is_running();
+                if ui
+                    .add_enabled(
+                        can_start,
+                        egui::Button::new(RichText::new("▶  Start eBPF capture").color(TEXT))
+                            .fill(ACCENT)
+                            .min_size(egui::vec2(210.0, 38.0)),
+                    )
+                    .clicked()
+                {
                     self.start_device();
                 }
-                if ui.add_enabled(!self.is_running(), egui::Button::new("Run simulator").min_size(egui::vec2(210.0, 32.0))).clicked() {
+                if ui
+                    .add_enabled(
+                        !self.is_running(),
+                        egui::Button::new("Run simulator").min_size(egui::vec2(210.0, 32.0)),
+                    )
+                    .clicked()
+                {
                     self.start_simulator();
                 }
-                if ui.add_enabled(self.is_running(), egui::Button::new(RichText::new("■  Stop capture").color(RED)).min_size(egui::vec2(210.0, 34.0))).clicked() {
+                if ui
+                    .add_enabled(
+                        self.is_running(),
+                        egui::Button::new(RichText::new("■  Stop capture").color(RED))
+                            .min_size(egui::vec2(210.0, 34.0)),
+                    )
+                    .clicked()
+                {
                     self.stop();
                 }
 
@@ -752,33 +918,87 @@ impl eframe::App for StudioApp {
                 ui.add_space(12.0);
                 ui.label(RichText::new("ANALYSIS").size(10.0).strong().color(MUTED));
                 ui.add_space(6.0);
-                nav_item(ui, &mut self.page, Page::Summary, "▦", "Summary", "KPIs and workload mix");
-                nav_item(ui, &mut self.page, Page::Explorer, "⌁", "Explorer", "Interactive axes and groups");
-                nav_item(ui, &mut self.page, Page::Events, "≡", "Block events", "Request-level pipeline");
-                nav_item(ui, &mut self.page, Page::Files, "▤", "File I/O", "Syscall path attribution");
+                nav_item(
+                    ui,
+                    &mut self.page,
+                    Page::Summary,
+                    "▦",
+                    "Summary",
+                    "KPIs and workload mix",
+                );
+                nav_item(
+                    ui,
+                    &mut self.page,
+                    Page::Explorer,
+                    "⌁",
+                    "Explorer",
+                    "Interactive axes and groups",
+                );
+                nav_item(
+                    ui,
+                    &mut self.page,
+                    Page::Events,
+                    "≡",
+                    "Block events",
+                    "Request-level pipeline",
+                );
+                nav_item(
+                    ui,
+                    &mut self.page,
+                    Page::Files,
+                    "▤",
+                    "File I/O",
+                    "Syscall path attribution",
+                );
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new(format!("{} received  •  {} rejected", self.received_events, self.rejected_records)).size(10.0).color(MUTED));
+                    ui.label(
+                        RichText::new(format!(
+                            "{} received  •  {} rejected",
+                            self.received_events, self.rejected_records
+                        ))
+                        .size(10.0)
+                        .color(MUTED),
+                    );
                     if let Some(path) = &self.session_path {
-                        ui.label(RichText::new(path.file_name().and_then(|v| v.to_str()).unwrap_or("session.ndjson")).size(10.0).color(MUTED));
+                        ui.label(
+                            RichText::new(
+                                path.file_name()
+                                    .and_then(|v| v.to_str())
+                                    .unwrap_or("session.ndjson"),
+                            )
+                            .size(10.0)
+                            .color(MUTED),
+                        );
                     }
                 });
             });
 
         egui::TopBottomPanel::bottom("diagnostics")
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(18, 8)).stroke(Stroke::new(1.0, BORDER)))
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(egui::Margin::symmetric(18, 8))
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
             .show_inside(ui, |ui| {
                 ui.collapsing(format!("Diagnostics  ({})", self.diagnostics.len()), |ui| {
-                    egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
-                        for value in self.diagnostics.iter().rev() {
-                            ui.label(RichText::new(value).monospace().size(10.0).color(RED));
-                        }
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(110.0)
+                        .show(ui, |ui| {
+                            for value in self.diagnostics.iter().rev() {
+                                ui.label(RichText::new(value).monospace().size(10.0).color(RED));
+                            }
+                        });
                 });
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::same(22)))
+            .frame(
+                egui::Frame::new()
+                    .fill(BG)
+                    .inner_margin(egui::Margin::same(22)),
+            )
             .show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.metrics_ui(ui);
@@ -843,44 +1063,101 @@ fn metric_card(ui: &mut egui::Ui, label: &str, value: String, hint: &str, color:
 
 fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 32))
+        .fill(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            32,
+        ))
         .stroke(Stroke::new(1.0, color))
         .corner_radius(12)
         .inner_margin(egui::Margin::symmetric(10, 5))
-        .show(ui, |ui| { ui.label(RichText::new(format!("●  {text}")).size(11.0).color(color)); });
+        .show(ui, |ui| {
+            ui.label(RichText::new(format!("●  {text}")).size(11.0).color(color));
+        });
 }
 
 fn workflow_step(ui: &mut egui::Ui, number: usize, label: &str, active: bool, done: bool) {
-    let color = if done { GREEN } else if active { ACCENT } else { MUTED };
+    let color = if done {
+        GREEN
+    } else if active {
+        ACCENT
+    } else {
+        MUTED
+    };
     ui.horizontal(|ui| {
-        ui.label(RichText::new(if done { "✓".into() } else { number.to_string() }).strong().color(color));
-        ui.label(RichText::new(label).strong().color(if active || done { TEXT } else { MUTED }));
+        ui.label(
+            RichText::new(if done {
+                "✓".into()
+            } else {
+                number.to_string()
+            })
+            .strong()
+            .color(color),
+        );
+        ui.label(
+            RichText::new(label)
+                .strong()
+                .color(if active || done { TEXT } else { MUTED }),
+        );
     });
 }
 
-fn nav_item(ui: &mut egui::Ui, page: &mut Page, value: Page, icon: &str, title: &str, detail: &str) {
+fn nav_item(
+    ui: &mut egui::Ui,
+    page: &mut Page,
+    value: Page,
+    icon: &str,
+    title: &str,
+    detail: &str,
+) {
     let selected = *page == value;
     let response = egui::Frame::new()
-        .fill(if selected { Color32::from_rgb(32, 57, 91) } else { Color32::TRANSPARENT })
+        .fill(if selected {
+            Color32::from_rgb(32, 57, 91)
+        } else {
+            Color32::TRANSPARENT
+        })
         .corner_radius(7)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_min_width(190.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(icon).size(18.0).color(if selected { ACCENT } else { MUTED }));
+                ui.label(RichText::new(icon).size(18.0).color(if selected {
+                    ACCENT
+                } else {
+                    MUTED
+                }));
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(title).strong().color(if selected { TEXT } else { MUTED }));
+                    ui.label(RichText::new(title).strong().color(if selected {
+                        TEXT
+                    } else {
+                        MUTED
+                    }));
                     ui.label(RichText::new(detail).size(9.0).color(MUTED));
                 });
             });
-        }).response.interact(egui::Sense::click());
-    if response.clicked() { *page = value; }
+        })
+        .response
+        .interact(egui::Sense::click());
+    if response.clicked() {
+        *page = value;
+    }
 }
 
 fn info_banner(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::new().fill(Color32::from_rgb(24, 43, 67)).stroke(Stroke::new(1.0, ACCENT)).corner_radius(6).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-        ui.label(RichText::new(format!("ⓘ  {text}")).size(11.0).color(Color32::from_rgb(174, 205, 248)));
-    });
+    egui::Frame::new()
+        .fill(Color32::from_rgb(24, 43, 67))
+        .stroke(Stroke::new(1.0, ACCENT))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!("ⓘ  {text}"))
+                    .size(11.0)
+                    .color(Color32::from_rgb(174, 205, 248)),
+            );
+        });
 }
 
 fn capability_panel(ui: &mut egui::Ui, report: &PreflightReport) {
@@ -894,7 +1171,17 @@ fn capability_panel(ui: &mut egui::Ui, report: &PreflightReport) {
             capability_badge(ui, "Complete", report.block_complete);
             capability_badge(ui, "File syscalls", report.raw_syscalls);
         });
-        ui.label(RichText::new(format!("{}  •  Android {}  •  Kernel {}  •  {} UFS event path(s)", report.abi, report.android_version, report.kernel_release, report.ufs_events.len())).size(10.0).color(MUTED));
+        ui.label(
+            RichText::new(format!(
+                "{}  •  Android {}  •  Kernel {}  •  {} UFS event path(s)",
+                report.abi,
+                report.android_version,
+                report.kernel_release,
+                report.ufs_events.len()
+            ))
+            .size(10.0)
+            .color(MUTED),
+        );
     });
 }
 
@@ -983,7 +1270,12 @@ fn axis_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut AxisMetric) 
 
 fn summary_card(ui: &mut egui::Ui, label: &str, value: String) {
     card_frame().show(ui, |ui| {
-        ui.label(RichText::new(label.to_uppercase()).size(10.0).strong().color(MUTED));
+        ui.label(
+            RichText::new(label.to_uppercase())
+                .size(10.0)
+                .strong()
+                .color(MUTED),
+        );
         ui.add_space(5.0);
         ui.label(RichText::new(value).size(20.0).strong().color(TEXT));
     });
