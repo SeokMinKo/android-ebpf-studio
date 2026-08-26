@@ -751,14 +751,14 @@ impl eframe::App for StudioApp {
             .request_repaint_after(std::time::Duration::from_millis(100));
         apply_theme(ui.ctx());
 
-        egui::TopBottomPanel::top("app-header")
+        egui::Panel::top("app-header")
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
                     .inner_margin(egui::Margin::symmetric(22, 14))
                     .stroke(Stroke::new(1.0, BORDER)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("◈").size(26.0).color(ACCENT));
                     ui.vertical(|ui| {
@@ -796,8 +796,8 @@ impl eframe::App for StudioApp {
                 });
             });
 
-        egui::SidePanel::left("navigation")
-            .exact_width(244.0)
+        egui::Panel::left("navigation")
+            .exact_size(244.0)
             .resizable(false)
             .frame(
                 egui::Frame::new()
@@ -805,7 +805,7 @@ impl eframe::App for StudioApp {
                     .inner_margin(egui::Margin::same(16))
                     .stroke(Stroke::new(1.0, BORDER)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.label(RichText::new("WORKFLOW").size(10.0).strong().color(MUTED));
                 ui.add_space(10.0);
                 workflow_step(
@@ -974,14 +974,14 @@ impl eframe::App for StudioApp {
                 });
             });
 
-        egui::TopBottomPanel::bottom("diagnostics")
+        egui::Panel::bottom("diagnostics")
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
                     .inner_margin(egui::Margin::symmetric(18, 8))
                     .stroke(Stroke::new(1.0, BORDER)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.collapsing(format!("Diagnostics  ({})", self.diagnostics.len()), |ui| {
                     egui::ScrollArea::vertical()
                         .max_height(110.0)
@@ -999,7 +999,7 @@ impl eframe::App for StudioApp {
                     .fill(BG)
                     .inner_margin(egui::Margin::same(22)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.metrics_ui(ui);
                     ui.add_space(20.0);
@@ -1032,10 +1032,10 @@ fn apply_theme(ctx: &egui::Context) {
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
     visuals.widgets.active.bg_fill = ACCENT;
     ctx.set_visuals(visuals);
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    ctx.set_style(style);
+    ctx.global_style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    });
 }
 
 fn card_frame() -> egui::Frame {
