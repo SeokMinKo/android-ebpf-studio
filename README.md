@@ -2,15 +2,19 @@
 
 Windows에서 실행되는 Rust GUI가 `adb root` 가능한 Android Phone에 eBPF collector를 배포하고, block I/O를 실시간 로깅·분석하는 도구입니다.
 
-## 현재 MVP 기능
+## 주요 기능
 
 - ADB 장치 검색과 serial 고정
 - `adb root`, ABI, Android/kernel 버전, BTF, tracefs, block/UFS event preflight
 - Android arm64 agent와 eBPF object 배포·실행
-- `block_rq_issue` / `block_rq_complete` 이벤트 수집
+- `block_rq_insert` / `block_rq_issue` / `block_rq_complete` 이벤트 수집
+- block queue, device service, total pipeline latency 분리
+- arm64 `raw_syscalls` read/write 추적과 `/proc/<pid>/fd/<fd>` 기반 파일 경로 attribution
 - 커널 tracepoint `format` 파일을 읽어 필드 offset을 런타임 구성하므로 고정 offset에 의존하지 않음
-- IOPS, MiB/s, queue depth, p50/p95/p99 latency, read/write bytes
-- sector 연속성과 시간 window 기반 sequential/random 분류
+- X/Y axis와 grouping을 실행 중 바꾸는 pan/zoom 가능한 Explorer scatter plot
+- Summary의 logging/busy/idle time, p50/p95/p99, Read/Write × Sequential/Random × Small/Large 집계
+- 같은 device/direction stream에서 `previous sector + sectors == current sector`이면 Sequential, 아니면 Random
+- `bytes >= 32 KiB`이면 Large, 그 미만은 Small
 - 실시간 이벤트 테이블, NDJSON 기록, 오프라인 재분석, event/summary CSV export
 - Phone 없이 GUI 파이프라인을 확인하는 deterministic simulator
 
@@ -28,7 +32,8 @@ Android android-ebpf-agent (root)
   └─ ring-buffer → NDJSON stdout
           ↓
 Android kernel eBPF
-  └─ block_rq_issue / block_rq_complete
+  ├─ block_rq_insert / block_rq_issue / block_rq_complete
+  └─ raw_syscalls/sys_enter + sys_exit (지원 장비)
 ```
 
 ## 요구 환경
@@ -79,11 +84,20 @@ cargo binstall bpf-linker
 4. `Deploy + Start eBPF`를 누르고 Android agent, eBPF object, session 저장 경로를 차례로 선택합니다.
 5. 먼저 `Simulator`로 UI와 저장/CSV 경로를 검증할 수도 있습니다.
 
+## 화면 사용법
+
+- **Summary**: 관측된 logging span, 요청 interval 합집합인 busy time, 나머지 idle time과 조합별 집계를 봅니다.
+- **Explorer**: X axis, Y axis, Group by를 각각 선택합니다. Time, sector/address, chunk, total/queue/device latency, PID, queue depth를 조합할 수 있습니다.
+- **Block events**: 요청별 Read/Write, Sequential/Random, Small/Large와 insert→issue, issue→complete, total 시간을 봅니다.
+- **File I/O**: syscall 시점에 해석된 파일 경로, FD, 요청/완료 byte, syscall latency와 confidence를 봅니다.
+
 ## 중요한 정확성 규칙
 
 - tracepoint가 `rq` pointer를 제공하면 issue/complete를 정확한 request identity로 연결합니다.
 - `rq`가 없으면 device/sector/length/op 기반 correlation key를 사용합니다. 동일 key가 동시에 중복되면 latency를 억지로 연결하지 않고 uncorrelated로 폐기합니다.
 - UFS/vendor tracepoint는 이름과 layout이 장비마다 다르므로 자동 탐지만 하며, 현재 MVP의 필수 수집축은 generic block layer입니다.
+- 파일 경로는 syscall과 FD의 attribution입니다. buffered writeback, filesystem metadata, GC가 생성한 block I/O를 특정 파일과 exact하게 연결했다고 표시하지 않습니다.
+- `block_rq_insert` 또는 `raw_syscalls`가 없는 커널에서는 해당 queue latency 또는 file view가 unavailable이며 0으로 대체하지 않습니다.
 - event loss와 malformed record는 footer/health counter로 분리합니다. 값이 없는데 0으로 가장하지 않습니다.
 
 ## 검증

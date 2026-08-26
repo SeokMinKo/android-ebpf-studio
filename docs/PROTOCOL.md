@@ -1,4 +1,4 @@
-# NDJSON Protocol v1
+# NDJSON Protocol v2
 
 각 stdout line은 독립적인 JSON object이고 `record` discriminator와 `schema_version`을 가집니다.
 
@@ -14,11 +14,11 @@ Reader는 알 수 없는 JSON field를 무시하지만, 알 수 없는 `record` 
 ## Examples
 
 ```json
-{"record":"hello","schema_version":1,"agent_version":"0.1.0","boot_id":"...","kernel_release":"6.6.30-android15"}
-{"record":"event","schema_version":1,"sequence":1,"event":{"kind":"block_issue","data":{"ts_ns":1000000,"request_id":4660,"device_major":259,"device_minor":0,"sector":1024,"sectors":8,"bytes":4096,"operation":"read","pid":4242,"tid":4242,"cpu":3,"comm":"fio"}}}
-{"record":"event","schema_version":1,"sequence":2,"event":{"kind":"block_complete","data":{"ts_ns":1250000,"request_id":4660,"device_major":259,"device_minor":0,"status":0}}}
-{"record":"health","schema_version":1,"emitted_events":2,"kernel_drops":0,"userspace_drops":0}
-{"record":"footer","schema_version":1,"events_seen":2,"events_persisted":2,"events_dropped":0,"events_rejected":0}
+{"record":"hello","schema_version":2,"agent_version":"0.1.0","boot_id":"...","kernel_release":"6.6.30-android15"}
+{"record":"event","schema_version":2,"sequence":1,"event":{"kind":"block_insert","data":{"ts_ns":900000,"request_id":4660,"device_major":259,"device_minor":0,"sector":1024,"sectors":8,"bytes":4096,"operation":"read"}}}
+{"record":"event","schema_version":2,"sequence":2,"event":{"kind":"block_issue","data":{"ts_ns":1000000,"request_id":4660,"device_major":259,"device_minor":0,"sector":1024,"sectors":8,"bytes":4096,"operation":"read","pid":4242,"tid":4242,"cpu":3,"comm":"fio"}}}
+{"record":"event","schema_version":2,"sequence":3,"event":{"kind":"block_complete","data":{"ts_ns":1250000,"request_id":4660,"device_major":259,"device_minor":0,"status":0}}}
+{"record":"event","schema_version":2,"sequence":4,"event":{"kind":"file_io","data":{"start_ts_ns":800000,"end_ts_ns":1300000,"operation":"read","fd":7,"requested_bytes":4096,"completed_bytes":4096,"pid":4242,"tid":4242,"comm":"fio","path":"/data/local/tmp/input.bin","confidence":"attributed"}}}
 ```
 
 ## Time and units
@@ -26,7 +26,11 @@ Reader는 알 수 없는 JSON field를 무시하지만, 알 수 없는 `record` 
 - `ts_ns`: device monotonic clock in nanoseconds; wall-clock이 아닙니다.
 - `sector`: 512-byte logical sector unit from block tracepoint.
 - `bytes`: request payload bytes.
-- latency: host analyzer가 동일 device/request issue-completion을 연결해 계산합니다.
+- queue latency: insert→issue, device latency: issue→complete, total latency: insert(없으면 issue)→complete.
+- logging time은 첫 관측 timestamp부터 마지막 관측 timestamp까지입니다.
+- busy time은 완료된 block request interval의 합집합이며 중첩 요청을 중복 합산하지 않습니다.
+
+v1 `hello`, `event`, `health`, `footer`는 계속 읽을 수 있습니다. v1 block event에는 insert/file 정보가 없으므로 해당 필드는 unavailable입니다.
 
 ## Integrity
 

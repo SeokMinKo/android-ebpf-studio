@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     path::PathBuf,
     sync::{
         Arc,
@@ -7,10 +7,13 @@ use std::{
     },
 };
 
-use android_ebpf_protocol::{AnalysisEngine, CompletedIo, SCHEMA_VERSION, WireRecord};
+use android_ebpf_protocol::{
+    AccessPattern, AnalysisEngine, CompletedIo, IoOperation, IoSizeClass, SCHEMA_VERSION,
+    WireRecord,
+};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText};
-use egui_plot::{Legend, Line, Plot, PlotPoints};
+use egui_plot::{Legend, Plot, PlotPoints, Points};
 
 use crate::{
     adb::{AdbClient, AdbDevice, DeviceState, PreflightReport},
@@ -20,6 +23,106 @@ use crate::{
 };
 
 const MAX_RECENT: usize = 2_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Summary,
+    Explorer,
+    Events,
+    Files,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AxisMetric {
+    TimeMs,
+    Sector,
+    AddressKiB,
+    ChunkKiB,
+    TotalLatencyMs,
+    QueueLatencyMs,
+    DeviceLatencyMs,
+    Pid,
+    QueueDepth,
+}
+
+impl AxisMetric {
+    const ALL: [Self; 9] = [
+        Self::TimeMs,
+        Self::Sector,
+        Self::AddressKiB,
+        Self::ChunkKiB,
+        Self::TotalLatencyMs,
+        Self::QueueLatencyMs,
+        Self::DeviceLatencyMs,
+        Self::Pid,
+        Self::QueueDepth,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TimeMs => "Time (ms)",
+            Self::Sector => "Sector",
+            Self::AddressKiB => "Address (KiB)",
+            Self::ChunkKiB => "Chunk (KiB)",
+            Self::TotalLatencyMs => "Total latency (ms)",
+            Self::QueueLatencyMs => "Queue latency (ms)",
+            Self::DeviceLatencyMs => "Device latency (ms)",
+            Self::Pid => "PID",
+            Self::QueueDepth => "Queue depth",
+        }
+    }
+
+    fn value(self, io: &CompletedIo, origin_ns: u64) -> Option<f64> {
+        match self {
+            Self::TimeMs => Some(io.completion.ts_ns.saturating_sub(origin_ns) as f64 / 1e6),
+            Self::Sector => Some(io.issue.sector as f64),
+            Self::AddressKiB => Some(io.issue.sector as f64 / 2.0),
+            Self::ChunkKiB => Some(io.issue.bytes as f64 / 1024.0),
+            Self::TotalLatencyMs => Some(io.total_latency_ns as f64 / 1e6),
+            Self::QueueLatencyMs => io.queue_latency_ns.map(|value| value as f64 / 1e6),
+            Self::DeviceLatencyMs => Some(io.device_latency_ns as f64 / 1e6),
+            Self::Pid => Some(io.issue.pid as f64),
+            Self::QueueDepth => Some(io.queue_depth_after as f64),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupBy {
+    None,
+    Direction,
+    AccessPattern,
+    SizeClass,
+    Process,
+}
+
+impl GroupBy {
+    const ALL: [Self; 5] = [
+        Self::None,
+        Self::Direction,
+        Self::AccessPattern,
+        Self::SizeClass,
+        Self::Process,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Direction => "Read / Write",
+            Self::AccessPattern => "Sequential / Random",
+            Self::SizeClass => "Small / Large",
+            Self::Process => "Process",
+        }
+    }
+    fn key(self, io: &CompletedIo) -> String {
+        match self {
+            Self::None => "All I/O".into(),
+            Self::Direction => operation_label(io.issue.operation).into(),
+            Self::AccessPattern => access_label(io.access_pattern).into(),
+            Self::SizeClass => size_label(io.size_class).into(),
+            Self::Process => format!("{} ({})", io.issue.comm, io.issue.pid),
+        }
+    }
+}
 
 pub struct StudioApp {
     adb: AdbClient,
@@ -38,6 +141,10 @@ pub struct StudioApp {
     session_path: Option<PathBuf>,
     received_events: u64,
     rejected_records: u64,
+    page: Page,
+    x_axis: AxisMetric,
+    y_axis: AxisMetric,
+    group_by: GroupBy,
 }
 
 impl Default for StudioApp {
@@ -60,6 +167,10 @@ impl Default for StudioApp {
             session_path: None,
             received_events: 0,
             rejected_records: 0,
+            page: Page::Summary,
+            x_axis: AxisMetric::TimeMs,
+            y_axis: AxisMetric::TotalLatencyMs,
+            group_by: GroupBy::Direction,
         }
     }
 }
@@ -184,6 +295,16 @@ impl StudioApp {
         match session::load_analysis(&path) {
             Ok((engine, rejected)) => {
                 self.stop();
+                self.recent = engine
+                    .completed_ios()
+                    .iter()
+                    .rev()
+                    .take(MAX_RECENT)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
                 self.analyzer = engine;
                 self.rejected_records = rejected;
                 self.session_path = Some(path);
@@ -306,23 +427,167 @@ impl StudioApp {
         });
     }
 
-    fn plot_ui(&self, ui: &mut egui::Ui) {
-        let buckets = self.analyzer.buckets();
-        let iops: PlotPoints = buckets
-            .iter()
-            .map(|bucket| [bucket.second as f64, bucket.completed_ios as f64])
-            .collect();
-        let bandwidth: PlotPoints = buckets
-            .iter()
-            .map(|bucket| [bucket.second as f64, bucket.bytes as f64 / 1_048_576.0])
-            .collect();
-        Plot::new("storage-rate")
-            .height(260.0)
+    fn explorer_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            axis_combo(ui, "x-axis", "X axis", &mut self.x_axis);
+            axis_combo(ui, "y-axis", "Y axis", &mut self.y_axis);
+            egui::ComboBox::from_id_salt("group-by")
+                .selected_text(self.group_by.label())
+                .show_ui(ui, |ui| {
+                    for group in GroupBy::ALL {
+                        ui.selectable_value(&mut self.group_by, group, group.label());
+                    }
+                });
+            ui.label("Drag to pan · wheel to zoom · double-click to reset");
+        });
+
+        let samples = self.analyzer.completed_ios();
+        let origin_ns = samples.first().map_or(0, |io| io.completion.ts_ns);
+        let mut groups: BTreeMap<String, Vec<[f64; 2]>> = BTreeMap::new();
+        for io in samples.iter().rev().take(50_000).rev() {
+            let (Some(x), Some(y)) = (
+                self.x_axis.value(io, origin_ns),
+                self.y_axis.value(io, origin_ns),
+            ) else {
+                continue;
+            };
+            groups
+                .entry(self.group_by.key(io))
+                .or_default()
+                .push([x, y]);
+        }
+        let palette = [
+            Color32::LIGHT_BLUE,
+            Color32::LIGHT_GREEN,
+            Color32::LIGHT_RED,
+            Color32::YELLOW,
+            Color32::KHAKI,
+            Color32::LIGHT_GRAY,
+            Color32::from_rgb(200, 120, 255),
+            Color32::from_rgb(255, 150, 80),
+        ];
+        Plot::new("interactive-storage-explorer")
+            .height(440.0)
+            .x_axis_label(self.x_axis.label())
+            .y_axis_label(self.y_axis.label())
             .legend(Legend::default())
             .show(ui, |plot| {
-                plot.line(Line::new("IOPS", iops).color(Color32::LIGHT_BLUE));
-                plot.line(Line::new("MiB/s", bandwidth).color(Color32::LIGHT_GREEN));
+                for (index, (name, values)) in groups.into_iter().enumerate() {
+                    let points: PlotPoints = values.into_iter().collect();
+                    plot.points(
+                        Points::new(name, points)
+                            .radius(2.5)
+                            .color(palette[index % palette.len()]),
+                    );
+                }
             });
+        ui.small("Queue latency는 block_rq_insert가 지원되는 장비에서만 표시됩니다. 값이 없는 요청은 해당 series에서 제외됩니다.");
+    }
+
+    fn summary_ui(&self, ui: &mut egui::Ui) {
+        let summary = self.analyzer.summary();
+        ui.columns(4, |columns| {
+            summary_card(
+                &mut columns[0],
+                "Logging time (observed)",
+                format_duration(summary.logging_ns),
+            );
+            summary_card(
+                &mut columns[1],
+                "Busy time",
+                format!(
+                    "{} ({:.1}%)",
+                    format_duration(summary.busy_ns),
+                    ratio(summary.busy_ns, summary.logging_ns)
+                ),
+            );
+            summary_card(
+                &mut columns[2],
+                "Idle time",
+                format!(
+                    "{} ({:.1}%)",
+                    format_duration(summary.idle_ns),
+                    ratio(summary.idle_ns, summary.logging_ns)
+                ),
+            );
+            summary_card(
+                &mut columns[3],
+                "File attribution",
+                format!("{} / {}", summary.attributed_file_ios, summary.file_ios),
+            );
+        });
+        ui.separator();
+        ui.heading("Category summary");
+        egui::ScrollArea::vertical()
+            .max_height(420.0)
+            .show(ui, |ui| {
+                egui::Grid::new("category-summary")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for heading in [
+                            "Direction",
+                            "Access",
+                            "Size",
+                            "I/O",
+                            "Bytes",
+                            "Avg chunk",
+                            "p50",
+                            "p95",
+                            "p99",
+                        ] {
+                            ui.strong(heading);
+                        }
+                        ui.end_row();
+                        for row in &summary.category_summaries {
+                            ui.label(operation_label(row.operation));
+                            ui.label(access_label(row.access_pattern));
+                            ui.label(size_label(row.size_class));
+                            ui.label(row.completed_ios.to_string());
+                            ui.label(format_bytes(row.bytes));
+                            ui.label(format_bytes(row.average_chunk_bytes));
+                            ui.label(format_latency(row.p50_latency_ns));
+                            ui.label(format_latency(row.p95_latency_ns));
+                            ui.label(format_latency(row.p99_latency_ns));
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
+    fn files_ui(&self, ui: &mut egui::Ui) {
+        ui.label("파일 경로는 syscall 시점의 /proc/<pid>/fd/<fd>를 해석한 attribution이며, buffered writeback block request와의 exact correlation은 아닙니다.");
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("file-ios").striped(true).show(ui, |ui| {
+                for heading in [
+                    "End ns",
+                    "Op",
+                    "Requested",
+                    "Completed",
+                    "Latency",
+                    "PID",
+                    "FD",
+                    "Confidence",
+                    "Path",
+                ] {
+                    ui.strong(heading);
+                }
+                ui.end_row();
+                for file in self.analyzer.file_ios().iter().rev().take(1_000) {
+                    ui.label(file.end_ts_ns.to_string());
+                    ui.label(operation_label(file.operation));
+                    ui.label(format_bytes(file.requested_bytes));
+                    ui.label(file.completed_bytes.to_string());
+                    ui.label(format_duration(
+                        file.end_ts_ns.saturating_sub(file.start_ts_ns),
+                    ));
+                    ui.label(file.pid.to_string());
+                    ui.label(file.fd.to_string());
+                    ui.label(format!("{:?}", file.confidence));
+                    ui.label(file.path.as_deref().unwrap_or("<unresolved>"));
+                    ui.end_row();
+                }
+            });
+        });
     }
 
     fn table_ui(&self, ui: &mut egui::Ui) {
@@ -331,16 +596,23 @@ impl StudioApp {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 egui::Grid::new("recent-ios").striped(true).show(ui, |ui| {
-                    for heading in ["Time ns", "Op", "Bytes", "Sector", "Latency", "PID", "Comm"] {
+                    for heading in [
+                        "Time ns", "Op", "Access", "Size", "Bytes", "Sector", "Queue", "Device",
+                        "Total", "PID", "Comm",
+                    ] {
                         ui.strong(heading);
                     }
                     ui.end_row();
                     for io in self.recent.iter().rev().take(200) {
                         ui.label(io.completion.ts_ns.to_string());
                         ui.label(format!("{:?}", io.issue.operation));
+                        ui.label(access_label(io.access_pattern));
+                        ui.label(size_label(io.size_class));
                         ui.label(io.issue.bytes.to_string());
                         ui.label(io.issue.sector.to_string());
-                        ui.label(format_latency(Some(io.latency_ns)));
+                        ui.label(format_latency(io.queue_latency_ns));
+                        ui.label(format_latency(Some(io.device_latency_ns)));
+                        ui.label(format_latency(Some(io.total_latency_ns)));
                         ui.label(io.issue.pid.to_string());
                         ui.label(&io.issue.comm);
                         ui.end_row();
@@ -399,21 +671,36 @@ impl eframe::App for StudioApp {
         ui.label(RichText::new(&self.status).color(Color32::LIGHT_BLUE));
         self.metrics_ui(ui);
         ui.separator();
-        self.plot_ui(ui);
-        ui.heading("Recent completed block I/O");
-        self.table_ui(ui);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.page, Page::Summary, "Summary");
+            ui.selectable_value(&mut self.page, Page::Explorer, "Explorer");
+            ui.selectable_value(&mut self.page, Page::Events, "Block events");
+            ui.selectable_value(&mut self.page, Page::Files, "File I/O");
+        });
+        ui.separator();
+        match self.page {
+            Page::Summary => self.summary_ui(ui),
+            Page::Explorer => self.explorer_ui(ui),
+            Page::Events => {
+                ui.heading("Recent completed block I/O");
+                self.table_ui(ui);
+            }
+            Page::Files => self.files_ui(ui),
+        }
         if let Some(report) = &self.preflight {
             ui.collapsing("Device capabilities", |ui| {
                 ui.monospace(format!(
-                    "root={} abi={} android={} kernel={} BTF={} tracefs={} block_issue={} block_complete={}",
+                    "root={} abi={} android={} kernel={} BTF={} tracefs={} insert={} issue={} complete={} file_syscalls={}",
                     report.root,
                     report.abi,
                     report.android_version,
                     report.kernel_release,
                     report.btf,
                     report.tracefs,
+                    report.block_insert,
                     report.block_issue,
-                    report.block_complete
+                    report.block_complete,
+                    report.raw_syscalls
                 ));
                 ui.label(format!("UFS event paths: {}", report.ufs_events.len()));
             });
@@ -433,4 +720,75 @@ fn format_latency(value: Option<u64>) -> String {
         Some(ns) => format!("{ns} ns"),
         None => "—".into(),
     }
+}
+
+fn format_duration(ns: u64) -> String {
+    if ns >= 1_000_000_000 {
+        format!("{:.3} s", ns as f64 / 1e9)
+    } else if ns >= 1_000_000 {
+        format!("{:.3} ms", ns as f64 / 1e6)
+    } else if ns >= 1_000 {
+        format!("{:.1} µs", ns as f64 / 1e3)
+    } else {
+        format!("{ns} ns")
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.2} MiB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn ratio(part: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        part as f64 * 100.0 / total as f64
+    }
+}
+
+fn operation_label(value: IoOperation) -> &'static str {
+    match value {
+        IoOperation::Read => "Read",
+        IoOperation::Write => "Write",
+        IoOperation::Flush => "Flush",
+        IoOperation::Discard => "Discard",
+        IoOperation::Other => "Other",
+    }
+}
+
+fn access_label(value: AccessPattern) -> &'static str {
+    match value {
+        AccessPattern::Unknown => "Unknown",
+        AccessPattern::Sequential => "Sequential",
+        AccessPattern::Random => "Random",
+    }
+}
+
+fn size_label(value: IoSizeClass) -> &'static str {
+    match value {
+        IoSizeClass::Small => "Small (<32 KiB)",
+        IoSizeClass::Large => "Large (≥32 KiB)",
+    }
+}
+
+fn axis_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut AxisMetric) {
+    ui.label(label);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(value.label())
+        .show_ui(ui, |ui| {
+            for metric in AxisMetric::ALL {
+                ui.selectable_value(value, metric, metric.label());
+            }
+        });
+}
+
+fn summary_card(ui: &mut egui::Ui, label: &str, value: String) {
+    ui.label(label);
+    ui.heading(value);
 }

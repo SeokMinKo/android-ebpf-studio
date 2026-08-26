@@ -11,10 +11,13 @@ adb -s SERIAL shell getprop ro.product.cpu.abi
 adb -s SERIAL shell uname -r
 adb -s SERIAL shell test -r /sys/kernel/tracing/events/block/block_rq_issue/format
 adb -s SERIAL shell test -r /sys/kernel/tracing/events/block/block_rq_complete/format
+adb -s SERIAL shell test -r /sys/kernel/tracing/events/block/block_rq_insert/format
+adb -s SERIAL shell test -r /sys/kernel/tracing/events/raw_syscalls/sys_enter/format
+adb -s SERIAL shell test -r /sys/kernel/tracing/events/raw_syscalls/sys_exit/format
 adb -s SERIAL shell test -r /sys/kernel/btf/vmlinux
 ```
 
-필수 조건은 root shell, arm64 ABI, 두 block tracepoint입니다. BTF와 UFS event는 capability로 기록하지만 MVP generic block capture의 필수 조건은 아닙니다.
+필수 조건은 root shell, arm64 ABI, issue/complete block tracepoint입니다. insert가 없으면 queue latency가, raw_syscalls가 없으면 file attribution이 비활성화됩니다. BTF와 UFS event는 capability로 기록하지만 generic block capture의 필수 조건은 아닙니다.
 
 ## Collector 수동 실행
 
@@ -39,6 +42,8 @@ stdout은 NDJSON protocol 전용입니다. verifier 또는 attach 오류는 stde
 | verifier rejection | agent stderr, `dmesg` | layout, helper, map 또는 kernel BPF feature 불일치입니다. object/profile을 수정합니다. |
 | high userspace/kernel drops | `health` records | probe 축소, ring buffer 확대 또는 host 처리율 개선 후 새 session을 시작합니다. |
 | p95/p99가 비정상적으로 0 | footer/rejected/uncorrelated | 실제 0으로 간주하지 말고 correlation과 record rejection을 확인합니다. |
+| Queue latency가 모두 없음 | `block_rq_insert/format`, capability | 커널이 insert tracepoint를 노출하지 않거나 attach가 실패했습니다. |
+| File I/O가 없음 | `raw_syscalls/*/format`, capability | syscall tracepoint가 없거나 해당 수집 동안 read/write가 관측되지 않았습니다. |
 
 ## Cleanup
 

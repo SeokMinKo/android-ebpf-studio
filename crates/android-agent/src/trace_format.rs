@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use android_ebpf_types::{OFFSET_MISSING, TraceLayout};
+use android_ebpf_types::{OFFSET_MISSING, RawSyscallLayout, TraceLayout};
 use anyhow::{Context, Result, bail};
 
 pub fn parse_layout(input: &str) -> Result<TraceLayout> {
@@ -41,6 +41,47 @@ pub fn parse_layout(input: &str) -> Result<TraceLayout> {
         status_offset: optional(&offsets, &["error", "status"]),
         reserved: 0,
     })
+}
+
+pub fn parse_raw_syscall_layout(enter: &str, exit: &str) -> Result<RawSyscallLayout> {
+    let enter = parse_offsets(enter)?;
+    let exit = parse_offsets(exit)?;
+    Ok(RawSyscallLayout {
+        enter_id_offset: required(&enter, "id")?,
+        enter_args_offset: required(&enter, "args")?,
+        exit_ret_offset: required(&exit, "ret")?,
+        reserved: 0,
+    })
+}
+
+fn parse_offsets(input: &str) -> Result<HashMap<String, u16>> {
+    let mut offsets = HashMap::new();
+    for line in input.lines() {
+        let line = line.trim();
+        let Some(declaration) = line.strip_prefix("field:") else {
+            continue;
+        };
+        let Some((field_declaration, rest)) = declaration.split_once(';') else {
+            continue;
+        };
+        let Some(name) = field_declaration.split_whitespace().last() else {
+            continue;
+        };
+        let name = name
+            .trim_start_matches('*')
+            .split('[')
+            .next()
+            .unwrap_or(name);
+        let offset = rest
+            .split(';')
+            .find_map(|part| part.trim().strip_prefix("offset:"))
+            .with_context(|| format!("field {name} has no offset"))?
+            .trim()
+            .parse::<u16>()
+            .with_context(|| format!("field {name} offset is not a u16"))?;
+        offsets.insert(name.to_owned(), offset);
+    }
+    Ok(offsets)
 }
 
 fn required(offsets: &HashMap<String, u16>, name: &str) -> Result<u16> {

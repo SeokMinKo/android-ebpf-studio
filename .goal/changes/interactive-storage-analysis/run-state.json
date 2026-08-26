@@ -1,0 +1,11 @@
+{
+  "change_id": "interactive-storage-analysis",
+  "level": "L3",
+  "mode": "DURABLE",
+  "route": "DESIGN_FIRST",
+  "baseline": "1f1ab8f",
+  "spec": "CONFIRMED-EXPLICIT",
+  "active_task": "TSK-106",
+  "status": "VERIFYING_REMOTE",
+  "last_checkpoint": "2026-08-26T15:34:08+09:00"
+}

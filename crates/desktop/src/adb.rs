@@ -138,6 +138,8 @@ pub struct PreflightReport {
     pub tracefs: bool,
     pub block_issue: bool,
     pub block_complete: bool,
+    pub block_insert: bool,
+    pub raw_syscalls: bool,
     pub ufs_events: Vec<String>,
     pub diagnostics: Vec<String>,
 }
@@ -218,6 +220,29 @@ impl AdbClient {
                 "test",
                 "-r",
                 "/sys/kernel/tracing/events/block/block_rq_complete/format",
+            ],
+        )?;
+        report.block_insert = self.shell_bool(
+            &builder,
+            &[
+                "test",
+                "-r",
+                "/sys/kernel/tracing/events/block/block_rq_insert/format",
+            ],
+        )?;
+        report.raw_syscalls = self.shell_bool(
+            &builder,
+            &[
+                "test",
+                "-r",
+                "/sys/kernel/tracing/events/raw_syscalls/sys_enter/format",
+            ],
+        )? && self.shell_bool(
+            &builder,
+            &[
+                "test",
+                "-r",
+                "/sys/kernel/tracing/events/raw_syscalls/sys_exit/format",
             ],
         )?;
         let events = self.shell_text(

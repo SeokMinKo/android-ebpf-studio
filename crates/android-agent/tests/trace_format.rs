@@ -1,4 +1,4 @@
-use android_ebpf_agent::trace_format::parse_layout;
+use android_ebpf_agent::trace_format::{parse_layout, parse_raw_syscall_layout};
 use android_ebpf_types::OFFSET_MISSING;
 
 const FORMAT: &str = r#"
@@ -24,6 +24,22 @@ fn parses_kernel_tracepoint_offsets_by_field_name() {
     assert_eq!(layout.rwbs_offset, 32);
     assert_eq!(layout.request_offset, 56);
     assert_eq!(layout.status_offset, OFFSET_MISSING);
+}
+
+#[test]
+fn parses_raw_syscall_enter_and_exit_layouts() {
+    let enter = concat!(
+        "field:long id; offset:8; size:8; signed:1;\n",
+        "field:unsigned long args[6]; offset:16; size:48; signed:0;\n"
+    );
+    let exit = concat!(
+        "field:long id; offset:8; size:8; signed:1;\n",
+        "field:long ret; offset:16; size:8; signed:1;\n"
+    );
+    let layout = parse_raw_syscall_layout(enter, exit).unwrap();
+    assert_eq!(layout.enter_id_offset, 8);
+    assert_eq!(layout.enter_args_offset, 16);
+    assert_eq!(layout.exit_ret_offset, 16);
 }
 
 #[test]

@@ -7,9 +7,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
+pub const LARGE_IO_BYTES: u32 = 32 * 1024;
+const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoOperation {
     Read,
@@ -17,6 +19,18 @@ pub enum IoOperation {
     Flush,
     Discard,
     Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockInsert {
+    pub ts_ns: u64,
+    pub request_id: u64,
+    pub device_major: u32,
+    pub device_minor: u32,
+    pub sector: u64,
+    pub sectors: u32,
+    pub bytes: u32,
+    pub operation: IoOperation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,11 +58,37 @@ pub struct BlockComplete {
     pub status: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionConfidence {
+    Unknown,
+    Attributed,
+    Exact,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIo {
+    pub start_ts_ns: u64,
+    pub end_ts_ns: u64,
+    pub operation: IoOperation,
+    pub fd: i32,
+    pub requested_bytes: u64,
+    pub completed_bytes: i64,
+    pub pid: u32,
+    pub tid: u32,
+    pub comm: String,
+    pub path: Option<String>,
+    pub confidence: AttributionConfidence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum StorageEvent {
+    BlockInsert(BlockInsert),
     BlockIssue(BlockIssue),
     BlockComplete(BlockComplete),
+    FileIo(FileIo),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,8 +96,12 @@ pub struct ProbeCapabilities {
     pub bpf_syscall: bool,
     pub btf: bool,
     pub ring_buffer: bool,
+    #[serde(default)]
+    pub block_insert: bool,
     pub block_issue: bool,
     pub block_complete: bool,
+    #[serde(default)]
+    pub file_io: bool,
     #[serde(default)]
     pub exact_request_correlation: bool,
     #[serde(default)]
@@ -172,12 +216,44 @@ pub fn write_record<W: Write>(mut output: W, record: &WireRecord) -> Result<(), 
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessPattern {
+    Unknown,
+    Sequential,
+    Random,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoSizeClass {
+    Small,
+    Large,
+}
+
+impl IoSizeClass {
+    pub fn classify(bytes: u32) -> Self {
+        if bytes >= LARGE_IO_BYTES {
+            Self::Large
+        } else {
+            Self::Small
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedIo {
+    pub insert: Option<BlockInsert>,
     pub issue: BlockIssue,
     pub completion: BlockComplete,
+    /// Compatibility alias for issue-to-complete time.
     pub latency_ns: u64,
+    pub queue_latency_ns: Option<u64>,
+    pub device_latency_ns: u64,
+    pub total_latency_ns: u64,
     pub queue_depth_after: usize,
+    pub access_pattern: AccessPattern,
+    pub size_class: IoSizeClass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -188,39 +264,156 @@ struct RequestKey {
 }
 
 impl RequestKey {
-    fn issue(value: &BlockIssue) -> Self {
+    fn new(request_id: u64, device_major: u32, device_minor: u32) -> Self {
         Self {
-            request_id: value.request_id,
-            device_major: value.device_major,
-            device_minor: value.device_minor,
+            request_id,
+            device_major,
+            device_minor,
         }
     }
-
+    fn issue(value: &BlockIssue) -> Self {
+        Self::new(value.request_id, value.device_major, value.device_minor)
+    }
+    fn insert(value: &BlockInsert) -> Self {
+        Self::new(value.request_id, value.device_major, value.device_minor)
+    }
     fn complete(value: &BlockComplete) -> Self {
-        Self {
-            request_id: value.request_id,
-            device_major: value.device_major,
-            device_minor: value.device_minor,
-        }
+        Self::new(value.request_id, value.device_major, value.device_minor)
     }
 }
 
-/// Correlates block request issue/completion events while guarding request-ID reuse.
+#[derive(Debug)]
+struct PendingRequest {
+    issue: BlockIssue,
+    insert: Option<BlockInsert>,
+    access_pattern: AccessPattern,
+}
+
+/// Correlates optional insert, issue and completion events while guarding ID reuse.
 #[derive(Debug)]
 pub struct RequestCorrelator {
     ttl_ns: u64,
-    pending: HashMap<RequestKey, BlockIssue>,
+    inserted: HashMap<RequestKey, BlockInsert>,
+    pending: HashMap<RequestKey, PendingRequest>,
     ambiguous: HashMap<RequestKey, u64>,
     expired: u64,
     replaced: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccessPattern {
-    Unknown,
-    Sequential,
-    Random,
+impl RequestCorrelator {
+    pub fn new(ttl_ns: u64) -> Self {
+        assert!(ttl_ns > 0, "request correlation TTL must be positive");
+        Self {
+            ttl_ns,
+            inserted: HashMap::new(),
+            pending: HashMap::new(),
+            ambiguous: HashMap::new(),
+            expired: 0,
+            replaced: 0,
+        }
+    }
+
+    pub fn on_insert(&mut self, insert: BlockInsert) {
+        self.expire_before(insert.ts_ns);
+        let key = RequestKey::insert(&insert);
+        let ts_ns = insert.ts_ns;
+        if self.inserted.insert(key, insert).is_some() {
+            self.replaced += 1;
+            self.ambiguous.insert(key, ts_ns);
+        }
+    }
+
+    pub fn on_issue(&mut self, issue: BlockIssue) -> usize {
+        self.on_issue_classified(issue, AccessPattern::Unknown)
+    }
+
+    pub fn on_issue_classified(
+        &mut self,
+        issue: BlockIssue,
+        access_pattern: AccessPattern,
+    ) -> usize {
+        self.expire_before(issue.ts_ns);
+        let key = RequestKey::issue(&issue);
+        let insert = self.inserted.remove(&key);
+        let collision = self.ambiguous.contains_key(&key) || self.pending.remove(&key).is_some();
+        if collision {
+            self.replaced += 1;
+            self.ambiguous.insert(key, issue.ts_ns);
+        } else {
+            self.pending.insert(
+                key,
+                PendingRequest {
+                    issue,
+                    insert,
+                    access_pattern,
+                },
+            );
+        }
+        self.pending.len()
+    }
+
+    pub fn on_complete(&mut self, completion: BlockComplete) -> Option<CompletedIo> {
+        self.expire_before(completion.ts_ns);
+        let key = RequestKey::complete(&completion);
+        if self.ambiguous.remove(&key).is_some() {
+            return None;
+        }
+        let pending = self.pending.remove(&key)?;
+        let device_latency_ns = completion.ts_ns.checked_sub(pending.issue.ts_ns)?;
+        let queue_latency_ns = pending
+            .insert
+            .as_ref()
+            .and_then(|insert| pending.issue.ts_ns.checked_sub(insert.ts_ns));
+        let total_latency_ns = pending
+            .insert
+            .as_ref()
+            .and_then(|insert| completion.ts_ns.checked_sub(insert.ts_ns))
+            .unwrap_or(device_latency_ns);
+        let size_class = IoSizeClass::classify(pending.issue.bytes);
+        Some(CompletedIo {
+            insert: pending.insert,
+            issue: pending.issue,
+            completion,
+            latency_ns: device_latency_ns,
+            queue_latency_ns,
+            device_latency_ns,
+            total_latency_ns,
+            queue_depth_after: self.pending.len(),
+            access_pattern: pending.access_pattern,
+            size_class,
+        })
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+    pub fn expired_count(&self) -> u64 {
+        self.expired
+    }
+    pub fn replaced_count(&self) -> u64 {
+        self.replaced
+    }
+
+    fn expire_before(&mut self, now_ns: u64) {
+        let ttl = self.ttl_ns;
+        let mut expired = 0;
+        self.inserted.retain(|_, value| {
+            let keep = now_ns.saturating_sub(value.ts_ns) <= ttl;
+            expired += u64::from(!keep);
+            keep
+        });
+        self.pending.retain(|_, value| {
+            let keep = now_ns.saturating_sub(value.issue.ts_ns) <= ttl;
+            expired += u64::from(!keep);
+            keep
+        });
+        self.ambiguous.retain(|_, ts_ns| {
+            let keep = now_ns.saturating_sub(*ts_ns) <= ttl;
+            expired += u64::from(!keep);
+            keep
+        });
+        self.expired += expired;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,27 +425,18 @@ struct StreamKey {
 
 #[derive(Debug, Clone, Copy)]
 struct LastAccess {
-    ts_ns: u64,
     sector: u64,
     sectors: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SequentialClassifier {
-    window_ns: u64,
     streams: HashMap<StreamKey, LastAccess>,
 }
 
 impl SequentialClassifier {
-    pub fn new(window_ns: u64) -> Self {
-        assert!(
-            window_ns > 0,
-            "sequential classification window must be positive"
-        );
-        Self {
-            window_ns,
-            streams: HashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn classify(&mut self, issue: &BlockIssue) -> AccessPattern {
@@ -262,25 +446,32 @@ impl SequentialClassifier {
             operation: issue.operation,
         };
         let current = LastAccess {
-            ts_ns: issue.ts_ns,
             sector: issue.sector,
             sectors: issue.sectors,
         };
         match self.streams.insert(key, current) {
             None => AccessPattern::Unknown,
-            Some(previous) => {
-                let elapsed = issue.ts_ns.checked_sub(previous.ts_ns);
-                let next_sector = previous.sector.checked_add(previous.sectors as u64);
-                if elapsed.is_some_and(|value| value <= self.window_ns)
-                    && next_sector == Some(issue.sector)
-                {
-                    AccessPattern::Sequential
-                } else {
-                    AccessPattern::Random
-                }
+            Some(previous)
+                if previous.sector.checked_add(previous.sectors as u64) == Some(issue.sector) =>
+            {
+                AccessPattern::Sequential
             }
+            Some(_) => AccessPattern::Random,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategorySummary {
+    pub operation: IoOperation,
+    pub access_pattern: AccessPattern,
+    pub size_class: IoSizeClass,
+    pub completed_ios: u64,
+    pub bytes: u64,
+    pub average_chunk_bytes: u64,
+    pub p50_latency_ns: Option<u64>,
+    pub p95_latency_ns: Option<u64>,
+    pub p99_latency_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -293,10 +484,18 @@ pub struct AnalysisSummary {
     pub other_bytes: u64,
     pub sequential_ios: u64,
     pub random_ios: u64,
+    pub small_ios: u64,
+    pub large_ios: u64,
     pub max_queue_depth: usize,
     pub p50_latency_ns: Option<u64>,
     pub p95_latency_ns: Option<u64>,
     pub p99_latency_ns: Option<u64>,
+    pub logging_ns: u64,
+    pub busy_ns: u64,
+    pub idle_ns: u64,
+    pub file_ios: u64,
+    pub attributed_file_ios: u64,
+    pub category_summaries: Vec<CategorySummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -316,6 +515,13 @@ struct MutableBucket {
     max_queue_depth: usize,
 }
 
+#[derive(Debug, Default)]
+struct MutableCategory {
+    completed_ios: u64,
+    bytes: u64,
+    latencies: Vec<u64>,
+}
+
 #[derive(Debug)]
 pub struct AnalysisEngine {
     correlator: RequestCorrelator,
@@ -323,67 +529,138 @@ pub struct AnalysisEngine {
     summary: AnalysisSummary,
     latencies_ns: Vec<u64>,
     buckets: BTreeMap<u64, MutableBucket>,
+    categories: BTreeMap<(IoOperation, AccessPattern, IoSizeClass), MutableCategory>,
+    busy_intervals: Vec<(u64, u64)>,
+    first_ts_ns: Option<u64>,
+    last_ts_ns: Option<u64>,
+    completed: Vec<CompletedIo>,
+    file_ios: Vec<FileIo>,
 }
 
 impl AnalysisEngine {
     pub fn new() -> Self {
-        Self::with_windows(30_000_000_000, 10_000_000)
+        Self::with_windows(30_000_000_000, 0)
     }
 
-    pub fn with_windows(correlation_ttl_ns: u64, sequential_window_ns: u64) -> Self {
+    /// The second argument remains for source compatibility; continuity is now purely spatial.
+    pub fn with_windows(correlation_ttl_ns: u64, _sequential_window_ns: u64) -> Self {
         Self {
             correlator: RequestCorrelator::new(correlation_ttl_ns),
-            classifier: SequentialClassifier::new(sequential_window_ns),
+            classifier: SequentialClassifier::new(),
             summary: AnalysisSummary::default(),
             latencies_ns: Vec::new(),
             buckets: BTreeMap::new(),
+            categories: BTreeMap::new(),
+            busy_intervals: Vec::new(),
+            first_ts_ns: None,
+            last_ts_ns: None,
+            completed: Vec::new(),
+            file_ios: Vec::new(),
         }
     }
 
     pub fn ingest(&mut self, event: StorageEvent) -> Option<CompletedIo> {
         match event {
+            StorageEvent::BlockInsert(insert) => {
+                self.observe_ts(insert.ts_ns);
+                self.correlator.on_insert(insert);
+                None
+            }
             StorageEvent::BlockIssue(issue) => {
+                self.observe_ts(issue.ts_ns);
                 self.summary.issued_ios += 1;
-                match self.classifier.classify(&issue) {
+                let pattern = self.classifier.classify(&issue);
+                match pattern {
                     AccessPattern::Sequential => self.summary.sequential_ios += 1,
                     AccessPattern::Random => self.summary.random_ios += 1,
                     AccessPattern::Unknown => {}
                 }
-                let depth = self.correlator.on_issue(issue.clone());
+                match IoSizeClass::classify(issue.bytes) {
+                    IoSizeClass::Small => self.summary.small_ios += 1,
+                    IoSizeClass::Large => self.summary.large_ios += 1,
+                }
+                let ts_ns = issue.ts_ns;
+                let depth = self.correlator.on_issue_classified(issue, pattern);
                 self.summary.max_queue_depth = self.summary.max_queue_depth.max(depth);
                 self.buckets
-                    .entry(issue.ts_ns / 1_000_000_000)
+                    .entry(ts_ns / 1_000_000_000)
                     .or_default()
                     .max_queue_depth = depth;
                 None
             }
             StorageEvent::BlockComplete(completion) => {
+                self.observe_ts(completion.ts_ns);
                 let Some(completed) = self.correlator.on_complete(completion) else {
                     self.summary.uncorrelated_completions += 1;
                     return None;
                 };
-                self.summary.completed_ios += 1;
-                match completed.issue.operation {
-                    IoOperation::Read => {
-                        self.summary.read_bytes += completed.issue.bytes as u64;
-                    }
-                    IoOperation::Write => {
-                        self.summary.write_bytes += completed.issue.bytes as u64;
-                    }
-                    _ => self.summary.other_bytes += completed.issue.bytes as u64,
+                self.record_completed(&completed);
+                if self.completed.len() == MAX_ANALYSIS_SAMPLES {
+                    self.completed.drain(..MAX_ANALYSIS_SAMPLES / 10);
                 }
-                self.latencies_ns.push(completed.latency_ns);
-                let bucket = self
-                    .buckets
-                    .entry(completed.completion.ts_ns / 1_000_000_000)
-                    .or_default();
-                bucket.completed_ios += 1;
-                bucket.bytes += completed.issue.bytes as u64;
-                bucket.latency_sum_ns += completed.latency_ns as u128;
-                bucket.max_queue_depth = bucket.max_queue_depth.max(completed.queue_depth_after);
+                self.completed.push(completed.clone());
                 Some(completed)
             }
+            StorageEvent::FileIo(file) => {
+                self.observe_ts(file.start_ts_ns);
+                self.observe_ts(file.end_ts_ns);
+                self.summary.file_ios += 1;
+                if matches!(
+                    file.confidence,
+                    AttributionConfidence::Attributed | AttributionConfidence::Exact
+                ) {
+                    self.summary.attributed_file_ios += 1;
+                }
+                if self.file_ios.len() == MAX_ANALYSIS_SAMPLES {
+                    self.file_ios.drain(..MAX_ANALYSIS_SAMPLES / 10);
+                }
+                self.file_ios.push(file);
+                None
+            }
         }
+    }
+
+    fn record_completed(&mut self, completed: &CompletedIo) {
+        self.summary.completed_ios += 1;
+        let bytes = completed.issue.bytes as u64;
+        match completed.issue.operation {
+            IoOperation::Read => self.summary.read_bytes += bytes,
+            IoOperation::Write => self.summary.write_bytes += bytes,
+            _ => self.summary.other_bytes += bytes,
+        }
+        self.latencies_ns.push(completed.total_latency_ns);
+        let start = completed
+            .insert
+            .as_ref()
+            .map_or(completed.issue.ts_ns, |value| value.ts_ns);
+        merge_interval(
+            &mut self.busy_intervals,
+            (start, completed.completion.ts_ns),
+        );
+        let bucket = self
+            .buckets
+            .entry(completed.completion.ts_ns / 1_000_000_000)
+            .or_default();
+        bucket.completed_ios += 1;
+        bucket.bytes += bytes;
+        bucket.latency_sum_ns += completed.total_latency_ns as u128;
+        bucket.max_queue_depth = bucket.max_queue_depth.max(completed.queue_depth_after);
+        let category = self
+            .categories
+            .entry((
+                completed.issue.operation,
+                completed.access_pattern,
+                completed.size_class,
+            ))
+            .or_default();
+        category.completed_ios += 1;
+        category.bytes += bytes;
+        category.latencies.push(completed.total_latency_ns);
+    }
+
+    fn observe_ts(&mut self, ts_ns: u64) {
+        self.first_ts_ns = Some(self.first_ts_ns.map_or(ts_ns, |value| value.min(ts_ns)));
+        self.last_ts_ns = Some(self.last_ts_ns.map_or(ts_ns, |value| value.max(ts_ns)));
     }
 
     pub fn summary(&self) -> AnalysisSummary {
@@ -393,7 +670,39 @@ impl AnalysisEngine {
         summary.p50_latency_ns = percentile(&values, 50);
         summary.p95_latency_ns = percentile(&values, 95);
         summary.p99_latency_ns = percentile(&values, 99);
+        summary.logging_ns = self
+            .first_ts_ns
+            .zip(self.last_ts_ns)
+            .map_or(0, |(first, last)| last.saturating_sub(first));
+        summary.busy_ns = union_duration(&self.busy_intervals).min(summary.logging_ns);
+        summary.idle_ns = summary.logging_ns.saturating_sub(summary.busy_ns);
+        summary.category_summaries = self
+            .categories
+            .iter()
+            .map(|(&(operation, access_pattern, size_class), value)| {
+                let mut latencies = value.latencies.clone();
+                latencies.sort_unstable();
+                CategorySummary {
+                    operation,
+                    access_pattern,
+                    size_class,
+                    completed_ios: value.completed_ios,
+                    bytes: value.bytes,
+                    average_chunk_bytes: value.bytes / value.completed_ios.max(1),
+                    p50_latency_ns: percentile(&latencies, 50),
+                    p95_latency_ns: percentile(&latencies, 95),
+                    p99_latency_ns: percentile(&latencies, 99),
+                }
+            })
+            .collect();
         summary
+    }
+
+    pub fn completed_ios(&self) -> &[CompletedIo] {
+        &self.completed
+    }
+    pub fn file_ios(&self) -> &[FileIo] {
+        &self.file_ios
     }
 
     pub fn buckets(&self) -> Vec<TimeBucket> {
@@ -428,69 +737,39 @@ fn percentile(sorted: &[u64], percentile: usize) -> Option<u64> {
     sorted.get(rank - 1).copied()
 }
 
-impl RequestCorrelator {
-    pub fn new(ttl_ns: u64) -> Self {
-        assert!(ttl_ns > 0, "request correlation TTL must be positive");
-        Self {
-            ttl_ns,
-            pending: HashMap::new(),
-            ambiguous: HashMap::new(),
-            expired: 0,
-            replaced: 0,
-        }
-    }
-
-    pub fn on_issue(&mut self, issue: BlockIssue) -> usize {
-        self.expire_before(issue.ts_ns);
-        let key = RequestKey::issue(&issue);
-        let collision = self.ambiguous.contains_key(&key) || self.pending.remove(&key).is_some();
-        if collision {
-            self.replaced += 1;
-            self.ambiguous.insert(key, issue.ts_ns);
+fn union_duration(intervals: &[(u64, u64)]) -> u64 {
+    let mut values: Vec<_> = intervals
+        .iter()
+        .copied()
+        .filter(|(start, end)| end >= start)
+        .collect();
+    values.sort_unstable();
+    let Some((mut start, mut end)) = values.first().copied() else {
+        return 0;
+    };
+    let mut total = 0_u64;
+    for (next_start, next_end) in values.into_iter().skip(1) {
+        if next_start <= end {
+            end = end.max(next_end);
         } else {
-            self.pending.insert(key, issue);
+            total = total.saturating_add(end.saturating_sub(start));
+            start = next_start;
+            end = next_end;
         }
-        self.pending.len()
     }
+    total.saturating_add(end.saturating_sub(start))
+}
 
-    pub fn on_complete(&mut self, completion: BlockComplete) -> Option<CompletedIo> {
-        self.expire_before(completion.ts_ns);
-        let key = RequestKey::complete(&completion);
-        if self.ambiguous.remove(&key).is_some() {
-            return None;
-        }
-        let issue = self.pending.remove(&key)?;
-        let latency_ns = completion.ts_ns.checked_sub(issue.ts_ns)?;
-        Some(CompletedIo {
-            issue,
-            completion,
-            latency_ns,
-            queue_depth_after: self.pending.len(),
-        })
+fn merge_interval(intervals: &mut Vec<(u64, u64)>, (mut start, mut end): (u64, u64)) {
+    if end < start {
+        return;
     }
-
-    pub fn pending_len(&self) -> usize {
-        self.pending.len()
+    let first = intervals.partition_point(|(_, current_end)| *current_end < start);
+    let mut last = first;
+    while last < intervals.len() && intervals[last].0 <= end {
+        start = start.min(intervals[last].0);
+        end = end.max(intervals[last].1);
+        last += 1;
     }
-
-    pub fn expired_count(&self) -> u64 {
-        self.expired
-    }
-
-    pub fn replaced_count(&self) -> u64 {
-        self.replaced
-    }
-
-    fn expire_before(&mut self, now_ns: u64) {
-        let ttl_ns = self.ttl_ns;
-        let before = self.pending.len();
-        self.pending
-            .retain(|_, issue| now_ns.saturating_sub(issue.ts_ns) <= ttl_ns);
-        let pending_expired = before - self.pending.len();
-        let ambiguous_before = self.ambiguous.len();
-        self.ambiguous
-            .retain(|_, ts_ns| now_ns.saturating_sub(*ts_ns) <= ttl_ns);
-        self.expired +=
-            (pending_expired + ambiguous_before.saturating_sub(self.ambiguous.len())) as u64;
-    }
+    intervals.splice(first..last, [(start, end)]);
 }
