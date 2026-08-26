@@ -141,6 +141,8 @@ pub struct PreflightReport {
     pub block_insert: bool,
     pub raw_syscalls: bool,
     pub ufs_events: Vec<String>,
+    pub scsi_events: Vec<String>,
+    pub fs_events: Vec<String>,
     pub diagnostics: Vec<String>,
 }
 
@@ -260,6 +262,21 @@ impl AdbClient {
             .lines()
             .filter(|line| line.to_ascii_lowercase().contains("ufs"))
             .take(128)
+            .map(str::to_owned)
+            .collect();
+        report.scsi_events = events
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().contains("scsi"))
+            .take(128)
+            .map(str::to_owned)
+            .collect();
+        report.fs_events = events
+            .lines()
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("f2fs") || lower.contains("ext4")
+            })
+            .take(256)
             .map(str::to_owned)
             .collect();
         Ok(report)

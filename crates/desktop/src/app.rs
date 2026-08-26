@@ -8,15 +8,16 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AccessPattern, AnalysisEngine, CompletedIo, IoOperation, IoSizeClass, SCHEMA_VERSION,
-    WireRecord,
+    AccessPattern, AnalysisEngine, CompletedIo, CorrelationConfidence, IoOperation, IoSizeClass,
+    PipelineLayer, SCHEMA_VERSION, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
-use egui_plot::{Legend, Plot, PlotPoints, Points};
+use egui_plot::{Legend, Line, Plot, PlotPoints, Points};
 
 use crate::{
     adb::{AdbClient, AdbDevice, DeviceState, PreflightReport},
+    artifacts::{CapturePaths, create_default_session_path},
     capture::{self, CaptureHandle, HostMessage},
     session::{self, SessionWriter},
     simulator,
@@ -37,6 +38,7 @@ const RED: Color32 = Color32::from_rgb(242, 102, 112);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
     Summary,
+    Pipeline,
     Explorer,
     Events,
     Files,
@@ -162,6 +164,7 @@ pub struct StudioApp {
     x_axis: AxisMetric,
     y_axis: AxisMetric,
     group_by: GroupBy,
+    selected_pipeline_request: Option<u64>,
 }
 
 impl Default for StudioApp {
@@ -188,6 +191,7 @@ impl Default for StudioApp {
             x_axis: AxisMetric::TimeMs,
             y_axis: AxisMetric::TotalLatencyMs,
             group_by: GroupBy::Direction,
+            selected_pipeline_request: None,
         }
     }
 }
@@ -223,14 +227,7 @@ impl StudioApp {
         }
     }
 
-    fn select_session_path(&mut self) -> bool {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("NDJSON session", &["ndjson"])
-            .set_file_name("android-storage-session.ndjson")
-            .save_file()
-        else {
-            return false;
-        };
+    fn create_session_at(&mut self, path: PathBuf) -> bool {
         match SessionWriter::create(&path) {
             Ok(writer) => {
                 self.writer = Some(writer);
@@ -257,34 +254,36 @@ impl StudioApp {
             self.push_diagnostic("Full eBPF preflight has not passed".into());
             return;
         }
-        let Some(agent) = rfd::FileDialog::new()
-            .set_title("Select Android arm64 agent")
-            .pick_file()
-        else {
-            return;
+        let paths = match CapturePaths::discover() {
+            Ok(paths) => paths,
+            Err(error) => {
+                self.push_diagnostic(error.to_string());
+                return;
+            }
         };
-        let Some(bpf) = rfd::FileDialog::new()
-            .add_filter("eBPF object", &["o"])
-            .set_title("Select storage eBPF object")
-            .pick_file()
-        else {
-            return;
-        };
-        if !self.select_session_path() {
+        if !self.create_session_at(paths.session.clone()) {
             return;
         }
+        self.status = format!("Auto-configured capture → {}", paths.session.display());
         self.reset_analysis();
         self.capture = Some(capture::start_adb(
             self.adb.clone(),
             serial,
-            agent,
-            bpf,
+            paths.agent,
+            paths.bpf_object,
             self.tx.clone(),
         ));
     }
 
     fn start_simulator(&mut self) {
-        if !self.select_session_path() {
+        let path = match create_default_session_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.push_diagnostic(error.to_string());
+                return;
+            }
+        };
+        if !self.create_session_at(path) {
             return;
         }
         self.reset_analysis();
@@ -432,6 +431,7 @@ impl StudioApp {
         self.recent.clear();
         self.received_events = 0;
         self.rejected_records = 0;
+        self.selected_pipeline_request = None;
     }
 
     fn push_diagnostic(&mut self, value: String) {
@@ -650,6 +650,97 @@ impl StudioApp {
                             }
                         });
                 });
+        });
+    }
+
+    fn pipeline_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(
+            ui,
+            "I/O pipeline waterfall",
+            "Follow one request across userspace and the measured kernel storage stack.",
+        );
+        info_banner(
+            ui,
+            "Exact = direct request/tag association. Probable = time + LBA/size/thread correlation. UIC is context-only and is never added as command latency.",
+        );
+        ui.add_space(10.0);
+
+        let selected = self
+            .selected_pipeline_request
+            .and_then(|request_id| self.analyzer.completed_ios().iter().find(|io| io.issue.request_id == request_id))
+            .cloned()
+            .or_else(|| self.analyzer.completed_ios().last().cloned());
+        let Some(io) = selected else {
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("No completed request yet").strong().color(TEXT));
+                ui.label(RichText::new("Start the simulator or an eBPF capture to populate the pipeline.").color(MUTED));
+            });
+            return;
+        };
+        self.selected_pipeline_request = Some(io.issue.request_id);
+        let pipeline = self.analyzer.pipeline_for(&io);
+
+        card_frame().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("REQUEST").size(10.0).strong().color(MUTED));
+                egui::ComboBox::from_id_salt("pipeline-request")
+                    .selected_text(format!("#{} · {} · {}", io.issue.request_id, operation_label(io.issue.operation), format_bytes(io.issue.bytes as u64)))
+                    .width(280.0)
+                    .show_ui(ui, |ui| {
+                        for candidate in self.analyzer.completed_ios().iter().rev().take(500) {
+                            ui.selectable_value(
+                                &mut self.selected_pipeline_request,
+                                Some(candidate.issue.request_id),
+                                format!("#{} · {} · sector {} · {}", candidate.issue.request_id, operation_label(candidate.issue.operation), candidate.issue.sector, format_bytes(candidate.issue.bytes as u64)),
+                            );
+                        }
+                    });
+                ui.separator();
+                ui.label(format!("Total {}", format_duration(pipeline.total_ns())));
+                ui.label(RichText::new(format!("Measured coverage {}", format_duration(pipeline.accounted_ns))).color(GREEN));
+                ui.label(RichText::new(format!("Unaccounted {}", format_duration(pipeline.unaccounted_ns))).color(if pipeline.unaccounted_ns == 0 { MUTED } else { AMBER }));
+            });
+        });
+        ui.add_space(10.0);
+
+        let origin = pipeline.start_ts_ns;
+        card_frame().show(ui, |ui| {
+            Plot::new("pipeline-waterfall")
+                .height(390.0)
+                .x_axis_label("Time from pipeline start (ms)")
+                .y_axis_label("Layer (Syscall → UIC)")
+                .legend(Legend::default())
+                .allow_drag(true)
+                .allow_zoom(true)
+                .show(ui, |plot| {
+                    for span in &pipeline.spans {
+                        let x0 = span.start_ts_ns.saturating_sub(origin) as f64 / 1e6;
+                        let x1 = span.end_ts_ns.saturating_sub(origin) as f64 / 1e6;
+                        let y = pipeline_layer_y(span.layer);
+                        let label = format!("{} · {} · {}", pipeline_layer_label(span.layer), confidence_label(span.confidence), span.name);
+                        if span.duration_ns() == 0 {
+                            plot.points(Points::new(label, PlotPoints::from(vec![[x0, y]])).radius(6.0).color(pipeline_layer_color(span.layer)));
+                        } else {
+                            plot.line(Line::new(label, PlotPoints::from(vec![[x0, y], [x1, y]])).width(10.0).color(pipeline_layer_color(span.layer)));
+                        }
+                    }
+                });
+            ui.label(RichText::new("Drag to pan · wheel to zoom · double-click to reset. Nested bars are not summed; coverage uses interval union.").small().color(MUTED));
+        });
+
+        ui.add_space(10.0);
+        card_frame().show(ui, |ui| {
+            egui::Grid::new("pipeline-detail").striped(true).spacing([18.0, 8.0]).show(ui, |ui| {
+                for heading in ["Layer", "Duration", "Confidence", "Source"] { ui.strong(heading); }
+                ui.end_row();
+                for span in &pipeline.spans {
+                    ui.label(pipeline_layer_label(span.layer));
+                    ui.label(format_duration(span.duration_ns()));
+                    ui.label(confidence_label(span.confidence));
+                    ui.label(&span.source);
+                    ui.end_row();
+                }
+            });
         });
     }
 
@@ -929,6 +1020,14 @@ impl eframe::App for StudioApp {
                 nav_item(
                     ui,
                     &mut self.page,
+                    Page::Pipeline,
+                    "⇢",
+                    "Pipeline",
+                    "Syscall → UFS waterfall",
+                );
+                nav_item(
+                    ui,
+                    &mut self.page,
                     Page::Explorer,
                     "⌁",
                     "Explorer",
@@ -1005,6 +1104,7 @@ impl eframe::App for StudioApp {
                     ui.add_space(20.0);
                     match self.page {
                         Page::Summary => self.summary_ui(ui),
+                        Page::Pipeline => self.pipeline_ui(ui),
                         Page::Explorer => self.explorer_ui(ui),
                         Page::Events => self.table_ui(ui),
                         Page::Files => self.files_ui(ui),
@@ -1173,11 +1273,13 @@ fn capability_panel(ui: &mut egui::Ui, report: &PreflightReport) {
         });
         ui.label(
             RichText::new(format!(
-                "{}  •  Android {}  •  Kernel {}  •  {} UFS event path(s)",
+                "{}  •  Android {}  •  Kernel {}  •  UFS {}  •  SCSI {}  •  FS {} event path(s)",
                 report.abi,
                 report.android_version,
                 report.kernel_release,
-                report.ufs_events.len()
+                report.ufs_events.len(),
+                report.scsi_events.len(),
+                report.fs_events.len()
             ))
             .size(10.0)
             .color(MUTED),
@@ -1251,6 +1353,53 @@ fn size_label(value: IoSizeClass) -> &'static str {
     match value {
         IoSizeClass::Small => "Small (<32 KiB)",
         IoSizeClass::Large => "Large (≥32 KiB)",
+    }
+}
+
+fn pipeline_layer_label(value: PipelineLayer) -> &'static str {
+    match value {
+        PipelineLayer::Syscall => "UserSpace / Syscall",
+        PipelineLayer::Vfs => "Kernel / VFS",
+        PipelineLayer::Filesystem => "Kernel / Filesystem",
+        PipelineLayer::BlockQueue => "Kernel / Block Queue",
+        PipelineLayer::BlockDevice => "Kernel / Block Device",
+        PipelineLayer::Scsi => "Kernel / SCSI",
+        PipelineLayer::Ufs => "Kernel / UFS",
+        PipelineLayer::UicContext => "UIC Context",
+    }
+}
+
+fn pipeline_layer_y(value: PipelineLayer) -> f64 {
+    match value {
+        PipelineLayer::Syscall => 8.0,
+        PipelineLayer::Vfs => 7.0,
+        PipelineLayer::Filesystem => 6.0,
+        PipelineLayer::BlockQueue => 5.0,
+        PipelineLayer::BlockDevice => 4.0,
+        PipelineLayer::Scsi => 3.0,
+        PipelineLayer::Ufs => 2.0,
+        PipelineLayer::UicContext => 1.0,
+    }
+}
+
+fn pipeline_layer_color(value: PipelineLayer) -> Color32 {
+    match value {
+        PipelineLayer::Syscall => Color32::from_rgb(108, 174, 255),
+        PipelineLayer::Vfs => Color32::from_rgb(88, 211, 181),
+        PipelineLayer::Filesystem => Color32::from_rgb(116, 220, 120),
+        PipelineLayer::BlockQueue => Color32::from_rgb(244, 197, 92),
+        PipelineLayer::BlockDevice => Color32::from_rgb(255, 153, 85),
+        PipelineLayer::Scsi => Color32::from_rgb(235, 118, 137),
+        PipelineLayer::Ufs => Color32::from_rgb(190, 126, 255),
+        PipelineLayer::UicContext => Color32::from_rgb(157, 166, 184),
+    }
+}
+
+fn confidence_label(value: CorrelationConfidence) -> &'static str {
+    match value {
+        CorrelationConfidence::Exact => "Exact",
+        CorrelationConfidence::Probable => "Probable",
+        CorrelationConfidence::ContextOnly => "Context only",
     }
 }
 
