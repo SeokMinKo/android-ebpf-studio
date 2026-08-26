@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt,clippy
+      - name: Format
+        run: cargo +1.98.0 fmt --check
+      - name: Clippy
+        run: cargo +1.98.0 clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo +1.98.0 test --workspace
+
+  windows-gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Check Windows GUI
+        run: cargo +1.98.0 check -p android-ebpf-studio --features gui
+
+  ebpf-object:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - name: Install pinned bpf-linker
+        run: |
+          curl -L --fail --silent --show-error \
+            https://github.com/aya-rs/bpf-linker/releases/download/v0.11.0/bpf-linker-x86_64-unknown-linux-musl.tar.zst \
+            -o /tmp/bpf-linker.tar.zst
+          echo "10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450  /tmp/bpf-linker.tar.zst" | sha256sum -c -
+          tar --zstd -xf /tmp/bpf-linker.tar.zst -C "$HOME/.cargo/bin"
+      - name: Build eBPF object
+        run: ./scripts/build-ebpf.sh
+
+  android-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust target
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup target add aarch64-linux-android --toolchain 1.98.0
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${ANDROID_NDK_LATEST_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" >> "$GITHUB_ENV"
+      - name: Build Android arm64 agent
+        run: cargo +1.98.0 build --release -p android-ebpf-agent --target aarch64-linux-android

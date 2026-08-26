@@ -1,0 +1,20 @@
+[package]
+name = "android-storage-ebpf"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+android-ebpf-types = { path = "../ebpf-types" }
+aya-ebpf = "0.2.1"
+
+[[bin]]
+name = "android-storage-ebpf"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3

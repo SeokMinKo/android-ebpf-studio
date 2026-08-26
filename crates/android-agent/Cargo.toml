@@ -1,0 +1,21 @@
+[package]
+name = "android-ebpf-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+android-ebpf-types = { path = "../ebpf-types" }
+android-ebpf-protocol = { path = "../protocol" }
+anyhow.workspace = true
+aya = "0.14.0"
+clap.workspace = true
+ctrlc = "3.5"
+serde_json.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "android-ebpf-agent"
+path = "src/main.rs"

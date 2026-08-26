@@ -1,0 +1,122 @@
+{
+  "schema_version": 2,
+  "change_id": "storage-ebpf-mvp",
+  "level": "L3",
+  "execution_mode": "DURABLE",
+  "route": "DESIGN_FIRST",
+  "run_status": "BLOCKED",
+  "phase": "P10",
+  "max_active_streams": 1,
+  "evidence_order": ["0002", "0006", "0007", "0008", "0011", "0012", "0013", "0014", "0015", "0016"],
+  "required_spec_ids": ["REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "REQ-010", "NFR-001", "NFR-002", "NFR-003", "NFR-004", "CON-001", "CON-002", "INV-001"],
+  "spec": {
+    "path": "spec.md",
+    "revision": 1,
+    "hash": "sha256:2a366008fd10cf1fd7673cb8306e1a3fc5aae95e8ff09d15334dbfd3a929ea43",
+    "confirmation": "CONFIRMED-AUTO",
+    "lifecycle": "BLOCKED"
+  },
+  "artifacts": [
+    {"id": "research", "role": "RESEARCH", "path": "research.md", "revision": 1, "status": "CONFIRMED", "current": true, "derived_from": ["spec@1"]},
+    {"id": "design", "role": "DESIGN", "path": "design.md", "revision": 1, "status": "CONFIRMED", "current": true, "derived_from": ["spec@1", "research@1"]},
+    {"id": "tasks", "role": "TASKS", "path": "tasks.md", "revision": 1, "status": "CONFIRMED", "current": true, "derived_from": ["spec@1", "design@1"]},
+    {"id": "worklog", "role": "WORKLOG", "path": "WORKLOG.md", "revision": 1, "status": "DRAFT", "current": true, "derived_from": ["spec@1", "tasks@1"]},
+    {"id": "evidence", "role": "EVIDENCE", "path": "evidence/ledger.md", "revision": 1, "status": "DRAFT", "current": true, "derived_from": ["spec@1", "tasks@1"]}
+  ],
+  "tasks": [
+    {
+      "id": "TSK-001",
+      "spec_ids": ["REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "NFR-002", "CON-002", "INV-001"],
+      "depends_on": [],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": ["crates/protocol/**"],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": true,
+      "tdd_cycles": [{
+        "test_id": "TST-001",
+        "kind": "NEW_BEHAVIOR",
+        "state": "DONE",
+        "red": {"sequence_or_time": "0002", "spec_ids": ["REQ-004", "CON-002"], "task_id": "TSK-001", "test_id": "TST-001", "command": "cargo test -p android-ebpf-protocol --test correlation", "exit": 101, "raw_summary": "unresolved protocol imports", "scope": "correlation API absent", "artifact_revision": "spec@1"},
+        "green": {"sequence_or_time": "0007", "spec_ids": ["REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "NFR-002", "CON-002", "INV-001"], "task_id": "TSK-001", "test_id": "TST-001", "command": "cargo test --workspace", "exit": 0, "raw_summary": "13 tests passed", "scope": "protocol and workspace behavior", "artifact_revision": "spec@1"},
+        "refactor": {"sequence_or_time": "0016", "spec_ids": ["REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "NFR-002", "CON-002", "INV-001"], "task_id": "TSK-001", "test_id": "TST-001", "command": "cargo fmt --all -- --check", "exit": 0, "raw_summary": "workspace formatting passed", "scope": "protocol refactor convergence", "artifact_revision": "spec@1"}
+      }],
+      "evidence": [{"sequence_or_time": "0013", "spec_ids": ["REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "NFR-002", "CON-002", "INV-001"], "task_id": "TSK-001", "test_ids": ["TST-001"], "command": "cargo test -p android-ebpf-protocol", "exit": 0, "raw_summary": "8 protocol integration tests passed", "scope": "protocol behavior completion", "artifact_revision": "spec@1"}]
+    },
+    {
+      "id": "TSK-002",
+      "spec_ids": ["REQ-001", "REQ-002", "REQ-003", "NFR-003", "CON-001"],
+      "depends_on": ["TSK-001"],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": ["crates/desktop/src/adb.rs", "crates/desktop/tests/adb.rs"],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": true,
+      "tdd_cycles": [{
+        "test_id": "TST-005",
+        "kind": "NEW_BEHAVIOR",
+        "state": "DONE",
+        "red": {"sequence_or_time": "0006", "spec_ids": ["REQ-001", "NFR-003"], "task_id": "TSK-002", "test_id": "TST-005", "command": "cargo test -p android-ebpf-studio --test adb", "exit": 101, "raw_summary": "missing adb module", "scope": "ADB transport absent", "artifact_revision": "spec@1"},
+        "green": {"sequence_or_time": "0011", "spec_ids": ["REQ-001", "REQ-002", "REQ-003", "NFR-003", "CON-001"], "task_id": "TSK-002", "test_id": "TST-005", "command": "cargo test --workspace", "exit": 0, "raw_summary": "3 ADB tests passed within 13-test suite", "scope": "selected-serial ADB transport", "artifact_revision": "spec@1"},
+        "refactor": {"sequence_or_time": "0015", "spec_ids": ["REQ-001", "REQ-002", "REQ-003", "NFR-003", "CON-001"], "task_id": "TSK-002", "test_id": "TST-005", "command": "cargo clippy --workspace --all-targets -- -D warnings", "exit": 0, "raw_summary": "workspace clippy passed", "scope": "ADB refactor convergence", "artifact_revision": "spec@1"}
+      }],
+      "evidence": [{"sequence_or_time": "0014", "spec_ids": ["REQ-001", "REQ-002", "REQ-003", "NFR-003", "CON-001"], "task_id": "TSK-002", "test_ids": ["TST-005"], "command": "cargo test -p android-ebpf-studio --test adb", "exit": 0, "raw_summary": "3 ADB tests passed", "scope": "selected-serial ADB behavior completion", "artifact_revision": "spec@1"}]
+    },
+    {
+      "id": "TSK-003",
+      "spec_ids": ["REQ-005", "REQ-010", "NFR-001"],
+      "depends_on": ["TSK-001", "TSK-002"],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": ["crates/desktop/**"],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": false,
+      "tdd_cycles": [],
+      "evidence": [{"sequence_or_time": "0012", "spec_ids": ["REQ-005", "REQ-010", "NFR-001"], "task_id": "TSK-003", "test_ids": [], "command": "cargo clippy -p android-ebpf-studio --all-targets --features gui -- -D warnings", "exit": 0, "raw_summary": "GUI-feature targets compiled without warnings", "scope": "desktop GUI and simulator static path", "artifact_revision": "spec@1"}]
+    },
+    {
+      "id": "TSK-004",
+      "spec_ids": ["REQ-002", "REQ-003", "REQ-009"],
+      "depends_on": ["TSK-001"],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": ["crates/android-agent/**", "crates/android-ebpf/**", "crates/ebpf-types/**", "scripts/**"],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": false,
+      "tdd_cycles": [],
+      "evidence": [{"sequence_or_time": "0008", "spec_ids": ["REQ-002", "REQ-003", "REQ-009"], "task_id": "TSK-004", "test_ids": [], "command": "cargo +nightly build --manifest-path crates/android-ebpf/Cargo.toml --target bpfel-unknown-none -Z build-std=core --release", "exit": 0, "raw_summary": "optimized eBPF build passed", "scope": "eBPF compiler and linker", "artifact_revision": "spec@1"}]
+    },
+    {
+      "id": "TSK-005",
+      "spec_ids": ["NFR-004"],
+      "depends_on": ["TSK-001", "TSK-002", "TSK-003", "TSK-004"],
+      "status": "blocked",
+      "stream_id": "release",
+      "planned_paths": [".github/**", "README.md", "docs/**", ".goal/changes/storage-ebpf-mvp/**"],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": false,
+      "tdd_cycles": [],
+      "evidence": [],
+      "blocker": "GitHub secure browser login did not complete; the connector cannot create repositories.",
+      "resume": "After the user authorizes another secure sign-in request, create the private repository, upload the tree, and inspect all CI jobs."
+    }
+  ],
+  "gaps": [
+    {"id": "GAP-001", "severity": "medium", "kind": "partial", "status": "open", "source": "REQ-003", "action": "Run the device checklist on the user's adb-root Android phone."},
+    {"id": "GAP-002", "severity": "medium", "kind": "partial", "status": "open", "source": "NFR-004", "action": "Create the GitHub repository and inspect CI after secure sign-in succeeds."}
+  ],
+  "checkpoint": {
+    "seq": 3,
+    "spec_revision": 1,
+    "completed_tasks": ["TSK-001", "TSK-002", "TSK-003", "TSK-004"],
+    "next_tasks": ["TSK-005"],
+    "blockers": ["GitHub secure browser login did not complete; the connector cannot create repositories."],
+    "evidence_cursor": "0016",
+    "resume": "After the user authorizes another secure sign-in request, create the private repository, upload the tree, and inspect all CI jobs."
+  }
+}

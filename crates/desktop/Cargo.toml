@@ -1,0 +1,31 @@
+[package]
+name = "android-ebpf-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+gui = ["dep:eframe", "dep:egui_plot", "dep:rfd"]
+
+[dependencies]
+android-ebpf-protocol = { path = "../protocol" }
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+csv.workspace = true
+eframe = { workspace = true, optional = true }
+egui_plot = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "android-ebpf-studio"
+path = "src/main.rs"
+required-features = ["gui"]
