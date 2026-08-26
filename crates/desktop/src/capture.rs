@@ -61,6 +61,7 @@ pub fn run_preflight(client: AdbClient, serial: String, tx: Sender<HostMessage>)
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_adb(
     client: AdbClient,
     serial: String,
