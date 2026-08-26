@@ -110,6 +110,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --notes "Redesigned Windows workspace with guided device setup, high-contrast KPI cards, clearer analysis navigation, interactive plots, Android arm64 agent, and eBPF collector. Download the ZIP for the complete package."
             gh release upload "$RELEASE_TAG" release/* --clobber
           else
             gh release create "$RELEASE_TAG" release/* \
