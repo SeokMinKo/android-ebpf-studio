@@ -153,10 +153,19 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 format!("pipeline_{:?}", stage.layer).to_lowercase(),
                 stage.end_ts_ns.unwrap_or(stage.ts_ns).to_string(),
                 stage.ts_ns.to_string(),
-                stage.correlation_id.map(|value| value.to_string()).unwrap_or_default(),
+                stage
+                    .correlation_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
                 String::new(),
-                stage.sector.map(|value| value.to_string()).unwrap_or_default(),
-                stage.bytes.map(|value| value.to_string()).unwrap_or_default(),
+                stage
+                    .sector
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                stage
+                    .bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
                 String::new(),
                 stage.pid.to_string(),
                 stage.tid.to_string(),

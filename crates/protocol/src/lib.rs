@@ -868,7 +868,10 @@ impl AnalysisEngine {
 /// Builds a bounded request view from measured observations. Nested spans are
 /// retained for the waterfall, while accounting uses their clipped union.
 pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation]) -> IoPipeline {
-    let block_start = io.insert.as_ref().map_or(io.issue.ts_ns, |value| value.ts_ns);
+    let block_start = io
+        .insert
+        .as_ref()
+        .map_or(io.issue.ts_ns, |value| value.ts_ns);
     let block_end = io.completion.ts_ns;
     let request_id = io.issue.request_id;
     let probable_window_start = block_start.saturating_sub(10_000_000);
@@ -891,8 +894,8 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             let overlaps = value.ts_ns <= probable_window_end && end >= probable_window_start;
             let storage_match = value.sector.is_some_and(|sector| sector == io.issue.sector)
                 && value.bytes.is_some_and(|bytes| bytes == io.issue.bytes);
-            let thread_match = value.pid == io.issue.pid
-                && (value.tid == 0 || value.tid == io.issue.tid);
+            let thread_match =
+                value.pid == io.issue.pid && (value.tid == 0 || value.tid == io.issue.tid);
             overlaps && (storage_match || thread_match)
         })
         .collect();

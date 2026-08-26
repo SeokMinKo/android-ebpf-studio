@@ -1,22 +1,40 @@
 use android_ebpf_protocol::{
-    BlockComplete, BlockInsert, BlockIssue, CompletedIo, CorrelationConfidence, IoOperation,
-    IoSizeClass, AccessPattern, PipelineLayer, PipelineObservation, PipelinePhase,
-    build_io_pipeline,
+    AccessPattern, BlockComplete, BlockInsert, BlockIssue, CompletedIo, CorrelationConfidence,
+    IoOperation, IoSizeClass, PipelineLayer, PipelineObservation, PipelinePhase, build_io_pipeline,
 };
 
 fn completed() -> CompletedIo {
     CompletedIo {
         insert: Some(BlockInsert {
-            ts_ns: 1_000, request_id: 7, device_major: 259, device_minor: 0,
-            sector: 8_192, sectors: 8, bytes: 4_096, operation: IoOperation::Read,
+            ts_ns: 1_000,
+            request_id: 7,
+            device_major: 259,
+            device_minor: 0,
+            sector: 8_192,
+            sectors: 8,
+            bytes: 4_096,
+            operation: IoOperation::Read,
         }),
         issue: BlockIssue {
-            ts_ns: 1_200, request_id: 7, device_major: 259, device_minor: 0,
-            sector: 8_192, sectors: 8, bytes: 4_096, operation: IoOperation::Read,
-            pid: 42, tid: 43, cpu: 1, comm: "reader".into(),
+            ts_ns: 1_200,
+            request_id: 7,
+            device_major: 259,
+            device_minor: 0,
+            sector: 8_192,
+            sectors: 8,
+            bytes: 4_096,
+            operation: IoOperation::Read,
+            pid: 42,
+            tid: 43,
+            cpu: 1,
+            comm: "reader".into(),
         },
         completion: BlockComplete {
-            ts_ns: 2_000, request_id: 7, device_major: 259, device_minor: 0, status: 0,
+            ts_ns: 2_000,
+            request_id: 7,
+            device_major: 259,
+            device_minor: 0,
+            status: 0,
         },
         latency_ns: 800,
         queue_latency_ns: Some(200),
@@ -65,7 +83,12 @@ fn context_only_uic_is_visible_but_not_additive() {
     uic.confidence = CorrelationConfidence::ContextOnly;
     let pipeline = build_io_pipeline(&completed(), &[uic]);
 
-    assert!(pipeline.spans.iter().any(|value| value.layer == PipelineLayer::UicContext));
+    assert!(
+        pipeline
+            .spans
+            .iter()
+            .any(|value| value.layer == PipelineLayer::UicContext)
+    );
     // Generated block queue + device spans cover the block request window only.
     assert_eq!(pipeline.accounted_ns, 1_000);
     assert_eq!(pipeline.unaccounted_ns, 0);
@@ -79,7 +102,11 @@ fn exact_id_match_outranks_probable_overlap() {
     probable.confidence = CorrelationConfidence::Probable;
     let pipeline = build_io_pipeline(&completed(), &[probable, exact]);
 
-    let ufs: Vec<_> = pipeline.spans.iter().filter(|value| value.layer == PipelineLayer::Ufs).collect();
+    let ufs: Vec<_> = pipeline
+        .spans
+        .iter()
+        .filter(|value| value.layer == PipelineLayer::Ufs)
+        .collect();
     assert_eq!(ufs.len(), 1);
     assert_eq!(ufs[0].confidence, CorrelationConfidence::Exact);
 }
@@ -88,6 +115,11 @@ fn exact_id_match_outranks_probable_overlap() {
 fn invalid_span_does_not_corrupt_accounting() {
     let invalid = span(PipelineLayer::Vfs, 1_800, 1_700);
     let pipeline = build_io_pipeline(&completed(), &[invalid]);
-    assert!(pipeline.spans.iter().all(|value| value.end_ts_ns >= value.start_ts_ns));
+    assert!(
+        pipeline
+            .spans
+            .iter()
+            .all(|value| value.end_ts_ns >= value.start_ts_ns)
+    );
     assert!(pipeline.accounted_ns <= pipeline.total_ns());
 }

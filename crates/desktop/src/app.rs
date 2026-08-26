@@ -667,13 +667,27 @@ impl StudioApp {
 
         let selected = self
             .selected_pipeline_request
-            .and_then(|request_id| self.analyzer.completed_ios().iter().find(|io| io.issue.request_id == request_id))
+            .and_then(|request_id| {
+                self.analyzer
+                    .completed_ios()
+                    .iter()
+                    .find(|io| io.issue.request_id == request_id)
+            })
             .cloned()
             .or_else(|| self.analyzer.completed_ios().last().cloned());
         let Some(io) = selected else {
             card_frame().show(ui, |ui| {
-                ui.label(RichText::new("No completed request yet").strong().color(TEXT));
-                ui.label(RichText::new("Start the simulator or an eBPF capture to populate the pipeline.").color(MUTED));
+                ui.label(
+                    RichText::new("No completed request yet")
+                        .strong()
+                        .color(TEXT),
+                );
+                ui.label(
+                    RichText::new(
+                        "Start the simulator or an eBPF capture to populate the pipeline.",
+                    )
+                    .color(MUTED),
+                );
             });
             return;
         };
@@ -684,21 +698,48 @@ impl StudioApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("REQUEST").size(10.0).strong().color(MUTED));
                 egui::ComboBox::from_id_salt("pipeline-request")
-                    .selected_text(format!("#{} · {} · {}", io.issue.request_id, operation_label(io.issue.operation), format_bytes(io.issue.bytes as u64)))
+                    .selected_text(format!(
+                        "#{} · {} · {}",
+                        io.issue.request_id,
+                        operation_label(io.issue.operation),
+                        format_bytes(io.issue.bytes as u64)
+                    ))
                     .width(280.0)
                     .show_ui(ui, |ui| {
                         for candidate in self.analyzer.completed_ios().iter().rev().take(500) {
                             ui.selectable_value(
                                 &mut self.selected_pipeline_request,
                                 Some(candidate.issue.request_id),
-                                format!("#{} · {} · sector {} · {}", candidate.issue.request_id, operation_label(candidate.issue.operation), candidate.issue.sector, format_bytes(candidate.issue.bytes as u64)),
+                                format!(
+                                    "#{} · {} · sector {} · {}",
+                                    candidate.issue.request_id,
+                                    operation_label(candidate.issue.operation),
+                                    candidate.issue.sector,
+                                    format_bytes(candidate.issue.bytes as u64)
+                                ),
                             );
                         }
                     });
                 ui.separator();
                 ui.label(format!("Total {}", format_duration(pipeline.total_ns())));
-                ui.label(RichText::new(format!("Measured coverage {}", format_duration(pipeline.accounted_ns))).color(GREEN));
-                ui.label(RichText::new(format!("Unaccounted {}", format_duration(pipeline.unaccounted_ns))).color(if pipeline.unaccounted_ns == 0 { MUTED } else { AMBER }));
+                ui.label(
+                    RichText::new(format!(
+                        "Measured coverage {}",
+                        format_duration(pipeline.accounted_ns)
+                    ))
+                    .color(GREEN),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Unaccounted {}",
+                        format_duration(pipeline.unaccounted_ns)
+                    ))
+                    .color(if pipeline.unaccounted_ns == 0 {
+                        MUTED
+                    } else {
+                        AMBER
+                    }),
+                );
             });
         });
         ui.add_space(10.0);
@@ -730,17 +771,22 @@ impl StudioApp {
 
         ui.add_space(10.0);
         card_frame().show(ui, |ui| {
-            egui::Grid::new("pipeline-detail").striped(true).spacing([18.0, 8.0]).show(ui, |ui| {
-                for heading in ["Layer", "Duration", "Confidence", "Source"] { ui.strong(heading); }
-                ui.end_row();
-                for span in &pipeline.spans {
-                    ui.label(pipeline_layer_label(span.layer));
-                    ui.label(format_duration(span.duration_ns()));
-                    ui.label(confidence_label(span.confidence));
-                    ui.label(&span.source);
+            egui::Grid::new("pipeline-detail")
+                .striped(true)
+                .spacing([18.0, 8.0])
+                .show(ui, |ui| {
+                    for heading in ["Layer", "Duration", "Confidence", "Source"] {
+                        ui.strong(heading);
+                    }
                     ui.end_row();
-                }
-            });
+                    for span in &pipeline.spans {
+                        ui.label(pipeline_layer_label(span.layer));
+                        ui.label(format_duration(span.duration_ns()));
+                        ui.label(confidence_label(span.confidence));
+                        ui.label(&span.source);
+                        ui.end_row();
+                    }
+                });
         });
     }
 

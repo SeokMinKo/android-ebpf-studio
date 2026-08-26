@@ -234,7 +234,12 @@ fn capabilities() -> Result<CollectorConfig> {
             scsi_events: discover_events("scsi"),
             ext4_events: discover_events("ext4"),
             vfs_probe_candidates: if Path::new("/sys/kernel/btf/vmlinux").is_file() {
-                vec!["vfs_read".into(), "vfs_write".into(), "vfs_iter_read".into(), "vfs_iter_write".into()]
+                vec![
+                    "vfs_read".into(),
+                    "vfs_write".into(),
+                    "vfs_iter_read".into(),
+                    "vfs_iter_write".into(),
+                ]
             } else {
                 Vec::new()
             },

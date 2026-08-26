@@ -60,18 +60,58 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             let latency_ns = 200_000 + (sequence % 20) * 100_000;
             let completion_ts = issue_ts + latency_ns;
             let pipeline_spans = [
-                (PipelineLayer::Syscall, insert_ts.saturating_sub(400_000), completion_ts + 80_000, "read/write syscall", CorrelationConfidence::Exact),
-                (PipelineLayer::Vfs, insert_ts.saturating_sub(320_000), issue_ts.saturating_sub(80_000), "vfs_iter_read/write", CorrelationConfidence::Exact),
-                (PipelineLayer::Filesystem, insert_ts.saturating_sub(240_000), issue_ts.saturating_sub(100_000), "f2fs/ext4 file operation", CorrelationConfidence::Exact),
-                (PipelineLayer::Scsi, issue_ts + 30_000, completion_ts.saturating_sub(20_000), "SCSI command", CorrelationConfidence::Probable),
-                (PipelineLayer::Ufs, issue_ts + 60_000, completion_ts.saturating_sub(40_000), "UFS command", CorrelationConfidence::Probable),
-                (PipelineLayer::UicContext, issue_ts + 10_000, issue_ts + 10_000, "UIC link active", CorrelationConfidence::ContextOnly),
+                (
+                    PipelineLayer::Syscall,
+                    insert_ts.saturating_sub(400_000),
+                    completion_ts + 80_000,
+                    "read/write syscall",
+                    CorrelationConfidence::Exact,
+                ),
+                (
+                    PipelineLayer::Vfs,
+                    insert_ts.saturating_sub(320_000),
+                    issue_ts.saturating_sub(80_000),
+                    "vfs_iter_read/write",
+                    CorrelationConfidence::Exact,
+                ),
+                (
+                    PipelineLayer::Filesystem,
+                    insert_ts.saturating_sub(240_000),
+                    issue_ts.saturating_sub(100_000),
+                    "f2fs/ext4 file operation",
+                    CorrelationConfidence::Exact,
+                ),
+                (
+                    PipelineLayer::Scsi,
+                    issue_ts + 30_000,
+                    completion_ts.saturating_sub(20_000),
+                    "SCSI command",
+                    CorrelationConfidence::Probable,
+                ),
+                (
+                    PipelineLayer::Ufs,
+                    issue_ts + 60_000,
+                    completion_ts.saturating_sub(40_000),
+                    "UFS command",
+                    CorrelationConfidence::Probable,
+                ),
+                (
+                    PipelineLayer::UicContext,
+                    issue_ts + 10_000,
+                    issue_ts + 10_000,
+                    "UIC link active",
+                    CorrelationConfidence::ContextOnly,
+                ),
             ];
             for (layer, start_ts_ns, end_ts_ns, name, confidence) in pipeline_spans {
                 let event = StorageEvent::Pipeline(PipelineObservation {
                     ts_ns: start_ts_ns,
                     end_ts_ns: Some(end_ts_ns.max(start_ts_ns)),
-                    phase: if layer == PipelineLayer::UicContext { PipelinePhase::Instant } else { PipelinePhase::Span },
+                    phase: if layer == PipelineLayer::UicContext {
+                        PipelinePhase::Instant
+                    } else {
+                        PipelinePhase::Span
+                    },
                     layer,
                     correlation_id: Some(sequence),
                     sector: Some(sector),
@@ -85,7 +125,8 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
                     schema_version: SCHEMA_VERSION,
                     sequence: record_sequence,
                     event,
-                })).ok();
+                }))
+                .ok();
                 record_sequence += 1;
             }
             let insert = StorageEvent::BlockInsert(BlockInsert {
