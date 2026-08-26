@@ -1,7 +1,9 @@
 use std::fs;
 
 use android_ebpf_protocol::DiagnosticLevel;
-use android_ebpf_studio::diagnostics::{RotatingJsonl, export_bundle, host_record, parse_agent_diagnostic};
+use android_ebpf_studio::diagnostics::{
+    RotatingJsonl, export_bundle, host_record, parse_agent_diagnostic,
+};
 
 #[test]
 fn diagnostic_log_rotates_and_redacts_device_paths() {

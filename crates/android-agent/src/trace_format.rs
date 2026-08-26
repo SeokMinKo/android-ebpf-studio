@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use android_ebpf_types::{
-    OFFSET_MISSING, PipelineTraceLayout, RawSyscallLayout, TraceLayout,
-};
+use android_ebpf_types::{OFFSET_MISSING, PipelineTraceLayout, RawSyscallLayout, TraceLayout};
 use anyhow::{Context, Result, bail};
 
 pub fn parse_layout(input: &str) -> Result<TraceLayout> {

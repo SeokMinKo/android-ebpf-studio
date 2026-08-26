@@ -22,9 +22,8 @@ use android_ebpf_protocol::{
 };
 use android_ebpf_types::{
     KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE,
-    KernelEvent, LAYER_FILESYSTEM, LAYER_SCSI, LAYER_UFS, OP_DISCARD, OP_FLUSH, OP_READ,
-    OP_WRITE, PHASE_BEGIN, PHASE_END, PHASE_INSTANT, PipelineTraceLayout, RawSyscallLayout,
-    TraceLayout,
+    KernelEvent, LAYER_FILESYSTEM, LAYER_SCSI, LAYER_UFS, OP_DISCARD, OP_FLUSH, OP_READ, OP_WRITE,
+    PHASE_BEGIN, PHASE_END, PHASE_INSTANT, PipelineTraceLayout, RawSyscallLayout, TraceLayout,
 };
 use anyhow::{Context, Result, bail};
 use aya::{Ebpf, Pod, maps::Array, maps::RingBuf, programs::TracePoint};
@@ -196,9 +195,8 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
         attach(&mut bpf, "block_rq_complete", "block", "block_rq_complete"),
     )?;
     if let Some(layout) = config.insert {
-        let result = configure_layout(&mut bpf, "INSERT_LAYOUT", layout).and_then(|_| {
-            attach(&mut bpf, "block_rq_insert", "block", "block_rq_insert")
-        });
+        let result = configure_layout(&mut bpf, "INSERT_LAYOUT", layout)
+            .and_then(|_| attach(&mut bpf, "block_rq_insert", "block", "block_rq_insert"));
         if !emit_optional_probe_result(
             session_id,
             PipelineLayer::BlockQueue,
@@ -235,14 +233,15 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
     }
     let mut failed_optional = Vec::new();
     for probe in &config.pipeline_probes {
-        let result = configure_pipeline_layout(&mut bpf, probe.map_name, probe.layout).and_then(|_| {
-            attach(
-                &mut bpf,
-                probe.program_name,
-                &probe.group,
-                &probe.event_name,
-            )
-        });
+        let result =
+            configure_pipeline_layout(&mut bpf, probe.map_name, probe.layout).and_then(|_| {
+                attach(
+                    &mut bpf,
+                    probe.program_name,
+                    &probe.group,
+                    &probe.event_name,
+                )
+            });
         match result {
             Ok(()) => emit_diagnostic(
                 session_id,
@@ -465,13 +464,9 @@ fn mark_attach_failed(
     event: &str,
     whole_layer: bool,
 ) {
-    for plan in capabilities
-        .attach_plan
-        .iter_mut()
-        .filter(|plan| {
-            plan.layer == layer && (whole_layer || plan.event_or_function.contains(event))
-        })
-    {
+    for plan in capabilities.attach_plan.iter_mut().filter(|plan| {
+        plan.layer == layer && (whole_layer || plan.event_or_function.contains(event))
+    }) {
         plan.state = CapabilityState::Unavailable;
         plan.reason = Some("runtime attach failed; see structured diagnostic log".into());
     }
@@ -484,12 +479,7 @@ fn mark_attach_failed(
     }
 }
 
-fn required_step<T>(
-    session_id: &str,
-    event: &str,
-    code: &str,
-    result: Result<T>,
-) -> Result<T> {
+fn required_step<T>(session_id: &str, event: &str, code: &str, result: Result<T>) -> Result<T> {
     if let Err(error) = &result {
         emit_diagnostic(
             session_id,
@@ -574,7 +564,9 @@ fn update_probe_health(
     };
     health.entry(name.into()).or_default().emitted += 1;
     let Some(value) = pipeline else { return };
-    let Some(key) = value.stage_key.or(value.correlation_id) else { return };
+    let Some(key) = value.stage_key.or(value.correlation_id) else {
+        return;
+    };
     let pair_key = (value.layer, key);
     match value.phase {
         PipelinePhase::Begin => {
@@ -697,8 +689,7 @@ fn capabilities() -> Result<CollectorConfig> {
             || lower.contains("uic_command")
             || lower.contains("pwr_change")
             || lower.contains("power_mode")
-    })
-        && let Some((group, event_name)) = event.split_once('/')
+    }) && let Some((group, event_name)) = event.split_once('/')
     {
         let path = format!("/sys/kernel/tracing/events/{group}/{event_name}/format");
         if let Ok(format) = fs::read_to_string(path) {
@@ -746,8 +737,7 @@ fn capabilities() -> Result<CollectorConfig> {
     ]
     .into_iter()
     .find(|(start, done)| {
-        fs_events.iter().any(|event| event == start)
-            && fs_events.iter().any(|event| event == done)
+        fs_events.iter().any(|event| event == start) && fs_events.iter().any(|event| event == done)
     });
     if let Some((start, done)) = fs_pair {
         for (program, map, event_name) in [
@@ -777,8 +767,7 @@ fn capabilities() -> Result<CollectorConfig> {
             || lower.contains("writeback")
             || lower.contains("journal")
             || lower.contains("commit")
-    })
-        && let Some((group, event_name)) = event.split_once('/')
+    }) && let Some((group, event_name)) = event.split_once('/')
     {
         let path = format!("/sys/kernel/tracing/events/{group}/{event_name}/format");
         if let Ok(format) = fs::read_to_string(path) {
@@ -809,8 +798,22 @@ fn capabilities() -> Result<CollectorConfig> {
         }
     }
     let mut attach_plan = vec![
-        probe_plan(PipelineLayer::BlockDevice, "tracepoint", "block", "block_rq_issue", true, &issue_text),
-        probe_plan(PipelineLayer::BlockDevice, "tracepoint", "block", "block_rq_complete", true, &complete_text),
+        probe_plan(
+            PipelineLayer::BlockDevice,
+            "tracepoint",
+            "block",
+            "block_rq_issue",
+            true,
+            &issue_text,
+        ),
+        probe_plan(
+            PipelineLayer::BlockDevice,
+            "tracepoint",
+            "block",
+            "block_rq_complete",
+            true,
+            &complete_text,
+        ),
     ];
     attach_plan.push(match fs::read_to_string(INSERT_FORMAT) {
         Ok(format) if insert.is_some() => probe_plan(
@@ -876,14 +879,54 @@ fn capabilities() -> Result<CollectorConfig> {
         reason: Some("context-only; excluded from additive latency".into()),
     }));
     for (layer, group, event, reason) in [
-        (PipelineLayer::Vfs, "fentry/fprobe", "vfs_read/write", "BTF/function probe adapter not available on this kernel"),
-        (PipelineLayer::PageCache, "filemap", "page-cache events", "no supported page-cache tracepoint layout"),
-        (PipelineLayer::Writeback, "writeback", "writeback events", "no supported writeback tracepoint layout"),
-        (PipelineLayer::Bio, "block", "bio events", "no stable bio identity tracepoint layout"),
-        (PipelineLayer::Filesystem, "f2fs/ext4", "filesystem breakdown", "no supported paired filesystem tracepoints"),
-        (PipelineLayer::Scsi, "scsi", "scsi_dispatch_cmd_start/done", "no supported SCSI tracepoint pair"),
-        (PipelineLayer::Ufs, "ufs", "ufshcd_command", "no supported UFS tracepoint layout"),
-        (PipelineLayer::UicContext, "ufs", "UIC/link context", "no supported UIC context tracepoint"),
+        (
+            PipelineLayer::Vfs,
+            "fentry/fprobe",
+            "vfs_read/write",
+            "BTF/function probe adapter not available on this kernel",
+        ),
+        (
+            PipelineLayer::PageCache,
+            "filemap",
+            "page-cache events",
+            "no supported page-cache tracepoint layout",
+        ),
+        (
+            PipelineLayer::Writeback,
+            "writeback",
+            "writeback events",
+            "no supported writeback tracepoint layout",
+        ),
+        (
+            PipelineLayer::Bio,
+            "block",
+            "bio events",
+            "no stable bio identity tracepoint layout",
+        ),
+        (
+            PipelineLayer::Filesystem,
+            "f2fs/ext4",
+            "filesystem breakdown",
+            "no supported paired filesystem tracepoints",
+        ),
+        (
+            PipelineLayer::Scsi,
+            "scsi",
+            "scsi_dispatch_cmd_start/done",
+            "no supported SCSI tracepoint pair",
+        ),
+        (
+            PipelineLayer::Ufs,
+            "ufs",
+            "ufshcd_command",
+            "no supported UFS tracepoint layout",
+        ),
+        (
+            PipelineLayer::UicContext,
+            "ufs",
+            "UIC/link context",
+            "no supported UIC context tracepoint",
+        ),
     ] {
         if !attach_plan.iter().any(|plan| plan.layer == layer) {
             attach_plan.push(unavailable_plan(layer, group, event, reason));
@@ -925,12 +968,7 @@ fn capabilities() -> Result<CollectorConfig> {
     })
 }
 
-fn unavailable_plan(
-    layer: PipelineLayer,
-    group: &str,
-    event: &str,
-    reason: &str,
-) -> ProbePlan {
+fn unavailable_plan(layer: PipelineLayer, group: &str, event: &str, reason: &str) -> ProbePlan {
     ProbePlan {
         layer,
         probe_kind: "none".into(),
@@ -1126,12 +1164,14 @@ fn parse_kernel_event(bytes: &[u8], correlation_salt: u64) -> Option<StorageEven
         })),
         KIND_FILE_IO => {
             let path = resolve_fd_path(event.pid, event.fd);
-            let path_snapshot = path.clone().map(|value| android_ebpf_protocol::PathSnapshot {
-                deleted: value.ends_with(" (deleted)"),
-                path: Some(value),
-                source: android_ebpf_protocol::PathSource::ProcFd,
-                captured_ts_ns: event.ts_ns,
-            });
+            let path_snapshot = path
+                .clone()
+                .map(|value| android_ebpf_protocol::PathSnapshot {
+                    deleted: value.ends_with(" (deleted)"),
+                    path: Some(value),
+                    source: android_ebpf_protocol::PathSource::ProcFd,
+                    captured_ts_ns: event.ts_ns,
+                });
             let confidence = if path.is_some() {
                 AttributionConfidence::Attributed
             } else {

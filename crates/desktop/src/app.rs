@@ -114,10 +114,9 @@ impl AxisMetric {
             Self::DeviceLatencyMs => Some(io.device_latency_ns as f64 / 1e6),
             Self::Pid => Some(io.issue.pid as f64),
             Self::QueueDepth => Some(io.queue_depth_after as f64),
-            Self::FilesystemLatencyMs => graph_kind_duration_ms(
-                &analyzer.transaction_for(io),
-                IoNodeKind::Filesystem,
-            ),
+            Self::FilesystemLatencyMs => {
+                graph_kind_duration_ms(&analyzer.transaction_for(io), IoNodeKind::Filesystem)
+            }
             Self::UfsLatencyMs => {
                 graph_kind_duration_ms(&analyzer.transaction_for(io), IoNodeKind::UfsCommand)
             }
@@ -172,17 +171,38 @@ impl GroupBy {
             Self::Process => format!("{} ({})", io.issue.comm, io.issue.pid),
             Self::File | Self::Origin | Self::Confidence => {
                 let graph = analyzer.transaction_for(io);
-                let Some(request) = graph.nodes.iter().find(|node| node.kind == IoNodeKind::BlockRequest) else {
+                let Some(request) = graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.kind == IoNodeKind::BlockRequest)
+                else {
                     return "Unattributed".into();
                 };
                 let origins = graph.file_origins_for(request.node_id);
                 match self {
                     Self::File => origins.first().map_or_else(
                         || "Unattributed".into(),
-                        |origin| origin.path.as_ref().and_then(|path| path.path.clone()).unwrap_or_else(|| origin.file.fallback_label()),
+                        |origin| {
+                            origin
+                                .path
+                                .as_ref()
+                                .and_then(|path| path.path.clone())
+                                .unwrap_or_else(|| origin.file.fallback_label())
+                        },
                     ),
-                    Self::Origin => if origins.is_empty() { "Unknown".into() } else if origins.len() > 1 { "Multiple files".into() } else { "File".into() },
-                    Self::Confidence => origins.first().map_or_else(|| "Unattributed".into(), |origin| edge_confidence_label(origin.confidence).into()),
+                    Self::Origin => {
+                        if origins.is_empty() {
+                            "Unknown".into()
+                        } else if origins.len() > 1 {
+                            "Multiple files".into()
+                        } else {
+                            "File".into()
+                        }
+                    }
+                    Self::Confidence => origins.first().map_or_else(
+                        || "Unattributed".into(),
+                        |origin| edge_confidence_label(origin.confidence).into(),
+                    ),
                     _ => unreachable!(),
                 }
             }
@@ -436,7 +456,8 @@ impl StudioApp {
         };
         match session::load_analysis(&path) {
             Ok(loaded) => {
-                self.recent = loaded.engine
+                self.recent = loaded
+                    .engine
                     .completed_ios()
                     .iter()
                     .rev()
@@ -524,7 +545,8 @@ impl StudioApp {
                             "partial",
                             Some(format!(
                                 "footer missing; last_sequence={}",
-                                self.last_sequence.map_or_else(|| "none".into(), |value| value.to_string())
+                                self.last_sequence
+                                    .map_or_else(|| "none".into(), |value| value.to_string())
                             )),
                         ));
                     }
@@ -550,7 +572,9 @@ impl StudioApp {
             self.push_diagnostic(error.to_string());
         }
         match record {
-            WireRecord::Event { sequence, event, .. } => {
+            WireRecord::Event {
+                sequence, event, ..
+            } => {
                 if let Some(previous) = self.last_sequence
                     && sequence != previous.saturating_add(1)
                 {
@@ -560,7 +584,10 @@ impl StudioApp {
                         "measurement.sequence",
                         "EVENT_SEQUENCE_GAP",
                         "degraded",
-                        Some(format!("expected={} actual={sequence}", previous.saturating_add(1))),
+                        Some(format!(
+                            "expected={} actual={sequence}",
+                            previous.saturating_add(1)
+                        )),
                     ));
                 }
                 self.last_sequence = Some(sequence);
@@ -589,7 +616,8 @@ impl StudioApp {
                     "observed",
                     Some(format!(
                         "emitted={emitted_events} kernel_drops={} userspace_drops={userspace_drops} ambiguous={correlation_ambiguous} expired={correlation_expired} key_reused={key_reused}",
-                        kernel_drops.map_or_else(|| "unavailable".into(), |value| value.to_string())
+                        kernel_drops
+                            .map_or_else(|| "unavailable".into(), |value| value.to_string())
                     )),
                 );
                 record.count = Some(emitted_events);
@@ -868,10 +896,26 @@ impl StudioApp {
             "Per-request file correlation; ambiguous candidates remain unattributed.",
         );
         ui.columns(4, |columns| {
-            summary_card(&mut columns[0], "Exact", summary.attribution.exact.to_string());
-            summary_card(&mut columns[1], "Probable", summary.attribution.probable.to_string());
-            summary_card(&mut columns[2], "Async probable", summary.attribution.probable_async.to_string());
-            summary_card(&mut columns[3], "Unattributed", summary.attribution.unattributed.to_string());
+            summary_card(
+                &mut columns[0],
+                "Exact",
+                summary.attribution.exact.to_string(),
+            );
+            summary_card(
+                &mut columns[1],
+                "Probable",
+                summary.attribution.probable.to_string(),
+            );
+            summary_card(
+                &mut columns[2],
+                "Async probable",
+                summary.attribution.probable_async.to_string(),
+            );
+            summary_card(
+                &mut columns[3],
+                "Unattributed",
+                summary.attribution.unattributed.to_string(),
+            );
         });
         ui.add_space(18.0);
         section_header(
@@ -1032,7 +1076,12 @@ impl StudioApp {
         });
         ui.add_space(10.0);
         card_frame().show(ui, |ui| {
-            ui.label(RichText::new("FILE ORIGIN").size(10.0).strong().color(MUTED));
+            ui.label(
+                RichText::new("FILE ORIGIN")
+                    .size(10.0)
+                    .strong()
+                    .color(MUTED),
+            );
             if origins.is_empty() {
                 ui.label(RichText::new("Unattributed — no unique evidence").color(AMBER));
             } else {
@@ -1044,11 +1093,15 @@ impl StudioApp {
                         .unwrap_or_else(|| origin.file.fallback_label());
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(label).monospace().color(TEXT));
-                        status_pill(ui, edge_confidence_label(origin.confidence), match origin.confidence {
-                            EdgeConfidence::Exact => GREEN,
-                            EdgeConfidence::Probable | EdgeConfidence::ProbableAsync => AMBER,
-                            EdgeConfidence::ContextOnly => MUTED,
-                        });
+                        status_pill(
+                            ui,
+                            edge_confidence_label(origin.confidence),
+                            match origin.confidence {
+                                EdgeConfidence::Exact => GREEN,
+                                EdgeConfidence::Probable | EdgeConfidence::ProbableAsync => AMBER,
+                                EdgeConfidence::ContextOnly => MUTED,
+                            },
+                        );
                     });
                 }
             }
@@ -1122,13 +1175,24 @@ impl StudioApp {
         ui.add_space(10.0);
         card_frame().show(ui, |ui| {
             ui.collapsing(
-                format!("Transaction graph · {} nodes / {} edges", graph.nodes.len(), graph.edges.len()),
+                format!(
+                    "Transaction graph · {} nodes / {} edges",
+                    graph.nodes.len(),
+                    graph.edges.len()
+                ),
                 |ui| {
                     egui::Grid::new("transaction-graph-nodes")
                         .striped(true)
                         .spacing([14.0, 7.0])
                         .show(ui, |ui| {
-                            for heading in ["Node", "Kind", "Duration", "Exclusive", "Origin", "Critical"] {
+                            for heading in [
+                                "Node",
+                                "Kind",
+                                "Duration",
+                                "Exclusive",
+                                "Origin",
+                                "Critical",
+                            ] {
                                 ui.strong(heading);
                             }
                             ui.end_row();
@@ -1136,9 +1200,19 @@ impl StudioApp {
                                 ui.label(node.node_id.to_string());
                                 ui.label(format!("{:?}", node.kind));
                                 ui.label(format_duration(node.duration_ns()));
-                                ui.label(format_duration(graph_metrics.exclusive_ns.get(&node.node_id).copied().unwrap_or(0)));
+                                ui.label(format_duration(
+                                    graph_metrics
+                                        .exclusive_ns
+                                        .get(&node.node_id)
+                                        .copied()
+                                        .unwrap_or(0),
+                                ));
                                 ui.label(format!("{:?}", node.origin));
-                                ui.label(if graph_metrics.critical_path.contains(&node.node_id) { "●" } else { "" });
+                                ui.label(if graph_metrics.critical_path.contains(&node.node_id) {
+                                    "●"
+                                } else {
+                                    ""
+                                });
                                 ui.end_row();
                             }
                         });
@@ -1201,8 +1275,17 @@ impl StudioApp {
                             ui.label(file.pid.to_string());
                             ui.label(file.fd.to_string());
                             ui.label(format!("{:?}", file.confidence));
-                            ui.label(file.file_identity.as_ref().map_or_else(|| "<unknown>".into(), |identity| identity.fallback_label()));
-                            ui.label(file.path_snapshot.as_ref().and_then(|snapshot| snapshot.path.as_deref()).or(file.path.as_deref()).unwrap_or("<unresolved>"));
+                            ui.label(file.file_identity.as_ref().map_or_else(
+                                || "<unknown>".into(),
+                                |identity| identity.fallback_label(),
+                            ));
+                            ui.label(
+                                file.path_snapshot
+                                    .as_ref()
+                                    .and_then(|snapshot| snapshot.path.as_deref())
+                                    .or(file.path.as_deref())
+                                    .unwrap_or("<unresolved>"),
+                            );
                             ui.end_row();
                         }
                     });
@@ -1225,8 +1308,18 @@ impl StudioApp {
                         .spacing([15.0, 9.0])
                         .show(ui, |ui| {
                             for heading in [
-                                "Time ns", "Op", "Access", "Size", "Bytes", "Sector", "Queue",
-                                "Device", "Total", "File / Origin", "PID", "Comm",
+                                "Time ns",
+                                "Op",
+                                "Access",
+                                "Size",
+                                "Bytes",
+                                "Sector",
+                                "Queue",
+                                "Device",
+                                "Total",
+                                "File / Origin",
+                                "PID",
+                                "Comm",
                             ] {
                                 ui.strong(heading);
                             }
@@ -1242,13 +1335,22 @@ impl StudioApp {
                                 ui.label(format_latency(Some(io.device_latency_ns)));
                                 ui.label(format_latency(Some(io.total_latency_ns)));
                                 let graph = self.analyzer.transaction_for(io);
-                                let origins = graph.nodes.iter().find(|node| node.kind == IoNodeKind::BlockRequest).map(|node| graph.file_origins_for(node.node_id)).unwrap_or_default();
+                                let origins = graph
+                                    .nodes
+                                    .iter()
+                                    .find(|node| node.kind == IoNodeKind::BlockRequest)
+                                    .map(|node| graph.file_origins_for(node.node_id))
+                                    .unwrap_or_default();
                                 ui.label(if origins.is_empty() {
                                     "Unattributed".into()
                                 } else if origins.len() > 1 {
                                     format!("{} files", origins.len())
                                 } else {
-                                    origins[0].path.as_ref().and_then(|path| path.path.clone()).unwrap_or_else(|| origins[0].file.fallback_label())
+                                    origins[0]
+                                        .path
+                                        .as_ref()
+                                        .and_then(|path| path.path.clone())
+                                        .unwrap_or_else(|| origins[0].file.fallback_label())
                                 });
                                 ui.label(io.issue.pid.to_string());
                                 ui.label(&io.issue.comm);
@@ -1274,7 +1376,10 @@ impl StudioApp {
                     "Include raw session in bundle",
                 );
                 if ui
-                    .add_enabled(self.log_directory.is_some(), egui::Button::new("Export diagnostic bundle"))
+                    .add_enabled(
+                        self.log_directory.is_some(),
+                        egui::Button::new("Export diagnostic bundle"),
+                    )
                     .clicked()
                 {
                     self.export_diagnostic_bundle();
@@ -1284,7 +1389,12 @@ impl StudioApp {
         if let Some(capabilities) = &self.capabilities {
             ui.add_space(10.0);
             card_frame().show(ui, |ui| {
-                ui.label(RichText::new("PROBE STATUS").size(10.0).strong().color(MUTED));
+                ui.label(
+                    RichText::new("PROBE STATUS")
+                        .size(10.0)
+                        .strong()
+                        .color(MUTED),
+                );
                 egui::Grid::new("probe-status")
                     .striped(true)
                     .spacing([14.0, 7.0])
@@ -1312,7 +1422,15 @@ impl StudioApp {
                     .striped(true)
                     .spacing([14.0, 8.0])
                     .show(ui, |ui| {
-                        for heading in ["Time", "Level", "Component", "Code", "Event", "Outcome", "Detail"] {
+                        for heading in [
+                            "Time",
+                            "Level",
+                            "Component",
+                            "Code",
+                            "Event",
+                            "Outcome",
+                            "Detail",
+                        ] {
                             ui.strong(heading);
                         }
                         ui.end_row();
@@ -1321,7 +1439,9 @@ impl StudioApp {
                                 || record.component.to_ascii_lowercase().contains(&filter)
                                 || record.code.to_ascii_lowercase().contains(&filter)
                                 || record.event.to_ascii_lowercase().contains(&filter)
-                                || record.correlation_id.is_some_and(|id| id.to_string().contains(&filter))
+                                || record
+                                    .correlation_id
+                                    .is_some_and(|id| id.to_string().contains(&filter))
                         }) {
                             ui.label(record.ts_unix_ms.to_string());
                             ui.label(format!("{:?}", record.level));
@@ -1625,11 +1745,13 @@ impl eframe::App for StudioApp {
                                     ))
                                     .monospace()
                                     .size(10.0)
-                                    .color(match value.level {
-                                        DiagnosticLevel::Error => RED,
-                                        DiagnosticLevel::Warn => AMBER,
-                                        _ => MUTED,
-                                    }),
+                                    .color(
+                                        match value.level {
+                                            DiagnosticLevel::Error => RED,
+                                            DiagnosticLevel::Warn => AMBER,
+                                            _ => MUTED,
+                                        },
+                                    ),
                                 );
                             }
                         });

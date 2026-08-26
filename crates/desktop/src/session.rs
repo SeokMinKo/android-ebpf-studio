@@ -5,8 +5,8 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AnalysisEngine, AnalysisSummary, ProbeCapabilities, SessionError, SessionReader, StorageEvent, WireRecord,
-    write_record,
+    AnalysisEngine, AnalysisSummary, ProbeCapabilities, SessionError, SessionReader, StorageEvent,
+    WireRecord, write_record,
 };
 
 pub struct SessionWriter {
@@ -204,16 +204,28 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 node.node_id.to_string(),
                 node.file
                     .as_ref()
-                    .map(|file| format!("{}:{}:{}", file.fs_device_major, file.fs_device_minor, file.inode))
+                    .map(|file| {
+                        format!(
+                            "{}:{}:{}",
+                            file.fs_device_major, file.fs_device_minor, file.inode
+                        )
+                    })
                     .unwrap_or_default(),
                 String::new(),
-                node.bytes.map(|value| value.to_string()).unwrap_or_default(),
-                node.operation.map(|value| format!("{value:?}").to_lowercase()).unwrap_or_default(),
+                node.bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                node.operation
+                    .map(|value| format!("{value:?}").to_lowercase())
+                    .unwrap_or_default(),
                 node.pid.to_string(),
                 node.tid.to_string(),
                 node.name.clone(),
                 String::new(),
-                node.path.as_ref().and_then(|value| value.path.clone()).unwrap_or_default(),
+                node.path
+                    .as_ref()
+                    .and_then(|value| value.path.clone())
+                    .unwrap_or_default(),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -276,11 +288,26 @@ fn write_summary(path: &Path, summary: &AnalysisSummary) -> anyhow::Result<()> {
             "attributed_file_ios",
             summary.attributed_file_ios.to_string(),
         ),
-        ("block_attribution_exact", summary.attribution.exact.to_string()),
-        ("block_attribution_probable", summary.attribution.probable.to_string()),
-        ("block_attribution_probable_async", summary.attribution.probable_async.to_string()),
-        ("block_attribution_unattributed", summary.attribution.unattributed.to_string()),
-        ("block_attribution_multi_origin", summary.attribution.multi_origin.to_string()),
+        (
+            "block_attribution_exact",
+            summary.attribution.exact.to_string(),
+        ),
+        (
+            "block_attribution_probable",
+            summary.attribution.probable.to_string(),
+        ),
+        (
+            "block_attribution_probable_async",
+            summary.attribution.probable_async.to_string(),
+        ),
+        (
+            "block_attribution_unattributed",
+            summary.attribution.unattributed.to_string(),
+        ),
+        (
+            "block_attribution_multi_origin",
+            summary.attribution.multi_origin.to_string(),
+        ),
         ("max_queue_depth", summary.max_queue_depth.to_string()),
         (
             "p50_latency_ns",

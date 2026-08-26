@@ -35,9 +35,15 @@ fn node(id: u64, kind: IoNodeKind, start: u64, end: u64) -> IoNode {
 #[test]
 fn graph_keeps_multiple_file_origins_for_one_request() {
     let mut graph = IoTransactionGraph::new(77);
-    graph.add_node(node(1, IoNodeKind::FileOperation, 100, 200)).unwrap();
-    graph.add_node(node(2, IoNodeKind::FileOperation, 110, 210)).unwrap();
-    graph.add_node(node(3, IoNodeKind::BlockRequest, 220, 500)).unwrap();
+    graph
+        .add_node(node(1, IoNodeKind::FileOperation, 100, 200))
+        .unwrap();
+    graph
+        .add_node(node(2, IoNodeKind::FileOperation, 110, 210))
+        .unwrap();
+    graph
+        .add_node(node(3, IoNodeKind::BlockRequest, 220, 500))
+        .unwrap();
     for edge_id in 10..=11 {
         graph
             .add_edge(IoEdge {
@@ -61,11 +67,23 @@ fn graph_keeps_multiple_file_origins_for_one_request() {
 fn graph_rejects_cycles_and_computes_non_overlapping_time() {
     let mut graph = IoTransactionGraph::new(88);
     graph.add_node(node(1, IoNodeKind::Vfs, 0, 100)).unwrap();
-    graph.add_node(node(2, IoNodeKind::Filesystem, 20, 80)).unwrap();
-    graph.add_node(node(3, IoNodeKind::BlockRequest, 110, 200)).unwrap();
-    graph.add_edge(IoEdge::exact(1, 1, 2, IoRelation::Calls)).unwrap();
-    graph.add_edge(IoEdge::exact(2, 2, 3, IoRelation::Submits)).unwrap();
-    assert!(graph.add_edge(IoEdge::exact(3, 3, 1, IoRelation::CompletesInto)).is_err());
+    graph
+        .add_node(node(2, IoNodeKind::Filesystem, 20, 80))
+        .unwrap();
+    graph
+        .add_node(node(3, IoNodeKind::BlockRequest, 110, 200))
+        .unwrap();
+    graph
+        .add_edge(IoEdge::exact(1, 1, 2, IoRelation::Calls))
+        .unwrap();
+    graph
+        .add_edge(IoEdge::exact(2, 2, 3, IoRelation::Submits))
+        .unwrap();
+    assert!(
+        graph
+            .add_edge(IoEdge::exact(3, 3, 1, IoRelation::CompletesInto))
+            .is_err()
+    );
 
     let metrics = graph.metrics();
     assert_eq!(metrics.accounted_ns, 190);
@@ -79,8 +97,12 @@ fn graph_rejects_cycles_and_computes_non_overlapping_time() {
 #[test]
 fn graph_rejects_an_edge_that_points_backward_in_time() {
     let mut graph = IoTransactionGraph::new(90);
-    graph.add_node(node(1, IoNodeKind::BlockRequest, 500, 700)).unwrap();
-    graph.add_node(node(2, IoNodeKind::FileOperation, 100, 200)).unwrap();
+    graph
+        .add_node(node(1, IoNodeKind::BlockRequest, 500, 700))
+        .unwrap();
+    graph
+        .add_node(node(2, IoNodeKind::FileOperation, 100, 200))
+        .unwrap();
     assert!(
         graph
             .add_edge(IoEdge::exact(1, 1, 2, IoRelation::Calls))

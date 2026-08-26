@@ -87,30 +87,39 @@ fn open_append(path: &Path) -> std::io::Result<BufWriter<File>> {
 }
 
 fn rotated_path(path: &Path, index: usize) -> PathBuf {
-    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("log");
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("jsonl");
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("log");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jsonl");
     path.with_file_name(format!("{stem}.{index}.{extension}"))
 }
 
 pub fn parse_agent_diagnostic(line: &str, session_id: &str) -> DiagnosticRecord {
-    sanitize_record(serde_json::from_str::<DiagnosticRecord>(line).unwrap_or_else(|error| DiagnosticRecord {
-        schema_version: SCHEMA_VERSION,
-        ts_unix_ms: chrono::Utc::now().timestamp_millis(),
-        level: DiagnosticLevel::Warn,
-        component: "desktop.capture".into(),
-        event: "agent.diagnostic.decode".into(),
-        session_id: session_id.into(),
-        boot_id: String::new(),
-        outcome: "rejected".into(),
-        code: "AGENT_DIAGNOSTIC_INVALID".into(),
-        correlation_id: None,
-        node_id: None,
-        probe: None,
-        duration_ms: None,
-        count: None,
-        detail: Some(format!("{error}; line={line}")),
-    })
-    .bounded())
+    sanitize_record(
+        serde_json::from_str::<DiagnosticRecord>(line)
+            .unwrap_or_else(|error| DiagnosticRecord {
+                schema_version: SCHEMA_VERSION,
+                ts_unix_ms: chrono::Utc::now().timestamp_millis(),
+                level: DiagnosticLevel::Warn,
+                component: "desktop.capture".into(),
+                event: "agent.diagnostic.decode".into(),
+                session_id: session_id.into(),
+                boot_id: String::new(),
+                outcome: "rejected".into(),
+                code: "AGENT_DIAGNOSTIC_INVALID".into(),
+                correlation_id: None,
+                node_id: None,
+                probe: None,
+                duration_ms: None,
+                count: None,
+                detail: Some(format!("{error}; line={line}")),
+            })
+            .bounded(),
+    )
 }
 
 pub fn host_record(
@@ -121,24 +130,26 @@ pub fn host_record(
     outcome: &str,
     detail: Option<String>,
 ) -> DiagnosticRecord {
-    sanitize_record(DiagnosticRecord {
-        schema_version: SCHEMA_VERSION,
-        ts_unix_ms: chrono::Utc::now().timestamp_millis(),
-        level,
-        component: "desktop.capture".into(),
-        event: event.into(),
-        session_id: session_id.into(),
-        boot_id: String::new(),
-        outcome: outcome.into(),
-        code: code.into(),
-        correlation_id: None,
-        node_id: None,
-        probe: None,
-        duration_ms: None,
-        count: None,
-        detail,
-    }
-    .bounded())
+    sanitize_record(
+        DiagnosticRecord {
+            schema_version: SCHEMA_VERSION,
+            ts_unix_ms: chrono::Utc::now().timestamp_millis(),
+            level,
+            component: "desktop.capture".into(),
+            event: event.into(),
+            session_id: session_id.into(),
+            boot_id: String::new(),
+            outcome: outcome.into(),
+            code: code.into(),
+            correlation_id: None,
+            node_id: None,
+            probe: None,
+            duration_ms: None,
+            count: None,
+            detail,
+        }
+        .bounded(),
+    )
 }
 
 fn sanitize_record(mut record: DiagnosticRecord) -> DiagnosticRecord {

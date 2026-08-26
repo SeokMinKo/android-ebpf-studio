@@ -196,7 +196,11 @@ impl EdgeConfidence {
     }
 
     fn weakest(self, other: Self) -> Self {
-        if self.rank() <= other.rank() { self } else { other }
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
     }
 }
 
@@ -288,12 +292,7 @@ pub struct IoEdge {
 }
 
 impl IoEdge {
-    pub fn exact(
-        edge_id: u64,
-        from_node_id: u64,
-        to_node_id: u64,
-        relation: IoRelation,
-    ) -> Self {
+    pub fn exact(edge_id: u64, from_node_id: u64, to_node_id: u64, relation: IoRelation) -> Self {
         Self {
             edge_id,
             transaction_id: None,
@@ -429,7 +428,8 @@ impl IoTransactionGraph {
         if from.start_ts_ns > to.end_or_start() {
             return Err(GraphError::ReverseTime(edge.edge_id));
         }
-        if edge.from_node_id == edge.to_node_id || self.reachable(edge.to_node_id, edge.from_node_id)
+        if edge.from_node_id == edge.to_node_id
+            || self.reachable(edge.to_node_id, edge.from_node_id)
         {
             return Err(GraphError::Cycle);
         }
@@ -523,7 +523,11 @@ impl IoTransactionGraph {
                 .edges
                 .iter()
                 .filter(|edge| edge.from_node_id == node.node_id)
-                .filter_map(|edge| self.nodes.iter().find(|child| child.node_id == edge.to_node_id))
+                .filter_map(|edge| {
+                    self.nodes
+                        .iter()
+                        .find(|child| child.node_id == edge.to_node_id)
+                })
                 .filter(|child| child.additive())
                 .filter_map(|child| {
                     let start = child.start_ts_ns.max(node.start_ts_ns);
@@ -939,14 +943,16 @@ impl SessionReader {
                 }
                 Ok(WireRecord::Event { event, .. }) => loaded.events.push(event),
                 Ok(record @ WireRecord::Health { .. }) => loaded.health.push(record),
-                Ok(record @ WireRecord::Footer {
-                    events_seen,
-                    events_persisted,
-                    events_dropped,
-                    events_rejected,
-                    graceful,
-                    ..
-                }) => {
+                Ok(
+                    record @ WireRecord::Footer {
+                        events_seen,
+                        events_persisted,
+                        events_dropped,
+                        events_rejected,
+                        graceful,
+                        ..
+                    },
+                ) => {
                     loaded.integrity_ok = Some(
                         events_seen
                             == events_persisted
@@ -1455,9 +1461,8 @@ impl AnalysisEngine {
                     _ => bounded_push(&mut self.pipeline_observations, observation),
                 }
                 let newest = self.last_ts_ns.unwrap_or_default();
-                self.pending_pipeline.retain(|_, begin| {
-                    newest.saturating_sub(begin.ts_ns) <= 30_000_000_000
-                });
+                self.pending_pipeline
+                    .retain(|_, begin| newest.saturating_sub(begin.ts_ns) <= 30_000_000_000);
                 self.ambiguous_pipeline.retain(|_, observed_ts_ns| {
                     newest.saturating_sub(*observed_ts_ns) <= 30_000_000_000
                 });
@@ -1633,7 +1638,12 @@ impl AnalysisEngine {
         for (&kind, &selected_ns) in &selected_durations {
             let mut values: Vec<_> = cohort
                 .iter()
-                .map(|io| durations_by_kind(&self.transaction_for(io)).get(&kind).copied().unwrap_or(0))
+                .map(|io| {
+                    durations_by_kind(&self.transaction_for(io))
+                        .get(&kind)
+                        .copied()
+                        .unwrap_or(0)
+                })
                 .collect();
             values.sort_unstable();
             let median = percentile(&values, 50).unwrap_or(0);
@@ -1647,7 +1657,8 @@ impl AnalysisEngine {
                 .filter(|edge| {
                     selected_graph.nodes.iter().any(|node| {
                         node.kind == kind
-                            && (node.node_id == edge.from_node_id || node.node_id == edge.to_node_id)
+                            && (node.node_id == edge.from_node_id
+                                || node.node_id == edge.to_node_id)
                     })
                 })
                 .map(|edge| edge.confidence)
@@ -1800,9 +1811,7 @@ pub fn build_transaction_graph(
             file.requested_bytes >= io.issue.bytes as u64
                 || file.completed_bytes.unsigned_abs() >= io.issue.bytes as u64
         })
-        .filter(|file| {
-            file.pid == io.issue.pid || (file.tid != 0 && file.tid == io.issue.tid)
-        })
+        .filter(|file| file.pid == io.issue.pid || (file.tid != 0 && file.tid == io.issue.tid))
         .collect();
     if file_candidates.len() == 1 {
         let file = file_candidates[0];
@@ -1844,15 +1853,12 @@ pub fn build_transaction_graph(
                 transaction_id: Some(request_id),
                 from_node_id: file_node_id,
                 to_node_id: request_node_id,
-                relation: if file.io_mode == FileIoMode::Buffered
-                    && block_start > file.end_ts_ns
-                {
+                relation: if file.io_mode == FileIoMode::Buffered && block_start > file.end_ts_ns {
                     IoRelation::CausesAsync
                 } else {
                     IoRelation::Submits
                 },
-                confidence: if file.io_mode == FileIoMode::Buffered
-                    && block_start > file.end_ts_ns
+                confidence: if file.io_mode == FileIoMode::Buffered && block_start > file.end_ts_ns
                 {
                     EdgeConfidence::ProbableAsync
                 } else {
@@ -1880,7 +1886,10 @@ pub fn build_transaction_graph(
         .spans
         .iter()
         .filter(|span| {
-            !matches!(span.layer, PipelineLayer::BlockQueue | PipelineLayer::BlockDevice)
+            !matches!(
+                span.layer,
+                PipelineLayer::BlockQueue | PipelineLayer::BlockDevice
+            )
         })
         .enumerate()
     {
@@ -1968,8 +1977,14 @@ pub fn build_transaction_graph(
     }
     for edge in raw_edges {
         if edge.transaction_id == Some(request_id)
-            && graph.nodes.iter().any(|node| node.node_id == edge.from_node_id)
-            && graph.nodes.iter().any(|node| node.node_id == edge.to_node_id)
+            && graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == edge.from_node_id)
+            && graph
+                .nodes
+                .iter()
+                .any(|node| node.node_id == edge.to_node_id)
         {
             let _ = graph.add_edge(edge.clone());
         }
