@@ -612,7 +612,9 @@ impl StudioApp {
             self.push_diagnostic(format!("invalid live capture config: {error}"));
             return;
         }
-        match handle.send_control(&CaptureControlCommand::ApplyConfig { config }) {
+        match handle.send_control(&CaptureControlCommand::ApplyConfig {
+            config: Box::new(config),
+        }) {
             Ok(()) => {
                 self.control_status = format!("Applying generation {generation}…");
             }

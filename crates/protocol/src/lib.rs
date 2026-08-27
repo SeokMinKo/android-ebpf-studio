@@ -993,7 +993,7 @@ fn has_duplicates<T: Eq + std::hash::Hash>(values: &[T]) -> bool {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum CaptureControlCommand {
     ApplyConfig {
-        config: CaptureConfig,
+        config: Box<CaptureConfig>,
     },
     SetMode {
         generation: u64,

@@ -1361,7 +1361,7 @@ fn apply_control_command(
     command: CaptureControlCommand,
 ) -> CaptureControlAck {
     let requested = match command {
-        CaptureControlCommand::ApplyConfig { config } => config,
+        CaptureControlCommand::ApplyConfig { config } => *config,
         CaptureControlCommand::SetMode {
             generation,
             mode,
