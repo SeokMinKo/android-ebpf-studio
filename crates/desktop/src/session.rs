@@ -77,12 +77,14 @@ impl AsyncSessionWriter {
     }
 
     pub fn append(&self, record: WireRecord) -> Result<(), SessionError> {
-        self.tx.send(PersistCommand::Record(Box::new(record))).map_err(|_| {
-            SessionError::Io(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "session writer stopped",
-            ))
-        })
+        self.tx
+            .send(PersistCommand::Record(Box::new(record)))
+            .map_err(|_| {
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session writer stopped",
+                ))
+            })
     }
 
     pub fn finish(
