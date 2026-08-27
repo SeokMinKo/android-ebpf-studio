@@ -1748,8 +1748,10 @@ impl AnalysisEngine {
         if self.analysis_index.borrow().is_none() {
             *self.analysis_index.borrow_mut() = Some(AnalysisIndex::build(self));
         }
-        let index = self.analysis_index.borrow();
-        let index = index.as_ref().expect("analysis index is initialized");
+        let index_guard = self.analysis_index.borrow();
+        let index = index_guard
+            .as_ref()
+            .expect("analysis index is initialized");
         let mut positions = index.long_observations.clone();
         if let Some(candidates) = index.observations_by_request.get(&io.issue.request_id) {
             positions.extend_from_slice(candidates);
@@ -1774,7 +1776,7 @@ impl AnalysisEngine {
             .into_iter()
             .map(|position| self.pipeline_observations[position].clone())
             .collect();
-        drop(index);
+        drop(index_guard);
         let pipeline = build_io_pipeline(io, &observations);
         let mut cache = self.pipeline_cache.borrow_mut();
         if cache.len() >= MAX_DERIVED_CACHE_ENTRIES {
@@ -1792,8 +1794,10 @@ impl AnalysisEngine {
         if self.analysis_index.borrow().is_none() {
             *self.analysis_index.borrow_mut() = Some(AnalysisIndex::build(self));
         }
-        let index = self.analysis_index.borrow();
-        let index = index.as_ref().expect("analysis index is initialized");
+        let index_guard = self.analysis_index.borrow();
+        let index = index_guard
+            .as_ref()
+            .expect("analysis index is initialized");
         let mut file_positions = index.long_files.clone();
         for second in request_time_buckets(io) {
             if let Some(positions) = index.files_by_pid_time.get(&(io.issue.pid, second)) {
@@ -1848,7 +1852,7 @@ impl AnalysisEngine {
             .flatten()
             .map(|&position| self.graph_edges[position].clone())
             .collect();
-        drop(index);
+        drop(index_guard);
         let graph = build_transaction_graph(io, &files, &observations, &nodes, &edges);
         let mut cache = self.transaction_cache.borrow_mut();
         if cache.len() >= MAX_DERIVED_CACHE_ENTRIES {
