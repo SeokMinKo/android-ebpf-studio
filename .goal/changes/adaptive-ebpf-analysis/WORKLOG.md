@@ -24,3 +24,10 @@
 - GitHub Actions run `33051988092` passed format, Clippy with warnings denied, workspace tests, Windows GUI check, Android arm64 agent and eBPF object build.
 - The permanent 1M-request analysis benchmark retained 100,000 detailed requests and reported ingest 450 ms, summary 60 ms and graph query 102 ms on the hosted Linux runner.
 - NFR-204 Windows p95 frame/selector evidence and NFR-206 physical-device overhead remain manual residual gates; they are not claimed satisfied by CI.
+
+## 0004 — 2026-08-27 merge and release
+
+- PR #6 was marked ready and squash-merged to `main` as `6042bdc898f2e044a00e149f2487b25909a780cd`.
+- Release workflow run `33052394228` succeeded for Windows GUI, Android arm64 agent, eBPF object and publish jobs.
+- v0.8.0 published five uploaded assets: executable, agent, object, complete ZIP and SHA256 manifest.
+- Change remains partially validated until the user records Windows rendered responsiveness and physical-device capability/overhead evidence.
