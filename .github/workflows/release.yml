@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.8.0
+        default: v0.8.1
   push:
     branches:
       - main
@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || 'v0.8.0' }}
+  RELEASE_TAG: ${{ inputs.tag || 'v0.8.1' }}
 
 jobs:
   windows-gui:
@@ -113,11 +113,11 @@ jobs:
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
-              --notes "Protocol v5 adaptive eBPF analysis on the v0.6 workspace: Overview/Investigate/Explore/Compare, File Group By, live kernel filters and capture modes, per-CPU aggregates, slow-I/O detail, Top Offenders, background analysis, adaptive Deep capture, flight-recorder segments, ContextOnly overlays, and opaque stack fingerprints. Unsupported probes remain Unavailable."
+              --notes "Runtime performance observability update: bounded UI update and Summary/Explorer/Pipeline rebuild p50/p95/max measurements, host-message backlog, capture suppression efficiency, threshold diagnostics, reset control, and machine-readable diagnostic-bundle snapshots. Includes all Protocol v5 adaptive analysis features from v0.8.0. Actual physical-device overhead remains a user-device measurement."
             gh release upload "$RELEASE_TAG" release/* --clobber
           else
             gh release create "$RELEASE_TAG" release/* \
               --target "$GITHUB_SHA" \
               --title "Android eBPF Storage Studio ${RELEASE_TAG}" \
-              --notes "Protocol v5 adaptive eBPF analysis on the v0.6 workspace: Overview/Investigate/Explore/Compare, File Group By, live kernel filters and capture modes, per-CPU aggregates, slow-I/O detail, Top Offenders, background analysis, adaptive Deep capture, flight-recorder segments, ContextOnly overlays, and opaque stack fingerprints. Unsupported probes remain Unavailable. Download the ZIP and verify it with SHA256SUMS.txt."
+              --notes "Runtime performance observability update: bounded UI update and Summary/Explorer/Pipeline rebuild p50/p95/max measurements, host-message backlog, capture suppression efficiency, threshold diagnostics, reset control, and machine-readable diagnostic-bundle snapshots. Includes all Protocol v5 adaptive analysis features from v0.8.0. Actual physical-device overhead remains a user-device measurement. Download the ZIP and verify it with SHA256SUMS.txt."
           fi

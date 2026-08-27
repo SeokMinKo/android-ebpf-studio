@@ -13,8 +13,8 @@ use android_ebpf_protocol::{
     CaptureConfig, CaptureControlCommand, CaptureFilter, CaptureMode, CompletedIo, ControlOutcome,
     CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence,
     FileOriginView, GraphMetrics, HeavyHitterSnapshot, HistogramMetric, IoNodeKind, IoOperation,
-    IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities, SCHEMA_VERSION,
-    SegmentRecord, SlowReason, StackFingerprintRecord, TriggerRecord, WireRecord,
+    IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities, SegmentRecord,
+    SlowReason, StackFingerprintRecord, TriggerRecord, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -25,6 +25,7 @@ use crate::{
     artifacts::{CapturePaths, create_default_session_path},
     capture::{self, CaptureHandle, HostMessage},
     diagnostics::{RotatingJsonl, export_bundle, host_record},
+    performance::{LatencySnapshot, UiPerformanceMonitor},
     session::{self, AsyncSessionWriter},
     simulator,
 };
@@ -35,6 +36,7 @@ const MAX_GRAPH_EXPLORER_POINTS: usize = 2_000;
 const MAX_EXPLORER_GROUPS: usize = 32;
 const MAX_MESSAGES_PER_FRAME: usize = 1_000;
 const LIVE_ANALYSIS_REFRESH: Duration = Duration::from_millis(250);
+const PERFORMANCE_WARNING_INTERVAL: Duration = Duration::from_secs(10);
 const BG: Color32 = Color32::from_rgb(12, 17, 27);
 const PANEL: Color32 = Color32::from_rgb(20, 27, 40);
 const PANEL_RAISED: Color32 = Color32::from_rgb(27, 36, 52);
@@ -381,6 +383,8 @@ pub struct StudioApp {
     triggers: VecDeque<TriggerRecord>,
     segments: VecDeque<SegmentRecord>,
     stack_fingerprints: VecDeque<StackFingerprintRecord>,
+    performance: UiPerformanceMonitor,
+    last_performance_warning: Instant,
 }
 
 impl Default for StudioApp {
@@ -436,6 +440,8 @@ impl Default for StudioApp {
             triggers: VecDeque::new(),
             segments: VecDeque::new(),
             stack_fingerprints: VecDeque::new(),
+            performance: UiPerformanceMonitor::default(),
+            last_performance_warning: Instant::now(),
         }
     }
 }
@@ -811,6 +817,8 @@ impl StudioApp {
                 }
             }
         }
+        self.performance
+            .observe_message_drain(started.elapsed(), self.rx.len());
     }
 
     fn ingest_record(&mut self, record: WireRecord) {
@@ -948,6 +956,40 @@ impl StudioApp {
         self.triggers.clear();
         self.segments.clear();
         self.stack_fingerprints.clear();
+        self.performance.reset();
+        self.last_performance_warning = Instant::now();
+    }
+
+    fn maybe_emit_performance_warning(&mut self) {
+        if !self.is_running()
+            || self.last_performance_warning.elapsed() < PERFORMANCE_WARNING_INTERVAL
+        {
+            return;
+        }
+        let snapshot = self.performance.snapshot();
+        if snapshot.ui_update.p95_ms <= 33.0 && snapshot.current_backlog < 1_000 {
+            return;
+        }
+        self.last_performance_warning = Instant::now();
+        let mut record = host_record(
+            self.session_id.as_deref().unwrap_or("session"),
+            DiagnosticLevel::Warn,
+            "ui.performance",
+            "UI_PERFORMANCE_DEGRADED",
+            "degraded",
+            Some(format!(
+                "ui_p95_ms={:.3} ui_max_ms={:.3} backlog={} peak_backlog={} explorer_p95_ms={:.3} pipeline_p95_ms={:.3}",
+                snapshot.ui_update.p95_ms,
+                snapshot.ui_update.max_ms,
+                snapshot.current_backlog,
+                snapshot.peak_backlog,
+                snapshot.explorer_rebuild.p95_ms,
+                snapshot.pipeline_rebuild.p95_ms,
+            )),
+        );
+        record.duration_ms = Some(snapshot.ui_update.p95_ms.round().max(0.0) as u64);
+        record.count = Some(snapshot.current_backlog as u64);
+        self.push_diagnostic_record(record);
     }
 
     fn push_diagnostic(&mut self, value: String) {
@@ -1018,6 +1060,16 @@ impl StudioApp {
                 "root": value.root,
             })),
             "capabilities": self.capabilities,
+            "ui_performance": self.performance.snapshot(),
+            "capture_efficiency": self.latest_aggregate.as_ref().map(|snapshot| serde_json::json!({
+                "observed": snapshot.counters.observed,
+                "bytes": snapshot.counters.bytes,
+                "detail_emitted": snapshot.counters.detail_emitted,
+                "suppressed_fast": snapshot.counters.suppressed_fast,
+                "filter_suppressed": snapshot.counters.filter_suppressed,
+                "ring_reserve_failures": snapshot.counters.ring_reserve_failures,
+                "map_insert_failures": snapshot.counters.map_insert_failures,
+            })),
         });
         match export_bundle(
             &destination,
@@ -1040,11 +1092,10 @@ impl StudioApp {
                     || (self.is_running() && built_at.elapsed() < LIVE_ANALYSIS_REFRESH)
             });
         if !cache_valid {
-            self.summary_view = Some((
-                self.analysis_generation,
-                Instant::now(),
-                self.analyzer.summary(),
-            ));
+            let started = Instant::now();
+            let summary = self.analyzer.summary();
+            self.performance.observe_summary_rebuild(started.elapsed());
+            self.summary_view = Some((self.analysis_generation, Instant::now(), summary));
         }
         self.summary_view
             .as_ref()
@@ -1149,6 +1200,7 @@ impl StudioApp {
     }
 
     fn rebuild_explorer_view(&mut self) {
+        let started = Instant::now();
         let samples = self.analyzer.completed_ios();
         let available = samples.len();
         let origin_ns = samples.first().map_or(0, |io| io.completion.ts_ns);
@@ -1197,9 +1249,11 @@ impl StudioApp {
             displayed,
             built_at: Instant::now(),
         });
+        self.performance.observe_explorer_rebuild(started.elapsed());
     }
 
     fn rebuild_pipeline_view(&mut self, io: CompletedIo) {
+        let started = Instant::now();
         let pipeline = self.analyzer.pipeline_for(&io);
         let graph = self.analyzer.transaction_for(&io);
         let graph_metrics = graph.metrics();
@@ -1221,6 +1275,7 @@ impl StudioApp {
             slow_reason,
             built_at: Instant::now(),
         });
+        self.performance.observe_pipeline_rebuild(started.elapsed());
     }
 
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
@@ -2320,6 +2375,76 @@ impl StudioApp {
                 }
             });
         });
+        ui.add_space(10.0);
+        let performance = self.performance.snapshot();
+        let mut reset_performance = false;
+        card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("UI PERFORMANCE")
+                        .size(10.0)
+                        .strong()
+                        .color(MUTED),
+                );
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if ui.button("Reset measurements").clicked() {
+                            reset_performance = true;
+                        }
+                    },
+                );
+            });
+            ui.label(
+                RichText::new(
+                    "CPU time spent building each UI update; this excludes GPU presentation time.",
+                )
+                .small()
+                .color(MUTED),
+            );
+            ui.add_space(8.0);
+            egui::Grid::new("ui-performance-grid")
+                .striped(true)
+                .spacing([18.0, 7.0])
+                .show(ui, |ui| {
+                    for heading in ["Path", "Samples", "p50", "p95", "Max", "Over budget"] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                    performance_metric_row(ui, "UI update", &performance.ui_update);
+                    performance_metric_row(ui, "Message drain", &performance.message_drain);
+                    performance_metric_row(ui, "Summary rebuild", &performance.summary_rebuild);
+                    performance_metric_row(ui, "Explorer rebuild", &performance.explorer_rebuild);
+                    performance_metric_row(ui, "Pipeline rebuild", &performance.pipeline_rebuild);
+                });
+            ui.add_space(6.0);
+            ui.label(format!(
+                "Host-message backlog: {} current · {} peak",
+                performance.current_backlog, performance.peak_backlog
+            ));
+            if let Some(aggregate) = &self.latest_aggregate {
+                let selected = aggregate
+                    .counters
+                    .detail_emitted
+                    .saturating_add(aggregate.counters.suppressed_fast);
+                let suppression = if selected == 0 {
+                    0.0
+                } else {
+                    aggregate.counters.suppressed_fast as f64 * 100.0 / selected as f64
+                };
+                ui.label(format!(
+                    "Capture efficiency: observed {} · detail {} · fast suppressed {} ({suppression:.1}%) · ring failures {}",
+                    aggregate.counters.observed,
+                    aggregate.counters.detail_emitted,
+                    aggregate.counters.suppressed_fast,
+                    aggregate.counters.ring_reserve_failures,
+                ));
+            }
+        });
+        if reset_performance {
+            self.performance.reset();
+            self.last_performance_warning = Instant::now();
+        }
         if let Some(capabilities) = &self.capabilities {
             ui.add_space(10.0);
             card_frame().show(ui, |ui| {
@@ -2394,6 +2519,7 @@ impl StudioApp {
 
 impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ui_started = Instant::now();
         self.drain_messages();
         if self.is_running() || !self.rx.is_empty() {
             ui.ctx().request_repaint_after(Duration::from_millis(33));
@@ -2785,6 +2911,8 @@ impl eframe::App for StudioApp {
                     }
                 });
             });
+        self.performance.observe_ui_update(ui_started.elapsed());
+        self.maybe_emit_performance_warning();
     }
 }
 
@@ -3245,6 +3373,16 @@ fn summary_card(ui: &mut egui::Ui, label: &str, value: String) {
         ui.add_space(5.0);
         ui.label(RichText::new(value).size(20.0).strong().color(TEXT));
     });
+}
+
+fn performance_metric_row(ui: &mut egui::Ui, label: &str, value: &LatencySnapshot) {
+    ui.label(label);
+    ui.label(value.samples.to_string());
+    ui.label(format!("{:.3} ms", value.p50_ms));
+    ui.label(format!("{:.3} ms", value.p95_ms));
+    ui.label(format!("{:.3} ms", value.max_ms));
+    ui.label(value.over_budget.to_string());
+    ui.end_row();
 }
 
 #[cfg(test)]

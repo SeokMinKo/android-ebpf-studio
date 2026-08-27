@@ -1,6 +1,6 @@
 # Task DAG — Adaptive eBPF Analysis
 
-- Artifact: `tasks@1`
+- Artifact: `tasks@2`
 - Status: `CONFIRMED`
 - Derived from: `spec@1`, `design@1`
 - Execution: one implementation stream by default. Complete tasks in dependency order.
@@ -19,6 +19,8 @@
 | TSK-210 | Scheduler/writeback/GC/UFS context adapters and ContextOnly overlay | 208,209 | Direct-vs-context attribution tests |
 | TSK-211 | Deep-only user/kernel stack fingerprints and background symbolization | 208,209 | Unsupported/sampling/namespace tests |
 | TSK-212 | Live Why Slow integration, diagnostics, docs, target-device validation and releases | 207,210,211 | Full CI, benchmark, device evidence |
+| TSK-213 | Bounded runtime UI/query/backlog and capture-efficiency telemetry | 205,212 | Unit tests, Diagnostics and bundle snapshot |
+| TSK-214 | v0.8.1 conformance, merge and release | 213 | Full CI and release evidence |
 
 ## Per-task execution contract
 
@@ -103,6 +105,23 @@
 
 - Paths: all affected docs/tests/workflows plus this change's evidence artifacts.
 - DoD: v0.6, v0.7, v0.8 gates are independently releasable; no release claims target-device overhead or vendor probe support without exact device evidence.
+
+### TSK-213 — Runtime performance observability
+
+- Spec IDs: NFR-201, NFR-203, NFR-204, NFR-206, NFR-208.
+- Depends: TSK-205, TSK-212.
+- Paths: `crates/desktop/src/performance.rs`, `crates/desktop/src/lib.rs`, `crates/desktop/src/app.rs`, focused unit tests.
+- First RED: no bounded window can report percentile latency, budget violations or backlog peaks.
+- Observability: UI update, drain, Summary, Explorer and Pipeline rebuild timings; current/peak host-message backlog; aggregate/detail suppression ratio. No path, serial or raw stack address.
+- DoD: deterministic percentile/bound tests pass, Diagnostics renders the snapshot, reset is explicit, and diagnostic bundles contain the same machine-readable snapshot.
+
+### TSK-214 — v0.8.1 conformance and release
+
+- Spec IDs: NFR-204, NFR-206, NFR-208.
+- Depends: TSK-213.
+- Paths: version metadata, release workflow, runbook and evidence artifacts.
+- First check: format, Clippy, workspace tests, Windows GUI, Android agent, eBPF object and 1M-request benchmark.
+- DoD: packaged performance telemetry is released without claiming reference-Windows frame or physical-device overhead results before the user records them.
 
 ## Release waves
 

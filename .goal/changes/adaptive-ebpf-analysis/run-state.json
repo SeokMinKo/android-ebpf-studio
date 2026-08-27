@@ -5,9 +5,9 @@
   "execution_mode": "DURABLE",
   "route": "DESIGN_FIRST",
   "run_status": "ACTIVE",
-  "phase": "P12",
+  "phase": "P10",
   "max_active_streams": 1,
-  "evidence_order": ["0001", "0002", "0003", "0004", "0005", "0006"],
+  "evidence_order": ["0001", "0002", "0003", "0004", "0005", "0006", "0007"],
   "required_spec_ids": [
     "REQ-201", "REQ-202", "REQ-203", "REQ-204", "REQ-205", "REQ-206", "REQ-207", "REQ-208",
     "NFR-201", "NFR-202", "NFR-203", "NFR-204", "NFR-205", "NFR-206", "NFR-207", "NFR-208"
@@ -21,10 +21,10 @@
   },
   "artifacts": [
     {"id":"design","role":"DESIGN","path":"design.md","revision":1,"status":"CONFIRMED","current":true,"derived_from":["spec@1"]},
-    {"id":"tasks","role":"TASKS","path":"tasks.md","revision":1,"status":"CONFIRMED","current":true,"derived_from":["spec@1","design@1"]},
-    {"id":"test-plan","role":"TEST_PLAN","path":"test-plan.md","revision":1,"status":"CONFIRMED","current":true,"derived_from":["spec@1","design@1","tasks@1"]},
-    {"id":"worklog","role":"WORKLOG","path":"WORKLOG.md","revision":4,"status":"DRAFT","current":true,"derived_from":["spec@1","tasks@1"]},
-    {"id":"evidence","role":"EVIDENCE","path":"evidence/ledger.md","revision":3,"status":"DRAFT","current":true,"derived_from":["spec@1","design@1","tasks@1","test-plan@1"]}
+    {"id":"tasks","role":"TASKS","path":"tasks.md","revision":2,"status":"CONFIRMED","current":true,"derived_from":["spec@1","design@1"]},
+    {"id":"test-plan","role":"TEST_PLAN","path":"test-plan.md","revision":2,"status":"CONFIRMED","current":true,"derived_from":["spec@1","design@1","tasks@2"]},
+    {"id":"worklog","role":"WORKLOG","path":"WORKLOG.md","revision":6,"status":"DRAFT","current":true,"derived_from":["spec@1","tasks@2"]},
+    {"id":"evidence","role":"EVIDENCE","path":"evidence/ledger.md","revision":4,"status":"DRAFT","current":true,"derived_from":["spec@1","design@1","tasks@2","test-plan@2"]}
   ],
   "tasks": [
     {"id":"TSK-201","status":"partial","depends_on":[],"blocker":"Windows p95 frame and selector baseline still requires the user's reference host"},
@@ -38,17 +38,19 @@
     {"id":"TSK-209","status":"done","depends_on":["TSK-208"]},
     {"id":"TSK-210","status":"done","depends_on":["TSK-208","TSK-209"]},
     {"id":"TSK-211","status":"done","depends_on":["TSK-208","TSK-209"]},
-    {"id":"TSK-212","status":"partial","depends_on":["TSK-207","TSK-210","TSK-211"],"blocker":"Release published; user Windows/device validation remains"}
+    {"id":"TSK-212","status":"partial","depends_on":["TSK-207","TSK-210","TSK-211"],"blocker":"Release published; user Windows/device validation remains"},
+    {"id":"TSK-213","status":"done","depends_on":["TSK-205","TSK-212"],"dependency_exception":"Implements the measurement surface required to close the existing partial validation tasks"},
+    {"id":"TSK-214","status":"in_progress","depends_on":["TSK-213"]}
   ],
   "checkpoint": {
-    "seq": 4,
+    "seq": 6,
     "spec_revision": 1,
-    "completed_tasks": ["TSK-202", "TSK-203", "TSK-204", "TSK-206", "TSK-207", "TSK-208", "TSK-209", "TSK-210", "TSK-211"],
-    "next_tasks": ["TSK-201", "TSK-205", "TSK-212"],
+    "completed_tasks": ["TSK-202", "TSK-203", "TSK-204", "TSK-206", "TSK-207", "TSK-208", "TSK-209", "TSK-210", "TSK-211", "TSK-213"],
+    "next_tasks": ["TSK-214"],
     "blockers": [
       "DEVICE: target Android Phone required for real overhead and vendor capability gates",
       "WINDOWS: named reference host required for NFR-204 benchmark evidence"
     ],
-    "resume": "Collect user Windows frame/selector responsiveness and physical-device mode/capability/overhead evidence from v0.8.0."
+    "resume": "Run final v0.8.1 CI at the release metadata head, merge PR #7 and verify five release assets."
   }
 }

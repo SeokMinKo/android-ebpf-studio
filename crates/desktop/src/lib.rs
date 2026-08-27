@@ -4,5 +4,6 @@ pub mod app;
 pub mod artifacts;
 pub mod capture;
 pub mod diagnostics;
+pub mod performance;
 pub mod session;
 pub mod simulator;

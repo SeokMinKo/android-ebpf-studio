@@ -23,6 +23,8 @@
 | TST-208 | REQ-207 | fixture/integration | context absent or misclassified |
 | TST-209 | REQ-208 | fixture/integration | no stack capability/fingerprint contract |
 | TST-210 | all | Windows/Android E2E | packaged capture evidence unavailable until devices run |
+| TST-211 | NFR-201, NFR-203, NFR-204 | unit/component | no bounded UI/query latency and backlog snapshot exists |
+| TST-212 | NFR-204, NFR-206, NFR-208 | Windows/manual-device | performance snapshot is absent from Diagnostics and diagnostic bundle |
 
 ## Required benchmark evidence
 

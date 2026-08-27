@@ -26,6 +26,7 @@ Windows에서 실행되는 Rust GUI가 `adb root` 가능한 Android Phone에 eBP
 - Basic → Armed → Deep → Cooldown 자동 전환, bounded flight-recorder segment와 trigger evidence
 - Deep 전용 scheduler/FS/UIC context lane과 user/kernel stack fingerprint cohort
 - background session load/export/write, incremental Explorer와 Pipeline/RCA cache
+- Diagnostics의 bounded UI/query p50·p95·max, budget 초과, host-message backlog와 capture suppression 효율 측정
 
 ## 구조
 
@@ -110,7 +111,7 @@ cargo binstall bpf-linker
 - **Investigate**: 요청 목록에서 하나를 선택해 Pipeline waterfall, file origin, critical path, `Why slow?`, block/transaction/raw file evidence를 한곳에서 확인합니다.
 - **Explore**: Latency over time, Latency by file, Queue pressure, Layer contribution, LBA 프리셋을 사용하거나 FS/UFS/critical-path 축과 file/origin/confidence Group By를 직접 조합합니다.
 - **Compare**: 별도 baseline NDJSON을 읽기 전용으로 열어 현재 세션의 I/O, bytes, p50/p95/p99, queue depth, file attribution 변화량을 비교합니다.
-- **Diagnostics**: component/code/correlation filter, INFO/DEBUG/TRACE capture level, redacted bundle export를 사용합니다.
+- **Diagnostics**: component/code/correlation filter, INFO/DEBUG/TRACE capture level, UI update·Summary·Explorer·Pipeline rebuild latency, message backlog, capture suppression 효율과 redacted bundle export를 사용합니다. 표시되는 UI update 시간은 CPU가 화면을 구성한 시간이며 GPU presentation 시간은 포함하지 않습니다.
 
 좌측 `LIVE FILTER & MODE`에서 조건과 capture mode를 바꾼 뒤 `Apply live config`를 누르면 새 generation이 agent와 eBPF map에 원자적으로 적용됩니다. Summary의 kernel aggregate는 전체 관측 I/O이고, Block/File/Pipeline 표는 Balanced 정책으로 보존된 slow/sample detail입니다. 두 수치를 동일한 모집단으로 오해하지 마세요.
 

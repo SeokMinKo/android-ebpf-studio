@@ -31,3 +31,16 @@
 - Release workflow run `33052394228` succeeded for Windows GUI, Android arm64 agent, eBPF object and publish jobs.
 - v0.8.0 published five uploaded assets: executable, agent, object, complete ZIP and SHA256 manifest.
 - Change remains partially validated until the user records Windows rendered responsiveness and physical-device capability/overhead evidence.
+
+## 0005 — 2026-08-27 performance validation implementation resume
+
+- Reconciled local tree with `origin/main` at identical tree `b686bd373118f920d8bba66d32164f456b0cce46`; Spec revision/hash remain current.
+- Added convergence tasks TSK-213~214 under existing NFR-204/NFR-206 rather than changing the confirmed measurement contract.
+- Selected one implementation stream: bounded UI/query/backlog measurement, Diagnostics presentation, reset, structured warning and diagnostic-bundle snapshot.
+- Local Rust execution remains unavailable; first RED is recorded as `ENV` and executable proof will use GitHub CI without relabelling it as a local RED.
+
+## 0006 — 2026-08-27 runtime telemetry Green
+
+- Implemented bounded UI update/message drain/Summary/Explorer/Pipeline latency windows, backlog peaks, capture-efficiency presentation, reset and diagnostic-bundle serialization.
+- Initial CI exposed a `DiagnosticRecord.duration_ms` integer contract mismatch only on the Windows GUI feature path; retained 0.001 ms detail text while rounding the common field to integer milliseconds.
+- GitHub Actions run `33058448179` passed all four jobs after the correction. TSK-213 is done; TSK-214 is active for v0.8.1 packaging.
