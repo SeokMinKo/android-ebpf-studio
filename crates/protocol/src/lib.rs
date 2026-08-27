@@ -1749,9 +1749,7 @@ impl AnalysisEngine {
             *self.analysis_index.borrow_mut() = Some(AnalysisIndex::build(self));
         }
         let index_guard = self.analysis_index.borrow();
-        let index = index_guard
-            .as_ref()
-            .expect("analysis index is initialized");
+        let index = index_guard.as_ref().expect("analysis index is initialized");
         let mut positions = index.long_observations.clone();
         if let Some(candidates) = index.observations_by_request.get(&io.issue.request_id) {
             positions.extend_from_slice(candidates);
@@ -1795,9 +1793,7 @@ impl AnalysisEngine {
             *self.analysis_index.borrow_mut() = Some(AnalysisIndex::build(self));
         }
         let index_guard = self.analysis_index.borrow();
-        let index = index_guard
-            .as_ref()
-            .expect("analysis index is initialized");
+        let index = index_guard.as_ref().expect("analysis index is initialized");
         let mut file_positions = index.long_files.clone();
         for second in request_time_buckets(io) {
             if let Some(positions) = index.files_by_pid_time.get(&(io.issue.pid, second)) {
