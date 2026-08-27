@@ -1095,11 +1095,7 @@ impl StudioApp {
             let started = Instant::now();
             let summary = self.analyzer.summary();
             self.performance.observe_summary_rebuild(started.elapsed());
-            self.summary_view = Some((
-                self.analysis_generation,
-                Instant::now(),
-                summary,
-            ));
+            self.summary_view = Some((self.analysis_generation, Instant::now(), summary));
         }
         self.summary_view
             .as_ref()
@@ -1253,8 +1249,7 @@ impl StudioApp {
             displayed,
             built_at: Instant::now(),
         });
-        self.performance
-            .observe_explorer_rebuild(started.elapsed());
+        self.performance.observe_explorer_rebuild(started.elapsed());
     }
 
     fn rebuild_pipeline_view(&mut self, io: CompletedIo) {
@@ -1280,8 +1275,7 @@ impl StudioApp {
             slow_reason,
             built_at: Instant::now(),
         });
-        self.performance
-            .observe_pipeline_rebuild(started.elapsed());
+        self.performance.observe_pipeline_rebuild(started.elapsed());
     }
 
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
