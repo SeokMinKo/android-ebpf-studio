@@ -104,6 +104,23 @@
 - Paths: all affected docs/tests/workflows plus this change's evidence artifacts.
 - DoD: v0.6, v0.7, v0.8 gates are independently releasable; no release claims target-device overhead or vendor probe support without exact device evidence.
 
+### TSK-213 — Runtime performance observability
+
+- Spec IDs: NFR-201, NFR-203, NFR-204, NFR-206, NFR-208.
+- Depends: TSK-205, TSK-212.
+- Paths: `crates/desktop/src/performance.rs`, `crates/desktop/src/lib.rs`, `crates/desktop/src/app.rs`, focused unit tests.
+- First RED: no bounded window can report percentile latency, budget violations or backlog peaks.
+- Observability: UI update, drain, Summary, Explorer and Pipeline rebuild timings; current/peak host-message backlog; aggregate/detail suppression ratio. No path, serial or raw stack address.
+- DoD: deterministic percentile/bound tests pass, Diagnostics renders the snapshot, reset is explicit, and diagnostic bundles contain the same machine-readable snapshot.
+
+### TSK-214 — v0.8.1 conformance and release
+
+- Spec IDs: NFR-204, NFR-206, NFR-208.
+- Depends: TSK-213.
+- Paths: version metadata, release workflow, runbook and evidence artifacts.
+- First check: format, Clippy, workspace tests, Windows GUI, Android agent, eBPF object and 1M-request benchmark.
+- DoD: packaged performance telemetry is released without claiming reference-Windows frame or physical-device overhead results before the user records them.
+
 ## Release waves
 
 ### v0.6 — Fast Live Foundation

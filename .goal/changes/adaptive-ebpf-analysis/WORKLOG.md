@@ -31,3 +31,10 @@
 - Release workflow run `33052394228` succeeded for Windows GUI, Android arm64 agent, eBPF object and publish jobs.
 - v0.8.0 published five uploaded assets: executable, agent, object, complete ZIP and SHA256 manifest.
 - Change remains partially validated until the user records Windows rendered responsiveness and physical-device capability/overhead evidence.
+
+## 0005 — 2026-08-27 performance validation implementation resume
+
+- Reconciled local tree with `origin/main` at identical tree `b686bd373118f920d8bba66d32164f456b0cce46`; Spec revision/hash remain current.
+- Added convergence tasks TSK-213~214 under existing NFR-204/NFR-206 rather than changing the confirmed measurement contract.
+- Selected one implementation stream: bounded UI/query/backlog measurement, Diagnostics presentation, reset, structured warning and diagnostic-bundle snapshot.
+- Local Rust execution remains unavailable; first RED is recorded as `ENV` and executable proof will use GitHub CI without relabelling it as a local RED.
