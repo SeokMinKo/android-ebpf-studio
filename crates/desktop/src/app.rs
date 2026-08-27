@@ -9,8 +9,8 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AccessPattern, AnalysisEngine, AnalysisSummary, CompletedIo, CorrelationConfidence,
-    CapabilityState, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileOriginView,
+    AccessPattern, AnalysisEngine, AnalysisSummary, CapabilityState, CompletedIo,
+    CorrelationConfidence, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileOriginView,
     GraphMetrics, IoNodeKind, IoOperation, IoPipeline, IoSizeClass, IoTransactionGraph,
     PipelineLayer, ProbeCapabilities, SCHEMA_VERSION, SlowReason, WireRecord,
 };
@@ -106,11 +106,9 @@ impl ExplorerPreset {
                 AxisMetric::UfsLatencyMs,
                 GroupBy::File,
             )),
-            Self::LbaDistribution => Some((
-                AxisMetric::TimeMs,
-                AxisMetric::Sector,
-                GroupBy::Direction,
-            )),
+            Self::LbaDistribution => {
+                Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
+            }
             Self::Custom => None,
         }
     }
@@ -1050,11 +1048,7 @@ impl StudioApp {
                     .width(220.0)
                     .show_ui(ui, |ui| {
                         for preset in ExplorerPreset::ALL {
-                            ui.selectable_value(
-                                &mut self.explorer_preset,
-                                preset,
-                                preset.label(),
-                            );
+                            ui.selectable_value(&mut self.explorer_preset, preset, preset.label());
                         }
                     });
                 if previous != self.explorer_preset
@@ -1202,14 +1196,21 @@ impl StudioApp {
                 .cloned()
             {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("SLOWEST RECENT REQUEST").size(10.0).color(MUTED));
-                    ui.label(RichText::new(format!(
-                        "#{} · {} · {} · {}",
-                        slowest.issue.request_id,
-                        operation_label(slowest.issue.operation),
-                        format_bytes(slowest.issue.bytes as u64),
-                        format_duration(slowest.total_latency_ns)
-                    )).strong());
+                    ui.label(
+                        RichText::new("SLOWEST RECENT REQUEST")
+                            .size(10.0)
+                            .color(MUTED),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "#{} · {} · {} · {}",
+                            slowest.issue.request_id,
+                            operation_label(slowest.issue.operation),
+                            format_bytes(slowest.issue.bytes as u64),
+                            format_duration(slowest.total_latency_ns)
+                        ))
+                        .strong(),
+                    );
                     if ui.button("Investigate").clicked() {
                         self.selected_pipeline_request = Some(slowest.issue.request_id);
                         self.page = Page::Investigate;
@@ -1227,21 +1228,22 @@ impl StudioApp {
         );
         let probe_coverage = self.capabilities.as_ref().map(|capabilities| {
             capabilities.attach_plan.iter().fold(
-                    (0, 0, 0, 0),
-                    |(measured, derived, context, unavailable), plan| match plan.state {
-                        CapabilityState::Measured => (measured + 1, derived, context, unavailable),
-                        CapabilityState::Derived => (measured, derived + 1, context, unavailable),
-                        CapabilityState::Context => (measured, derived, context + 1, unavailable),
-                        CapabilityState::Unavailable => {
-                            (measured, derived, context, unavailable + 1)
-                        }
-                    },
-                )
+                (0, 0, 0, 0),
+                |(measured, derived, context, unavailable), plan| match plan.state {
+                    CapabilityState::Measured => (measured + 1, derived, context, unavailable),
+                    CapabilityState::Derived => (measured, derived + 1, context, unavailable),
+                    CapabilityState::Context => (measured, derived, context + 1, unavailable),
+                    CapabilityState::Unavailable => (measured, derived, context, unavailable + 1),
+                },
+            )
         });
         let file_coverage = if summary.file_ios == 0 {
             "No file I/O".into()
         } else {
-            format!("{:.1}%", ratio(summary.attributed_file_ios, summary.file_ios))
+            format!(
+                "{:.1}%",
+                ratio(summary.attributed_file_ios, summary.file_ios)
+            )
         };
         ui.columns(4, |columns| {
             summary_card(
@@ -1249,19 +1251,13 @@ impl StudioApp {
                 "Accepted / rejected",
                 format!("{} / {}", self.received_events, self.rejected_records),
             );
-            summary_card(
-                &mut columns[1],
-                "File coverage",
-                file_coverage,
-            );
+            summary_card(&mut columns[1], "File coverage", file_coverage);
             summary_card(
                 &mut columns[2],
                 "Probe coverage",
                 probe_coverage.map_or_else(
                     || "Not reported".into(),
-                    |(measured, derived, _, _)| {
-                        format!("{measured} measured · {derived} derived")
-                    },
+                    |(measured, derived, _, _)| format!("{measured} measured · {derived} derived"),
                 ),
             );
             summary_card(
@@ -1365,7 +1361,12 @@ impl StudioApp {
         ui.add_space(10.0);
 
         card_frame().show(ui, |ui| {
-            ui.label(RichText::new("RECENT REQUESTS").size(10.0).strong().color(MUTED));
+            ui.label(
+                RichText::new("RECENT REQUESTS")
+                    .size(10.0)
+                    .strong()
+                    .color(MUTED),
+            );
             let requests = self.analyzer.completed_ios();
             let row_count = requests.len().min(500);
             let mut selection = self.selected_pipeline_request;
@@ -1470,13 +1471,16 @@ impl StudioApp {
         card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("REQUEST").size(10.0).strong().color(MUTED));
-                ui.label(RichText::new(format!(
-                    "#{} · {} · {} · sector {}",
-                    io.issue.request_id,
-                    operation_label(io.issue.operation),
-                    format_bytes(io.issue.bytes as u64),
-                    io.issue.sector
-                )).strong());
+                ui.label(
+                    RichText::new(format!(
+                        "#{} · {} · {} · sector {}",
+                        io.issue.request_id,
+                        operation_label(io.issue.operation),
+                        format_bytes(io.issue.bytes as u64),
+                        io.issue.sector
+                    ))
+                    .strong(),
+                );
                 ui.separator();
                 ui.label(format!("Total {}", format_duration(pipeline.total_ns())));
                 ui.label(
@@ -1620,7 +1624,10 @@ impl StudioApp {
                     .show(ui, |ui| {
                         for (name, value) in [
                             ("Request ID", io.issue.request_id.to_string()),
-                            ("Device", format!("{}:{}", io.issue.device_major, io.issue.device_minor)),
+                            (
+                                "Device",
+                                format!("{}:{}", io.issue.device_major, io.issue.device_minor),
+                            ),
                             ("Sector", io.issue.sector.to_string()),
                             ("Bytes", io.issue.bytes.to_string()),
                             ("PID / TID", format!("{} / {}", io.issue.pid, io.issue.tid)),
@@ -1887,14 +1894,22 @@ impl StudioApp {
         if baseline_summary.completed_ios == 0 && baseline_summary.file_ios == 0 {
             card_frame().show(ui, |ui| {
                 ui.label(RichText::new("Baseline has no analyzable I/O").strong());
-                ui.label(RichText::new("Choose a session containing completed block or file I/O events.").color(MUTED));
+                ui.label(
+                    RichText::new(
+                        "Choose a session containing completed block or file I/O events.",
+                    )
+                    .color(MUTED),
+                );
             });
             return;
         }
         if current.completed_ios == 0 && current.file_ios == 0 {
             card_frame().show(ui, |ui| {
                 ui.label(RichText::new("Current session has no analyzable I/O").strong());
-                ui.label(RichText::new("Open or record the current session before calculating deltas.").color(MUTED));
+                ui.label(
+                    RichText::new("Open or record the current session before calculating deltas.")
+                        .color(MUTED),
+                );
             });
             return;
         }
