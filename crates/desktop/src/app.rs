@@ -13,8 +13,8 @@ use android_ebpf_protocol::{
     CaptureConfig, CaptureControlCommand, CaptureFilter, CaptureMode, CompletedIo, ControlOutcome,
     CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence,
     FileOriginView, GraphMetrics, HeavyHitterSnapshot, HistogramMetric, IoNodeKind, IoOperation,
-    IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities, SCHEMA_VERSION,
-    SegmentRecord, SlowReason, StackFingerprintRecord, TriggerRecord, WireRecord,
+    IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities, SegmentRecord,
+    SlowReason, StackFingerprintRecord, TriggerRecord, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -987,7 +987,7 @@ impl StudioApp {
                 snapshot.pipeline_rebuild.p95_ms,
             )),
         );
-        record.duration_ms = Some(snapshot.ui_update.p95_ms);
+        record.duration_ms = Some(snapshot.ui_update.p95_ms.round().max(0.0) as u64);
         record.count = Some(snapshot.current_backlog as u64);
         self.push_diagnostic_record(record);
     }
