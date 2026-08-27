@@ -1,6 +1,6 @@
 # Task DAG — Adaptive eBPF Analysis
 
-- Artifact: `tasks@1`
+- Artifact: `tasks@2`
 - Status: `CONFIRMED`
 - Derived from: `spec@1`, `design@1`
 - Execution: one implementation stream by default. Complete tasks in dependency order.
@@ -19,6 +19,8 @@
 | TSK-210 | Scheduler/writeback/GC/UFS context adapters and ContextOnly overlay | 208,209 | Direct-vs-context attribution tests |
 | TSK-211 | Deep-only user/kernel stack fingerprints and background symbolization | 208,209 | Unsupported/sampling/namespace tests |
 | TSK-212 | Live Why Slow integration, diagnostics, docs, target-device validation and releases | 207,210,211 | Full CI, benchmark, device evidence |
+| TSK-213 | Bounded runtime UI/query/backlog and capture-efficiency telemetry | 205,212 | Unit tests, Diagnostics and bundle snapshot |
+| TSK-214 | v0.8.1 conformance, merge and release | 213 | Full CI and release evidence |
 
 ## Per-task execution contract
 
