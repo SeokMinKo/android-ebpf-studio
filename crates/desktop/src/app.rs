@@ -9,10 +9,10 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AccessPattern, AnalysisEngine, AnalysisSummary, CompletedIo, CorrelationConfidence, DiagnosticLevel,
-    DiagnosticRecord, EdgeConfidence, FileOriginView, GraphMetrics, IoNodeKind, IoOperation,
-    IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities, SCHEMA_VERSION,
-    SlowReason, WireRecord,
+    AccessPattern, AnalysisEngine, AnalysisSummary, CompletedIo, CorrelationConfidence,
+    DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileOriginView, GraphMetrics, IoNodeKind,
+    IoOperation, IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities,
+    SCHEMA_VERSION, SlowReason, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -139,7 +139,9 @@ impl AxisMetric {
             Self::UfsLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::UfsCommand))
             }
-            Self::CriticalPathMs => graph.map(|graph| graph.metrics().critical_path_ns as f64 / 1e6),
+            Self::CriticalPathMs => {
+                graph.map(|graph| graph.metrics().critical_path_ns as f64 / 1e6)
+            }
         }
     }
 }
@@ -784,12 +786,13 @@ impl StudioApp {
     }
 
     fn analysis_summary(&mut self) -> AnalysisSummary {
-        let cache_valid = self.summary_view.as_ref().is_some_and(
-            |(generation, built_at, _)| {
+        let cache_valid = self
+            .summary_view
+            .as_ref()
+            .is_some_and(|(generation, built_at, _)| {
                 *generation == self.analysis_generation
                     || (self.is_running() && built_at.elapsed() < LIVE_ANALYSIS_REFRESH)
-            },
-        );
+            });
         if !cache_valid {
             self.summary_view = Some((
                 self.analysis_generation,
@@ -975,7 +978,10 @@ impl StudioApp {
         if !cache_valid {
             self.rebuild_explorer_view();
         }
-        let view = self.explorer_view.as_ref().expect("explorer view is rebuilt");
+        let view = self
+            .explorer_view
+            .as_ref()
+            .expect("explorer view is rebuilt");
         let palette = [
             Color32::LIGHT_BLUE,
             Color32::LIGHT_GREEN,
@@ -2190,9 +2196,7 @@ fn evenly_sample_indices(length: usize, limit: usize) -> Vec<usize> {
     if length <= limit {
         return (0..length).collect();
     }
-    (0..limit)
-        .map(|index| index * length / limit)
-        .collect()
+    (0..limit).map(|index| index * length / limit).collect()
 }
 
 fn operation_label(value: IoOperation) -> &'static str {
@@ -2392,8 +2396,14 @@ mod ui_tests {
             }),
             confidence: EdgeConfidence::Probable,
         };
-        assert_eq!(file_group_key(std::slice::from_ref(&origin)), "/data/test.bin");
-        assert_eq!(file_group_key(&[origin.clone(), origin]), "Multiple files (2)");
+        assert_eq!(
+            file_group_key(std::slice::from_ref(&origin)),
+            "/data/test.bin"
+        );
+        assert_eq!(
+            file_group_key(&[origin.clone(), origin]),
+            "Multiple files (2)"
+        );
         assert_eq!(file_group_key(&[]), "Unattributed");
     }
 }

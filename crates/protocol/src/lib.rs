@@ -1311,11 +1311,7 @@ fn request_time_buckets(io: &CompletedIo) -> Vec<u64> {
 }
 
 fn request_cache_key(io: &CompletedIo) -> (u64, u64, u64) {
-    (
-        io.issue.request_id,
-        io.issue.ts_ns,
-        io.completion.ts_ns,
-    )
+    (io.issue.request_id, io.issue.ts_ns, io.completion.ts_ns)
 }
 
 #[derive(Debug, Default)]
