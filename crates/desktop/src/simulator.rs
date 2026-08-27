@@ -8,9 +8,11 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AttributionConfidence, BlockComplete, BlockInsert, BlockIssue, CorrelationConfidence, FileIo,
-    IoOperation, PipelineLayer, PipelineObservation, PipelinePhase, SCHEMA_VERSION, StorageEvent,
-    WireRecord,
+    AggregateCounters, AggregateSnapshot, AttributionConfidence, BlockComplete, BlockInsert,
+    BlockIssue, CaptureState, CorrelationConfidence, FileIo, HeavyHitterDimension,
+    HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram, HistogramMetric,
+    IoOperation, PipelineLayer, PipelineObservation, PipelinePhase, SCHEMA_VERSION, SegmentRecord,
+    StackFingerprintRecord, StackKind, StorageEvent, TriggerRecord, WireRecord,
 };
 use crossbeam_channel::Sender;
 
@@ -34,6 +36,12 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
         let mut record_sequence = 1_u64;
         let mut read_sector = 1_024_u64;
         let mut write_sector = 65_536_u64;
+        let mut total_bytes = 0_u64;
+        let mut cumulative_latency_ns = 0_u64;
+        let mut latency_histogram = Histogram::new(vec![
+            100_000, 250_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000,
+        ])
+        .expect("simulator histogram boundaries are valid");
         while !stop.load(Ordering::Acquire) {
             let bytes = if sequence.is_multiple_of(8) {
                 131_072
@@ -59,6 +67,10 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             let issue_ts = ts_ns + 100_000 + (sequence % 4) * 50_000;
             let latency_ns = 200_000 + (sequence % 20) * 100_000;
             let completion_ts = issue_ts + latency_ns;
+            total_bytes = total_bytes.saturating_add(bytes as u64);
+            let total_latency_ns = completion_ts.saturating_sub(insert_ts);
+            cumulative_latency_ns = cumulative_latency_ns.saturating_add(total_latency_ns);
+            latency_histogram.record(total_latency_ns);
             let pipeline_spans = [
                 (
                     PipelineLayer::Syscall,
@@ -242,6 +254,96 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
                 }))
                 .ok();
                 record_sequence += 1;
+            }
+            if sequence.is_multiple_of(200) {
+                tx.send(HostMessage::Record(WireRecord::Aggregate {
+                    schema_version: SCHEMA_VERSION,
+                    snapshot: AggregateSnapshot {
+                        session_id: "simulator".into(),
+                        epoch: sequence / 200,
+                        config_generation: 1,
+                        start_ts_ns: 0,
+                        end_ts_ns: completion_ts,
+                        counters: AggregateCounters {
+                            observed: sequence,
+                            bytes: total_bytes,
+                            filter_passed: sequence,
+                            detail_emitted: sequence,
+                            ..AggregateCounters::default()
+                        },
+                        histograms: vec![(
+                            HistogramMetric::TotalLatency,
+                            latency_histogram.clone(),
+                        )],
+                    },
+                }))
+                .ok();
+                tx.send(HostMessage::Record(WireRecord::HeavyHitters {
+                    schema_version: SCHEMA_VERSION,
+                    snapshot: HeavyHitterSnapshot {
+                        epoch: sequence / 200,
+                        dimension: HeavyHitterDimension::Process,
+                        metric: HeavyHitterMetric::CumulativeLatency,
+                        candidate_capacity: 64,
+                        evicted_keys: 0,
+                        covered_metric: cumulative_latency_ns,
+                        total_metric: cumulative_latency_ns,
+                        entries: vec![HeavyHitterEntry {
+                            key: "fio-sim (4242)".into(),
+                            count: sequence,
+                            bytes: total_bytes,
+                            cumulative_latency_ns,
+                            max_latency_ns: total_latency_ns,
+                            confidence: None,
+                        }],
+                    },
+                }))
+                .ok();
+            }
+            if sequence == 200 {
+                tx.send(HostMessage::Record(WireRecord::Trigger {
+                    schema_version: SCHEMA_VERSION,
+                    trigger: TriggerRecord {
+                        ts_ns: completion_ts,
+                        from: CaptureState::Armed,
+                        to: CaptureState::Deep,
+                        rule: "p99_total_latency".into(),
+                        observed: total_latency_ns,
+                        threshold: 1_000_000,
+                        consecutive_windows: 3,
+                        config_generation: 2,
+                        reason: "simulated_threshold".into(),
+                    },
+                }))
+                .ok();
+                tx.send(HostMessage::Record(WireRecord::StackFingerprint {
+                    schema_version: SCHEMA_VERSION,
+                    fingerprint: StackFingerprintRecord {
+                        ts_ns: completion_ts,
+                        transaction_id: Some(sequence),
+                        kind: StackKind::Kernel,
+                        opaque_stack_id: 0x51a_cafe,
+                        frame_count: 12,
+                        symbolized: false,
+                        sample_count: 7,
+                        tail_count: 5,
+                        cumulative_latency_ns: total_latency_ns.saturating_mul(7),
+                    },
+                }))
+                .ok();
+                tx.send(HostMessage::Record(WireRecord::Segment {
+                    schema_version: SCHEMA_VERSION,
+                    segment: SegmentRecord {
+                        segment_id: 1,
+                        trigger_ts_ns: completion_ts,
+                        requested_start_ts_ns: completion_ts.saturating_sub(3_000_000_000),
+                        retained_start_ts_ns: completion_ts.saturating_sub(1_000_000_000),
+                        end_ts_ns: completion_ts.saturating_add(10_000_000_000),
+                        retained_bytes: 4_194_304,
+                        evicted_records: 17,
+                    },
+                }))
+                .ok();
             }
             sequence += 1;
             ts_ns += 5_000_000;

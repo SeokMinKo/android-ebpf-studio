@@ -1,11 +1,12 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs,
-    io::{BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -15,18 +16,28 @@ use android_ebpf_agent::trace_format::{
     parse_layout, parse_pipeline_layout, parse_raw_syscall_layout, validate_pair,
 };
 use android_ebpf_protocol::{
-    AttributionConfidence, BlockComplete, BlockInsert, BlockIssue, CapabilityState,
-    CorrelationConfidence, DiagnosticLevel, DiagnosticRecord, FileIo, IoOperation, PipelineLayer,
-    PipelineObservation, PipelinePhase, ProbeCapabilities, ProbePlan, SCHEMA_VERSION, StorageEvent,
-    WireRecord, write_record,
+    AdaptiveController, AggregateCounters, AggregateSnapshot, AttributionConfidence, BlockComplete,
+    BlockInsert, BlockIssue, CapabilityState, CaptureConfig, CaptureControlAck,
+    CaptureControlCommand, CaptureFilter, CaptureMode, CaptureState, ControlOutcome,
+    CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileIo,
+    HeavyHitterDimension, HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram,
+    HistogramMetric, IoOperation, PipelineLayer, PipelineObservation, PipelinePhase,
+    ProbeCapabilities, ProbePlan, SCHEMA_VERSION, SegmentRecord, StackFingerprintRecord, StackKind,
+    StorageEvent, WireRecord, write_record,
 };
 use android_ebpf_types::{
-    KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE,
-    KernelEvent, LAYER_FILESYSTEM, LAYER_SCSI, LAYER_UFS, OP_DISCARD, OP_FLUSH, OP_READ, OP_WRITE,
-    PHASE_BEGIN, PHASE_END, PHASE_INSTANT, PipelineTraceLayout, RawSyscallLayout, TraceLayout,
+    FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE,
+    KIND_FILE_IO, KIND_PIPELINE, KernelAggregate, KernelEvent, LAYER_FILESYSTEM, LAYER_SCHEDULER,
+    LAYER_SCSI, LAYER_UFS, MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD,
+    OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END, PHASE_INSTANT,
+    PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE, TraceLayout,
 };
 use anyhow::{Context, Result, bail};
-use aya::{Ebpf, Pod, maps::Array, maps::RingBuf, programs::TracePoint};
+use aya::{
+    Ebpf, Pod,
+    maps::{Array, HashMap as UserHashMap, MapData, PerCpuArray, RingBuf, StackTraceMap},
+    programs::TracePoint,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 
 const ISSUE_FORMAT: &str = "/sys/kernel/tracing/events/block/block_rq_issue/format";
@@ -83,6 +94,34 @@ struct PipelineTraceLayoutValue(PipelineTraceLayout);
 
 unsafe impl Pod for PipelineTraceLayoutValue {}
 
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct RawFilterConfigValue(RawFilterConfig);
+
+unsafe impl Pod for RawFilterConfigValue {}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct FilterKeyValue(FilterKey);
+
+unsafe impl Pod for FilterKeyValue {}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct KernelAggregateValue(KernelAggregate);
+
+unsafe impl Pod for KernelAggregateValue {}
+
+struct FilterMaps {
+    active: Array<MapData, u64>,
+    configs: UserHashMap<MapData, u64, RawFilterConfigValue>,
+    pids: UserHashMap<MapData, FilterKeyValue, u8>,
+    tids: UserHashMap<MapData, FilterKeyValue, u8>,
+    uids: UserHashMap<MapData, FilterKeyValue, u8>,
+    devices: UserHashMap<MapData, FilterKeyValue, u8>,
+    operations: UserHashMap<MapData, FilterKeyValue, u8>,
+}
+
 struct PipelineProbe {
     program_name: &'static str,
     map_name: &'static str,
@@ -109,6 +148,472 @@ struct CollectorConfig {
     syscall: Option<RawSyscallLayout>,
     pipeline_probes: Vec<PipelineProbe>,
     context_probes: Vec<ContextProbe>,
+}
+
+#[derive(Debug, Default)]
+struct TopEntry {
+    count: u64,
+    bytes: u64,
+    cumulative_latency_ns: u64,
+    max_latency_ns: u64,
+    confidence: Option<EdgeConfidence>,
+}
+
+#[derive(Debug)]
+struct BoundedTop {
+    capacity: usize,
+    entries: HashMap<String, TopEntry>,
+    evicted_keys: u64,
+    total_metric: u64,
+}
+
+impl BoundedTop {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            evicted_keys: 0,
+            total_metric: 0,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        key: String,
+        bytes: u64,
+        latency_ns: u64,
+        confidence: Option<EdgeConfidence>,
+    ) {
+        self.total_metric = self.total_metric.saturating_add(latency_ns);
+        if !self.entries.contains_key(&key) && self.entries.len() == self.capacity {
+            let candidate = self
+                .entries
+                .iter()
+                .min_by_key(|(_, value)| value.cumulative_latency_ns)
+                .map(|(key, value)| (key.clone(), value.cumulative_latency_ns));
+            match candidate {
+                Some((candidate_key, candidate_metric)) if latency_ns > candidate_metric => {
+                    self.entries.remove(&candidate_key);
+                    self.evicted_keys = self.evicted_keys.saturating_add(1);
+                }
+                _ => {
+                    self.evicted_keys = self.evicted_keys.saturating_add(1);
+                    return;
+                }
+            }
+        }
+        let entry = self.entries.entry(key).or_default();
+        entry.count = entry.count.saturating_add(1);
+        entry.bytes = entry.bytes.saturating_add(bytes);
+        entry.cumulative_latency_ns = entry.cumulative_latency_ns.saturating_add(latency_ns);
+        entry.max_latency_ns = entry.max_latency_ns.max(latency_ns);
+        entry.confidence = confidence.or(entry.confidence);
+    }
+
+    fn snapshot(&self, epoch: u64, dimension: HeavyHitterDimension) -> HeavyHitterSnapshot {
+        let mut entries = self
+            .entries
+            .iter()
+            .map(|(key, value)| HeavyHitterEntry {
+                key: key.clone(),
+                count: value.count,
+                bytes: value.bytes,
+                cumulative_latency_ns: value.cumulative_latency_ns,
+                max_latency_ns: value.max_latency_ns,
+                confidence: value.confidence,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by(|left, right| {
+            right
+                .cumulative_latency_ns
+                .cmp(&left.cumulative_latency_ns)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        entries.truncate(20);
+        let covered_metric = entries
+            .iter()
+            .map(|entry| entry.cumulative_latency_ns)
+            .sum();
+        HeavyHitterSnapshot {
+            epoch,
+            dimension,
+            metric: HeavyHitterMetric::CumulativeLatency,
+            candidate_capacity: self.capacity as u32,
+            evicted_keys: self.evicted_keys,
+            covered_metric,
+            total_metric: self.total_metric,
+            entries,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LiveHeavyHitters {
+    pending: HashMap<u64, BlockIssue>,
+    processes: BoundedTop,
+    files: BoundedTop,
+}
+
+#[derive(Debug)]
+struct BufferedRecord {
+    ts_ns: u64,
+    encoded_bytes: usize,
+    record: WireRecord,
+}
+
+#[derive(Debug)]
+struct FlightRecorder {
+    max_bytes: usize,
+    window_ns: u64,
+    bytes: usize,
+    evicted_records: u64,
+    records: VecDeque<BufferedRecord>,
+}
+
+impl FlightRecorder {
+    fn new(max_bytes: usize, window_ns: u64) -> Self {
+        Self {
+            max_bytes,
+            window_ns,
+            bytes: 0,
+            evicted_records: 0,
+            records: VecDeque::new(),
+        }
+    }
+
+    fn observe(&mut self, ts_ns: u64, record: WireRecord) {
+        let encoded_bytes = serde_json::to_vec(&record).map_or(0, |value| value.len() + 1);
+        if encoded_bytes > self.max_bytes {
+            self.evicted_records = self.evicted_records.saturating_add(1);
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(encoded_bytes);
+        self.records.push_back(BufferedRecord {
+            ts_ns,
+            encoded_bytes,
+            record,
+        });
+        let minimum_ts = ts_ns.saturating_sub(self.window_ns);
+        while self.bytes > self.max_bytes
+            || self
+                .records
+                .front()
+                .is_some_and(|record| record.ts_ns < minimum_ts)
+        {
+            if let Some(record) = self.records.pop_front() {
+                self.bytes = self.bytes.saturating_sub(record.encoded_bytes);
+                self.evicted_records = self.evicted_records.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn retained_start(&self, requested_start_ts_ns: u64) -> u64 {
+        self.records
+            .iter()
+            .find(|record| record.ts_ns >= requested_start_ts_ns)
+            .map_or(requested_start_ts_ns, |record| record.ts_ns)
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        self.bytes as u64
+    }
+
+    fn retained_record_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|record| matches!(&record.record, WireRecord::Event { .. }))
+            .count()
+    }
+}
+
+#[derive(Debug)]
+struct ActiveSegment {
+    segment_id: u64,
+    trigger_ts_ns: u64,
+    requested_start_ts_ns: u64,
+    retained_start_ts_ns: u64,
+    evicted_at_start: u64,
+}
+
+#[derive(Debug, Default)]
+struct StackCaptureHealth {
+    attempts: u64,
+    captured: u64,
+    lookup_failures: u64,
+    cohort_capacity_rejections: u64,
+}
+
+fn observe_stack_fingerprints(
+    raw: &KernelEvent,
+    correlation_salt: u64,
+    stack_map: &StackTraceMap<MapData>,
+    cohorts: &mut HashMap<(StackKind, u64), StackFingerprintRecord>,
+    health: &mut StackCaptureHealth,
+) {
+    for (kind, stack_id) in [
+        (StackKind::Kernel, raw.kernel_stack_id),
+        (StackKind::User, raw.user_stack_id),
+    ] {
+        if stack_id == STACK_ID_UNAVAILABLE {
+            continue;
+        }
+        health.attempts = health.attempts.saturating_add(1);
+        let opaque_stack_id = opaque_key(
+            stack_id
+                ^ if kind == StackKind::User {
+                    1_u64 << 63
+                } else {
+                    0
+                },
+            correlation_salt,
+        );
+        let key = (kind, opaque_stack_id);
+        if !cohorts.contains_key(&key) && cohorts.len() >= 4_096 {
+            health.cohort_capacity_rejections = health.cohort_capacity_rejections.saturating_add(1);
+            continue;
+        }
+        let frame_count = match stack_map.get(&(stack_id as u32), 0) {
+            Ok(trace) => trace.frames().len() as u32,
+            Err(_) => {
+                health.lookup_failures = health.lookup_failures.saturating_add(1);
+                0
+            }
+        };
+        if frame_count != 0 {
+            health.captured = health.captured.saturating_add(1);
+        }
+        let latency_ns = raw.ts_ns.saturating_sub(raw.start_ts_ns);
+        let entry = cohorts.entry(key).or_insert(StackFingerprintRecord {
+            ts_ns: raw.ts_ns,
+            transaction_id: (raw.request_id != 0)
+                .then(|| opaque_key(raw.request_id, correlation_salt)),
+            kind,
+            opaque_stack_id,
+            frame_count,
+            symbolized: false,
+            sample_count: 0,
+            tail_count: 0,
+            cumulative_latency_ns: 0,
+        });
+        entry.ts_ns = raw.ts_ns;
+        entry.frame_count = entry.frame_count.max(frame_count);
+        entry.sample_count = entry.sample_count.saturating_add(1);
+        entry.tail_count = entry
+            .tail_count
+            .saturating_add(u64::from(latency_ns >= 5_000_000));
+        entry.cumulative_latency_ns = entry.cumulative_latency_ns.saturating_add(latency_ns);
+    }
+}
+
+impl LiveHeavyHitters {
+    fn new(capacity: usize) -> Self {
+        Self {
+            pending: HashMap::new(),
+            processes: BoundedTop::new(capacity),
+            files: BoundedTop::new(capacity),
+        }
+    }
+
+    fn observe(&mut self, event: &StorageEvent) {
+        match event {
+            StorageEvent::BlockIssue(issue) => {
+                self.pending.insert(issue.request_id, issue.clone());
+            }
+            StorageEvent::BlockComplete(completion) => {
+                if let Some(issue) = self.pending.remove(&completion.request_id) {
+                    let latency = completion.ts_ns.saturating_sub(issue.ts_ns);
+                    self.processes.observe(
+                        format!("{} ({})", issue.comm, issue.pid),
+                        issue.bytes as u64,
+                        latency,
+                        None,
+                    );
+                }
+            }
+            StorageEvent::FileIo(file) => {
+                let key = file
+                    .path_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.path.clone())
+                    .or_else(|| file.path.clone())
+                    .or_else(|| {
+                        file.file_identity
+                            .as_ref()
+                            .map(|identity| identity.fallback_label())
+                    })
+                    .unwrap_or_else(|| "Unattributed".into());
+                let confidence = match file.confidence {
+                    AttributionConfidence::Exact => Some(EdgeConfidence::Exact),
+                    AttributionConfidence::Attributed => Some(EdgeConfidence::Probable),
+                    _ => None,
+                };
+                self.files.observe(
+                    key,
+                    file.completed_bytes.max(0) as u64,
+                    file.end_ts_ns.saturating_sub(file.start_ts_ns),
+                    confidence,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+impl FilterMaps {
+    fn take(bpf: &mut Ebpf) -> Result<Self> {
+        Ok(Self {
+            active: Array::try_from(
+                bpf.take_map("FILTER_ACTIVE")
+                    .context("FILTER_ACTIVE map is missing")?,
+            )?,
+            configs: UserHashMap::try_from(
+                bpf.take_map("FILTER_CONFIGS")
+                    .context("FILTER_CONFIGS map is missing")?,
+            )?,
+            pids: UserHashMap::try_from(
+                bpf.take_map("FILTER_PIDS")
+                    .context("FILTER_PIDS map is missing")?,
+            )?,
+            tids: UserHashMap::try_from(
+                bpf.take_map("FILTER_TIDS")
+                    .context("FILTER_TIDS map is missing")?,
+            )?,
+            uids: UserHashMap::try_from(
+                bpf.take_map("FILTER_UIDS")
+                    .context("FILTER_UIDS map is missing")?,
+            )?,
+            devices: UserHashMap::try_from(
+                bpf.take_map("FILTER_DEVICES")
+                    .context("FILTER_DEVICES map is missing")?,
+            )?,
+            operations: UserHashMap::try_from(
+                bpf.take_map("FILTER_OPERATIONS")
+                    .context("FILTER_OPERATIONS map is missing")?,
+            )?,
+        })
+    }
+
+    fn apply(&mut self, config: &CaptureConfig) -> Result<()> {
+        if !config.filter.files.is_empty() {
+            bail!("file identity filter is unavailable without a direct VFS file identity probe")
+        }
+        let generation = config.generation;
+        insert_filter_values(
+            &mut self.pids,
+            generation,
+            config.filter.pids.iter().map(|v| *v as u64),
+        )?;
+        insert_filter_values(
+            &mut self.tids,
+            generation,
+            config.filter.tids.iter().map(|v| *v as u64),
+        )?;
+        insert_filter_values(
+            &mut self.uids,
+            generation,
+            config.filter.uids.iter().map(|v| *v as u64),
+        )?;
+        insert_filter_values(
+            &mut self.devices,
+            generation,
+            config
+                .filter
+                .devices
+                .iter()
+                .map(|&(major, minor)| encode_device(major, minor) as u64),
+        )?;
+        insert_filter_values(
+            &mut self.operations,
+            generation,
+            config
+                .filter
+                .operations
+                .iter()
+                .map(|value| operation_code(*value) as u64),
+        )?;
+        let raw = RawFilterConfig {
+            generation,
+            total_latency_ns: config.detail.total_latency_ns,
+            queue_latency_ns: config.detail.queue_latency_ns,
+            device_latency_ns: config.detail.device_latency_ns,
+            min_bytes: config.filter.min_bytes.unwrap_or(0),
+            max_bytes: config.filter.max_bytes.unwrap_or(0),
+            pid_count: config.filter.pids.len() as u16,
+            tid_count: config.filter.tids.len() as u16,
+            uid_count: config.filter.uids.len() as u16,
+            device_count: config.filter.devices.len() as u16,
+            operation_count: config.filter.operations.len() as u16,
+            sample_rate_permyriad: config.detail.sample_rate_permyriad,
+            mode: capture_mode_code(config.mode),
+            match_all: u8::from(config.filter.match_all),
+            include_errors: u8::from(config.detail.include_errors),
+            include_correlation_failures: u8::from(config.detail.include_correlation_failures),
+        };
+        self.configs
+            .insert(generation, RawFilterConfigValue(raw), 0)
+            .context("cannot stage filter config")?;
+        self.active
+            .set(0, generation, 0)
+            .context("cannot activate filter generation")?;
+        Ok(())
+    }
+}
+
+fn insert_filter_values(
+    map: &mut UserHashMap<MapData, FilterKeyValue, u8>,
+    generation: u64,
+    values: impl Iterator<Item = u64>,
+) -> Result<()> {
+    for value in values {
+        map.insert(FilterKeyValue(FilterKey { generation, value }), 1, 0)
+            .context("cannot stage filter key")?;
+    }
+    Ok(())
+}
+
+fn capture_mode_code(mode: CaptureMode) -> u8 {
+    match mode {
+        CaptureMode::Basic => MODE_BASIC,
+        CaptureMode::Balanced => MODE_BALANCED,
+        CaptureMode::Deep => MODE_DEEP,
+        CaptureMode::RawAll => MODE_RAW_ALL,
+    }
+}
+
+fn operation_code(operation: IoOperation) -> u8 {
+    match operation {
+        IoOperation::Read => OP_READ,
+        IoOperation::Write => OP_WRITE,
+        IoOperation::Flush => OP_FLUSH,
+        IoOperation::Discard => OP_DISCARD,
+        IoOperation::Other => OP_OTHER,
+    }
+}
+
+fn encode_device(major: u32, minor: u32) -> u32 {
+    (major << 8) | (minor & 0xff) | ((minor & 0x0fff00) << 12)
+}
+
+fn default_capture_config() -> CaptureConfig {
+    CaptureConfig {
+        generation: 1,
+        mode: CaptureMode::Balanced,
+        filter: CaptureFilter {
+            match_all: true,
+            ..CaptureFilter::default()
+        },
+        detail: DetailPolicy::default(),
+        trigger: Some(android_ebpf_protocol::TriggerPolicy {
+            rule: "p99_total_latency".into(),
+            threshold: 5_000_000,
+            consecutive_windows: 3,
+            deep_duration_ns: 10_000_000_000,
+            cooldown_ns: 10_000_000_000,
+            arming_timeout_ns: 5_000_000_000,
+        }),
+    }
 }
 
 fn main() -> Result<()> {
@@ -307,6 +812,25 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
     for (layer, event, whole_layer) in failed_optional {
         mark_attach_failed(&mut config.capabilities, layer, &event, whole_layer);
     }
+    let mut active_config = default_capture_config();
+    let mut requested_mode = active_config.mode;
+    let mut adaptive_controller = active_config
+        .trigger
+        .clone()
+        .map(AdaptiveController::new)
+        .transpose()?;
+    let mut filter_maps = FilterMaps::take(&mut bpf)?;
+    filter_maps
+        .apply(&active_config)
+        .context("cannot apply initial capture filter")?;
+    let aggregate_map = bpf
+        .take_map("AGGREGATES")
+        .context("AGGREGATES map is missing")?;
+    let aggregates = PerCpuArray::<_, KernelAggregateValue>::try_from(aggregate_map)?;
+    let stack_trace_map = bpf
+        .take_map("STACK_TRACES")
+        .context("STACK_TRACES map is missing")?;
+    let stack_traces = StackTraceMap::try_from(stack_trace_map)?;
     let map = bpf.take_map("EVENTS").context("EVENTS map is missing")?;
     let mut ring = RingBuf::try_from(map)?;
 
@@ -341,6 +865,9 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
         None,
     );
 
+    let (control_tx, control_rx) = mpsc::channel::<CaptureControlCommand>();
+    let control_session = session_id.to_owned();
+    thread::spawn(move || read_control_commands(&control_session, control_tx));
     let health_interval = Duration::from_millis(health_interval_ms);
     let mut last_health = Instant::now();
     let mut sequence = 0_u64;
@@ -351,13 +878,81 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
     let mut ambiguous_stage = HashMap::<(PipelineLayer, u64), u64>::new();
     let mut expired_stage = 0_u64;
     let mut reused_stage = 0_u64;
+    let mut aggregate_epoch = 0_u64;
+    let mut live_top = LiveHeavyHitters::new(256);
+    let mut flight_recorder = FlightRecorder::new(32 * 1024 * 1024, 5_000_000_000);
+    let mut active_segment: Option<ActiveSegment> = None;
+    let mut next_segment_id = 1_u64;
+    let mut stack_cohorts = HashMap::<(StackKind, u64), StackFingerprintRecord>::new();
+    let mut stack_health = StackCaptureHealth::default();
     let correlation_salt = format_hash64(session_id.as_bytes());
     while running.load(Ordering::Acquire) {
+        for command in control_rx.try_iter() {
+            let previous_config = active_config.clone();
+            let mut acknowledgement = apply_control_command(&mut active_config, command);
+            if acknowledgement.outcome == ControlOutcome::Applied
+                && let Err(error) = filter_maps.apply(&active_config)
+            {
+                active_config = previous_config;
+                acknowledgement.active_generation = active_config.generation;
+                acknowledgement.outcome = ControlOutcome::Rejected;
+                acknowledgement.reason = Some(error.to_string());
+            }
+            if acknowledgement.outcome == ControlOutcome::Applied {
+                requested_mode = active_config.mode;
+                adaptive_controller = active_config
+                    .trigger
+                    .clone()
+                    .map(AdaptiveController::new)
+                    .transpose()?;
+            }
+            let applied = acknowledgement.outcome == ControlOutcome::Applied;
+            emit_diagnostic(
+                session_id,
+                if applied {
+                    DiagnosticLevel::Info
+                } else {
+                    DiagnosticLevel::Warn
+                },
+                "capture.control",
+                if applied {
+                    "FILTER_UPDATE_APPLIED"
+                } else {
+                    "FILTER_UPDATE_REJECTED"
+                },
+                if applied { "applied" } else { "rejected" },
+                Some(format!(
+                    "requested_generation={} active_generation={} reason={}",
+                    acknowledgement.requested_generation,
+                    acknowledgement.active_generation,
+                    acknowledgement.reason.as_deref().unwrap_or("none")
+                )),
+            );
+            write_record(
+                &mut output,
+                &WireRecord::Control {
+                    schema_version: SCHEMA_VERSION,
+                    acknowledgement,
+                },
+            )?;
+            output.flush()?;
+        }
         let mut had_event = false;
         while let Some(item) = ring.next() {
             had_event = true;
-            match parse_kernel_event(&item, correlation_salt) {
-                Some(event) => {
+            let raw_event = decode_kernel_event(&item);
+            match raw_event
+                .and_then(|raw| parse_kernel_event(raw, correlation_salt).map(|event| (raw, event)))
+            {
+                Some((raw, event)) => {
+                    observe_stack_fingerprints(
+                        &raw,
+                        correlation_salt,
+                        &stack_traces,
+                        &mut stack_cohorts,
+                        &mut stack_health,
+                    );
+                    live_top.observe(&event);
                     update_probe_health(
                         session_id,
                         &event,
@@ -369,26 +964,184 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
                     );
                     sequence += 1;
                     emit_event_trace(session_id, sequence, &event);
-                    write_record(
-                        &mut output,
-                        &WireRecord::Event {
-                            schema_version: SCHEMA_VERSION,
-                            sequence,
-                            event,
-                        },
-                    )?;
+                    let event_ts_ns = storage_event_timestamp(&event);
+                    let record = WireRecord::Event {
+                        schema_version: SCHEMA_VERSION,
+                        sequence,
+                        event,
+                    };
+                    flight_recorder.observe(event_ts_ns, record.clone());
+                    write_record(&mut output, &record)?;
                     emitted += 1;
                 }
                 None => rejected += 1,
             }
         }
         if last_health.elapsed() >= health_interval {
+            aggregate_epoch = aggregate_epoch.saturating_add(1);
+            let aggregate_snapshot = read_aggregate_snapshot(
+                session_id,
+                aggregate_epoch,
+                active_config.generation,
+                &aggregates,
+            )
+            .ok();
+            if let Some(snapshot) = &aggregate_snapshot {
+                let aggregate_record = WireRecord::Aggregate {
+                    schema_version: SCHEMA_VERSION,
+                    snapshot: snapshot.clone(),
+                };
+                flight_recorder.observe(snapshot.end_ts_ns, aggregate_record.clone());
+                write_record(&mut output, &aggregate_record)?;
+                if let Some(controller) = adaptive_controller.as_mut()
+                    && let Some(observed) =
+                        aggregate_percentile_upper(snapshot, HistogramMetric::TotalLatency, 99)
+                    && let Some(mut trigger) =
+                        controller.observe(snapshot.end_ts_ns, observed, active_config.generation)
+                {
+                    let target_mode = match trigger.to {
+                        CaptureState::Deep => Some(CaptureMode::Deep),
+                        CaptureState::Cooldown => Some(CaptureMode::Balanced),
+                        CaptureState::Basic => Some(requested_mode),
+                        CaptureState::Armed => None,
+                    };
+                    if let Some(target_mode) = target_mode
+                        && active_config.mode != target_mode
+                    {
+                        let mut automatic = active_config.clone();
+                        automatic.generation = automatic.generation.saturating_add(1);
+                        automatic.mode = target_mode;
+                        filter_maps
+                            .apply(&automatic)
+                            .context("cannot apply adaptive capture transition")?;
+                        active_config = automatic;
+                        trigger.config_generation = active_config.generation;
+                    }
+                    if trigger.to == CaptureState::Deep {
+                        let requested_start_ts_ns = trigger.ts_ns.saturating_sub(3_000_000_000);
+                        active_segment = Some(ActiveSegment {
+                            segment_id: next_segment_id,
+                            trigger_ts_ns: trigger.ts_ns,
+                            requested_start_ts_ns,
+                            retained_start_ts_ns: flight_recorder
+                                .retained_start(requested_start_ts_ns),
+                            evicted_at_start: flight_recorder.evicted_records,
+                        });
+                        next_segment_id = next_segment_id.saturating_add(1);
+                    }
+                    emit_diagnostic(
+                        session_id,
+                        DiagnosticLevel::Info,
+                        "capture.adaptive",
+                        "CAPTURE_STATE_TRANSITION",
+                        "applied",
+                        Some(format!(
+                            "from={:?} to={:?} rule={} observed={} threshold={} generation={}",
+                            trigger.from,
+                            trigger.to,
+                            trigger.rule,
+                            trigger.observed,
+                            trigger.threshold,
+                            trigger.config_generation
+                        )),
+                    );
+                    let transition_to = trigger.to;
+                    let transition_ts_ns = trigger.ts_ns;
+                    write_record(
+                        &mut output,
+                        &WireRecord::Trigger {
+                            schema_version: SCHEMA_VERSION,
+                            trigger,
+                        },
+                    )?;
+                    if transition_to == CaptureState::Cooldown
+                        && let Some(segment) = active_segment.take()
+                    {
+                        let segment_record = SegmentRecord {
+                            segment_id: segment.segment_id,
+                            trigger_ts_ns: segment.trigger_ts_ns,
+                            requested_start_ts_ns: segment.requested_start_ts_ns,
+                            retained_start_ts_ns: segment.retained_start_ts_ns,
+                            end_ts_ns: transition_ts_ns,
+                            retained_bytes: flight_recorder.retained_bytes(),
+                            evicted_records: flight_recorder
+                                .evicted_records
+                                .saturating_sub(segment.evicted_at_start),
+                        };
+                        emit_diagnostic(
+                            session_id,
+                            DiagnosticLevel::Info,
+                            "capture.flight_recorder",
+                            "FLIGHT_SEGMENT_FINALIZED",
+                            "success",
+                            Some(format!(
+                                "segment={} retained_records={} retained_bytes={} evicted={}",
+                                segment_record.segment_id,
+                                flight_recorder.retained_record_count(),
+                                segment_record.retained_bytes,
+                                segment_record.evicted_records
+                            )),
+                        );
+                        write_record(
+                            &mut output,
+                            &WireRecord::Segment {
+                                schema_version: SCHEMA_VERSION,
+                                segment: segment_record,
+                            },
+                        )?;
+                    }
+                }
+            }
+            for snapshot in [
+                live_top
+                    .processes
+                    .snapshot(aggregate_epoch, HeavyHitterDimension::Process),
+                live_top
+                    .files
+                    .snapshot(aggregate_epoch, HeavyHitterDimension::File),
+            ] {
+                write_record(
+                    &mut output,
+                    &WireRecord::HeavyHitters {
+                        schema_version: SCHEMA_VERSION,
+                        snapshot,
+                    },
+                )?;
+            }
+            for fingerprint in stack_cohorts.values() {
+                write_record(
+                    &mut output,
+                    &WireRecord::StackFingerprint {
+                        schema_version: SCHEMA_VERSION,
+                        fingerprint: fingerprint.clone(),
+                    },
+                )?;
+            }
+            if stack_health.attempts != 0 || stack_health.cohort_capacity_rejections != 0 {
+                emit_diagnostic(
+                    session_id,
+                    DiagnosticLevel::Debug,
+                    "capture.stack",
+                    "STACK_CAPTURE_HEALTH",
+                    "observed",
+                    Some(format!(
+                        "attempts={} captured={} lookup_failures={} capacity_rejections={} cohorts={}",
+                        stack_health.attempts,
+                        stack_health.captured,
+                        stack_health.lookup_failures,
+                        stack_health.cohort_capacity_rejections,
+                        stack_cohorts.len()
+                    )),
+                );
+            }
             write_record(
                 &mut output,
                 &WireRecord::Health {
                     schema_version: SCHEMA_VERSION,
                     emitted_events: emitted,
-                    kernel_drops: None,
+                    kernel_drops: aggregate_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.counters.ring_reserve_failures),
                     userspace_drops: rejected,
                     probe_health: probe_health.clone(),
                     correlation_ambiguous: 0,
@@ -424,6 +1177,224 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
         Some(format!("emitted={emitted} rejected={rejected}")),
     );
     Ok(())
+}
+
+fn read_control_commands(session_id: &str, tx: mpsc::Sender<CaptureControlCommand>) {
+    for line in BufReader::new(std::io::stdin().lock()).lines() {
+        let command = match line {
+            Ok(line) if line.len() <= 64 * 1024 => {
+                match serde_json::from_str::<CaptureControlCommand>(&line) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        emit_diagnostic(
+                            session_id,
+                            DiagnosticLevel::Warn,
+                            "capture.control",
+                            "CONTROL_DECODE_REJECTED",
+                            "rejected",
+                            Some(error.to_string()),
+                        );
+                        continue;
+                    }
+                }
+            }
+            Ok(_) => {
+                emit_diagnostic(
+                    session_id,
+                    DiagnosticLevel::Warn,
+                    "capture.control",
+                    "CONTROL_LINE_TOO_LARGE",
+                    "rejected",
+                    None,
+                );
+                continue;
+            }
+            Err(error) => {
+                emit_diagnostic(
+                    session_id,
+                    DiagnosticLevel::Warn,
+                    "capture.control",
+                    "CONTROL_READ_FAILED",
+                    "failed",
+                    Some(error.to_string()),
+                );
+                break;
+            }
+        };
+        if tx.send(command).is_err() {
+            break;
+        }
+    }
+}
+
+fn read_aggregate_snapshot(
+    session_id: &str,
+    epoch: u64,
+    generation: u64,
+    map: &PerCpuArray<MapData, KernelAggregateValue>,
+) -> Result<AggregateSnapshot> {
+    let values = map.get(&0, 0).context("cannot read per-CPU aggregates")?;
+    let mut merged = KernelAggregate {
+        generation,
+        ..KernelAggregate::default()
+    };
+    for wrapped in values.iter() {
+        let value = &wrapped.0;
+        if value.generation != generation {
+            continue;
+        }
+        if value.first_ts_ns != 0 {
+            merged.first_ts_ns = if merged.first_ts_ns == 0 {
+                value.first_ts_ns
+            } else {
+                merged.first_ts_ns.min(value.first_ts_ns)
+            };
+        }
+        merged.last_ts_ns = merged.last_ts_ns.max(value.last_ts_ns);
+        merged.observed = merged.observed.saturating_add(value.observed);
+        merged.bytes = merged.bytes.saturating_add(value.bytes);
+        merged.failed = merged.failed.saturating_add(value.failed);
+        merged.filter_passed = merged.filter_passed.saturating_add(value.filter_passed);
+        merged.filter_suppressed = merged
+            .filter_suppressed
+            .saturating_add(value.filter_suppressed);
+        merged.detail_emitted = merged.detail_emitted.saturating_add(value.detail_emitted);
+        merged.suppressed_fast = merged.suppressed_fast.saturating_add(value.suppressed_fast);
+        merged.sampled = merged.sampled.saturating_add(value.sampled);
+        merged.forced_error = merged.forced_error.saturating_add(value.forced_error);
+        merged.ring_reserve_failures = merged
+            .ring_reserve_failures
+            .saturating_add(value.ring_reserve_failures);
+        merged.map_insert_failures = merged
+            .map_insert_failures
+            .saturating_add(value.map_insert_failures);
+        merged.expired = merged.expired.saturating_add(value.expired);
+        merged.key_reused = merged.key_reused.saturating_add(value.key_reused);
+        for index in 0..HISTOGRAM_BUCKETS {
+            merged.total_latency[index] =
+                merged.total_latency[index].saturating_add(value.total_latency[index]);
+            merged.queue_latency[index] =
+                merged.queue_latency[index].saturating_add(value.queue_latency[index]);
+            merged.device_latency[index] =
+                merged.device_latency[index].saturating_add(value.device_latency[index]);
+            merged.io_size[index] = merged.io_size[index].saturating_add(value.io_size[index]);
+            merged.queue_depth[index] =
+                merged.queue_depth[index].saturating_add(value.queue_depth[index]);
+        }
+    }
+    let boundaries = log2_histogram_boundaries();
+    Ok(AggregateSnapshot {
+        session_id: session_id.into(),
+        epoch,
+        config_generation: generation,
+        start_ts_ns: merged.first_ts_ns,
+        end_ts_ns: merged.last_ts_ns,
+        counters: AggregateCounters {
+            observed: merged.observed,
+            bytes: merged.bytes,
+            failed: merged.failed,
+            filter_passed: merged.filter_passed,
+            filter_suppressed: merged.filter_suppressed,
+            detail_emitted: merged.detail_emitted,
+            suppressed_fast: merged.suppressed_fast,
+            sampled: merged.sampled,
+            forced_error: merged.forced_error,
+            ring_reserve_failures: merged.ring_reserve_failures,
+            map_insert_failures: merged.map_insert_failures,
+            expired: merged.expired,
+            key_reused: merged.key_reused,
+        },
+        histograms: vec![
+            (
+                HistogramMetric::TotalLatency,
+                Histogram {
+                    boundaries: boundaries.clone(),
+                    counts: merged.total_latency.to_vec(),
+                },
+            ),
+            (
+                HistogramMetric::QueueLatency,
+                Histogram {
+                    boundaries: boundaries.clone(),
+                    counts: merged.queue_latency.to_vec(),
+                },
+            ),
+            (
+                HistogramMetric::DeviceLatency,
+                Histogram {
+                    boundaries: boundaries.clone(),
+                    counts: merged.device_latency.to_vec(),
+                },
+            ),
+            (
+                HistogramMetric::IoSize,
+                Histogram {
+                    boundaries,
+                    counts: merged.io_size.to_vec(),
+                },
+            ),
+        ],
+    })
+}
+
+fn log2_histogram_boundaries() -> Vec<u64> {
+    (0..HISTOGRAM_BUCKETS - 1)
+        .map(|index| (1_u64 << (index + 1)).saturating_sub(1))
+        .collect()
+}
+
+fn aggregate_percentile_upper(
+    snapshot: &AggregateSnapshot,
+    metric: HistogramMetric,
+    percentile: u8,
+) -> Option<u64> {
+    snapshot
+        .histograms
+        .iter()
+        .find(|(candidate, _)| *candidate == metric)
+        .and_then(|(_, histogram)| histogram.percentile_range(percentile))
+        .map(|(lower, upper)| upper.unwrap_or(lower))
+}
+
+fn apply_control_command(
+    active: &mut CaptureConfig,
+    command: CaptureControlCommand,
+) -> CaptureControlAck {
+    let requested = match command {
+        CaptureControlCommand::ApplyConfig { config } => *config,
+        CaptureControlCommand::SetMode {
+            generation,
+            mode,
+            reason: _,
+        } => CaptureConfig {
+            generation,
+            mode,
+            filter: active.filter.clone(),
+            detail: active.detail.clone(),
+            trigger: active.trigger.clone(),
+        },
+    };
+    let rejected_reason = if requested.generation <= active.generation {
+        Some("generation must increase".to_owned())
+    } else {
+        requested.validate(256).err().map(|error| error.to_string())
+    };
+    if let Some(reason) = rejected_reason {
+        return CaptureControlAck {
+            requested_generation: requested.generation,
+            active_generation: active.generation,
+            outcome: ControlOutcome::Rejected,
+            reason: Some(reason),
+        };
+    }
+    let requested_generation = requested.generation;
+    *active = requested;
+    CaptureControlAck {
+        requested_generation,
+        active_generation: requested_generation,
+        outcome: ControlOutcome::Applied,
+        reason: None,
+    }
 }
 
 fn emit_optional_probe_result(
@@ -535,6 +1506,20 @@ fn emit_event_trace(session_id: &str, sequence: u64, event: &StorageEvent) {
     }
 }
 
+fn storage_event_timestamp(event: &StorageEvent) -> u64 {
+    match event {
+        StorageEvent::BlockInsert(value) => value.ts_ns,
+        StorageEvent::BlockIssue(value) => value.ts_ns,
+        StorageEvent::BlockComplete(value) => value.ts_ns,
+        StorageEvent::FileIo(value) => value.end_ts_ns,
+        StorageEvent::Pipeline(value) => value.end_ts_ns.unwrap_or(value.ts_ns),
+        StorageEvent::Node(value) => value.end_or_start(),
+        // Edges carry causal evidence but no timestamp. Keeping them at the
+        // start of the retention window avoids inventing a measurement.
+        StorageEvent::Edge(_) => 0,
+    }
+}
+
 fn update_probe_health(
     session_id: &str,
     event: &StorageEvent,
@@ -554,6 +1539,7 @@ fn update_probe_health(
                 PipelineLayer::Filesystem => "filesystem.pipeline",
                 PipelineLayer::Scsi => "scsi.pipeline",
                 PipelineLayer::Ufs => "ufs.pipeline",
+                PipelineLayer::SchedulerContext => "scheduler.context",
                 PipelineLayer::UicContext => "uic.context",
                 _ => "storage.pipeline",
             },
@@ -660,6 +1646,7 @@ fn capabilities() -> Result<CollectorConfig> {
         .and_then(|(enter, exit)| parse_raw_syscall_layout(&enter, &exit).ok());
     let ufs_events = discover_events("ufs");
     let scsi_events = discover_events("scsi");
+    let sched_events = discover_events("sched");
     let fs_events = discover_events("f2fs");
     let ext4_events = discover_events("ext4");
     let mut pipeline_probes = Vec::new();
@@ -775,6 +1762,22 @@ fn capabilities() -> Result<CollectorConfig> {
                 group: group.into(),
                 event_name: event_name.into(),
                 layer: PipelineLayer::Filesystem,
+                format_hash: format_hash(&format),
+            });
+        }
+    }
+    if let Some(event) = sched_events
+        .iter()
+        .find(|event| event.ends_with("/sched_switch"))
+        && let Some((group, event_name)) = event.split_once('/')
+    {
+        let path = format!("/sys/kernel/tracing/events/{group}/{event_name}/format");
+        if let Ok(format) = fs::read_to_string(path) {
+            context_probes.push(ContextProbe {
+                program_name: "sched_context",
+                group: group.into(),
+                event_name: event_name.into(),
+                layer: PipelineLayer::SchedulerContext,
                 format_hash: format_hash(&format),
             });
         }
@@ -921,6 +1924,12 @@ fn capabilities() -> Result<CollectorConfig> {
             "no supported UFS tracepoint layout",
         ),
         (
+            PipelineLayer::SchedulerContext,
+            "sched",
+            "sched_switch",
+            "no supported scheduler context tracepoint",
+        ),
+        (
             PipelineLayer::UicContext,
             "ufs",
             "UIC/link context",
@@ -957,6 +1966,17 @@ fn capabilities() -> Result<CollectorConfig> {
             },
             pipeline_layers,
             attach_plan,
+            scheduler_context: Some(
+                if sched_events
+                    .iter()
+                    .any(|event| event.ends_with("/sched_switch"))
+                {
+                    CapabilityState::Context
+                } else {
+                    CapabilityState::Unavailable
+                },
+            ),
+            stack_traces: Some(CapabilityState::Measured),
         },
         issue,
         complete,
@@ -1122,11 +2142,14 @@ fn attach(bpf: &mut Ebpf, program_name: &str, group: &str, event_name: &str) -> 
     Ok(())
 }
 
-fn parse_kernel_event(bytes: &[u8], correlation_salt: u64) -> Option<StorageEvent> {
+fn decode_kernel_event(bytes: &[u8]) -> Option<KernelEvent> {
     if bytes.len() < std::mem::size_of::<KernelEvent>() {
         return None;
     }
-    let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<KernelEvent>()) };
+    Some(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<KernelEvent>()) })
+}
+
+fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<StorageEvent> {
     let (device_major, device_minor) = decode_device(event.device);
     let request_id = opaque_key(event.request_id, correlation_salt);
     match event.kind {
@@ -1207,6 +2230,7 @@ fn parse_kernel_event(bytes: &[u8], correlation_salt: u64) -> Option<StorageEven
                 LAYER_SCSI => PipelineLayer::Scsi,
                 LAYER_UFS => PipelineLayer::Ufs,
                 android_ebpf_types::LAYER_UIC => PipelineLayer::UicContext,
+                LAYER_SCHEDULER => PipelineLayer::SchedulerContext,
                 _ => return None,
             };
             let phase = match event.pipeline_phase {
@@ -1233,11 +2257,16 @@ fn parse_kernel_event(bytes: &[u8], correlation_salt: u64) -> Option<StorageEven
                     PipelineLayer::Filesystem => "Filesystem data I/O",
                     PipelineLayer::Scsi => "SCSI command",
                     PipelineLayer::Ufs => "UFS command",
+                    PipelineLayer::SchedulerContext => "Scheduler context switch",
                     PipelineLayer::UicContext => "UIC / link context",
                     _ => "Storage stage",
                 }
                 .into(),
-                confidence: if layer == PipelineLayer::UicContext || event.request_id == 0 {
+                confidence: if matches!(
+                    layer,
+                    PipelineLayer::SchedulerContext | PipelineLayer::UicContext
+                ) || event.request_id == 0
+                {
                     CorrelationConfidence::ContextOnly
                 } else if event.correlation_exact != 0 {
                     CorrelationConfidence::Exact
@@ -1376,5 +2405,64 @@ fn emit_diagnostic(
     .bounded();
     if let Ok(json) = serde_json::to_string(&record) {
         eprintln!("{json}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hello_record() -> WireRecord {
+        WireRecord::Hello {
+            schema_version: SCHEMA_VERSION,
+            agent_version: "test".into(),
+            boot_id: "boot".into(),
+            kernel_release: "kernel".into(),
+        }
+    }
+
+    #[test]
+    fn control_rejects_stale_generation_without_mutating_active_config() {
+        let mut active = default_capture_config();
+        let expected = active.clone();
+        let acknowledgement = apply_control_command(
+            &mut active,
+            CaptureControlCommand::SetMode {
+                generation: 1,
+                mode: CaptureMode::Deep,
+                reason: "test".into(),
+            },
+        );
+
+        assert_eq!(acknowledgement.outcome, ControlOutcome::Rejected);
+        assert_eq!(active, expected);
+    }
+
+    #[test]
+    fn bounded_top_reports_eviction_and_keeps_larger_candidate() {
+        let mut top = BoundedTop::new(2);
+        top.observe("small".into(), 1, 10, None);
+        top.observe("medium".into(), 1, 20, None);
+        top.observe("large".into(), 1, 30, None);
+
+        let snapshot = top.snapshot(1, HeavyHitterDimension::Process);
+        assert_eq!(snapshot.evicted_keys, 1);
+        assert_eq!(snapshot.entries.len(), 2);
+        assert_eq!(snapshot.entries[0].key, "large");
+        assert!(snapshot.entries.iter().all(|entry| entry.key != "small"));
+    }
+
+    #[test]
+    fn flight_recorder_enforces_time_window_and_byte_capacity() {
+        let encoded = serde_json::to_vec(&hello_record()).unwrap().len() + 1;
+        let mut recorder = FlightRecorder::new(encoded * 2, 10);
+        recorder.observe(0, hello_record());
+        recorder.observe(5, hello_record());
+        recorder.observe(20, hello_record());
+
+        assert!(recorder.retained_bytes() <= (encoded * 2) as u64);
+        assert_eq!(recorder.records.len(), 1);
+        assert_eq!(recorder.retained_start(0), 20);
+        assert_eq!(recorder.evicted_records, 2);
     }
 }

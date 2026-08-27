@@ -1,7 +1,7 @@
 use std::{
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::Child,
+    process::{Child, ChildStdin},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -9,11 +9,12 @@ use std::{
     thread,
 };
 
-use android_ebpf_protocol::{DiagnosticLevel, DiagnosticRecord, WireRecord};
+use android_ebpf_protocol::{CaptureControlCommand, DiagnosticLevel, DiagnosticRecord, WireRecord};
 use crossbeam_channel::Sender;
 
 use crate::adb::{AdbClient, AdbDevice, PreflightReport};
 use crate::diagnostics::{RotatingJsonl, host_record, parse_agent_diagnostic};
+use crate::session::LoadedAnalysis;
 
 #[derive(Debug)]
 pub enum HostMessage {
@@ -22,6 +23,8 @@ pub enum HostMessage {
     Status(String),
     Record(WireRecord),
     Diagnostic(DiagnosticRecord),
+    SessionLoaded(PathBuf, Result<Box<LoadedAnalysis>, String>),
+    Exported(Result<PathBuf, String>),
     Ended(Result<(), String>),
 }
 
@@ -29,6 +32,7 @@ pub enum HostMessage {
 pub struct CaptureHandle {
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
+    control: Arc<Mutex<Option<ChildStdin>>>,
 }
 
 impl CaptureHandle {
@@ -43,6 +47,22 @@ impl CaptureHandle {
 
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         self.stop.clone()
+    }
+
+    pub fn send_control(&self, command: &CaptureControlCommand) -> Result<(), String> {
+        let mut guard = self
+            .control
+            .lock()
+            .map_err(|_| "capture control lock is poisoned".to_owned())?;
+        let input = guard
+            .as_mut()
+            .ok_or_else(|| "capture control channel is unavailable".to_owned())?;
+        serde_json::to_writer(&mut *input, command)
+            .map_err(|error| format!("capture control encode failed: {error}"))?;
+        input
+            .write_all(b"\n")
+            .and_then(|_| input.flush())
+            .map_err(|error| format!("capture control write failed: {error}"))
     }
 }
 
@@ -74,9 +94,11 @@ pub fn start_adb(
 ) -> CaptureHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let child_slot = Arc::new(Mutex::new(None));
+    let control_slot = Arc::new(Mutex::new(None));
     let handle = CaptureHandle {
         stop: stop.clone(),
         child: child_slot.clone(),
+        control: control_slot.clone(),
     };
     thread::spawn(move || {
         let log_host = |record: DiagnosticRecord| {
@@ -107,6 +129,13 @@ pub fn start_adb(
                 .stderr
                 .take()
                 .ok_or("collector stderr is unavailable")?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or("collector control stdin is unavailable")?;
+            *control_slot
+                .lock()
+                .map_err(|_| "capture control lock is poisoned")? = Some(stdin);
             *child_slot.lock().map_err(|_| "capture lock is poisoned")? = Some(child);
             tx.send(HostMessage::Status("Capturing eBPF storage events".into()))
                 .ok();
@@ -169,6 +198,9 @@ pub fn start_adb(
                 .map_err(|_| "collector diagnostic reader panicked".to_owned())?;
             if let Some(error) = exit_error {
                 return Err(error);
+            }
+            if let Ok(mut guard) = control_slot.lock() {
+                guard.take();
             }
             Ok(())
         })();

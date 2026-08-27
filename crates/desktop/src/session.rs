@@ -2,17 +2,115 @@ use std::{
     fs::File,
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
 };
 
 use android_ebpf_protocol::{
-    AnalysisEngine, AnalysisSummary, ProbeCapabilities, SessionError, SessionReader, StorageEvent,
-    WireRecord, write_record,
+    AggregateSnapshot, AnalysisEngine, AnalysisSummary, HeavyHitterSnapshot, ProbeCapabilities,
+    SegmentRecord, SessionError, SessionReader, StackFingerprintRecord, StorageEvent,
+    TriggerRecord, WireRecord, write_record,
 };
 
 pub struct SessionWriter {
     output: BufWriter<File>,
     pub persisted: u64,
     pub rejected: u64,
+}
+
+enum PersistCommand {
+    Record(Box<WireRecord>),
+    Finish {
+        events_seen: u64,
+        events_rejected: u64,
+        graceful: bool,
+    },
+}
+
+pub struct AsyncSessionWriter {
+    tx: mpsc::Sender<PersistCommand>,
+    worker: Option<thread::JoinHandle<Result<(), SessionError>>>,
+}
+
+impl AsyncSessionWriter {
+    pub fn create(path: &Path) -> Result<Self, SessionError> {
+        // Open synchronously so Start Capture reports path/permission failures
+        // before any measurement begins. Serialization and disk writes happen
+        // exclusively on the worker after this point.
+        let writer = SessionWriter::create(path)?;
+        let (tx, rx) = mpsc::channel::<PersistCommand>();
+        let worker = thread::spawn(move || {
+            let mut writer = writer;
+            let mut rejected = 0_u64;
+            while let Ok(command) = rx.recv() {
+                match command {
+                    PersistCommand::Record(record) => {
+                        if writer.append(&record).is_err() {
+                            rejected = rejected.saturating_add(1);
+                        }
+                    }
+                    PersistCommand::Finish {
+                        events_seen,
+                        events_rejected,
+                        graceful,
+                    } => {
+                        let rejected = events_rejected.saturating_add(rejected);
+                        let persisted = writer.persisted;
+                        let footer = WireRecord::Footer {
+                            schema_version: android_ebpf_protocol::SCHEMA_VERSION,
+                            events_seen,
+                            events_persisted: persisted,
+                            events_dropped: events_seen.saturating_sub(persisted + rejected),
+                            events_rejected: rejected,
+                            graceful: Some(graceful),
+                        };
+                        return writer.finish(&footer);
+                    }
+                }
+            }
+            Ok(())
+        });
+        Ok(Self {
+            tx,
+            worker: Some(worker),
+        })
+    }
+
+    pub fn append(&self, record: WireRecord) -> Result<(), SessionError> {
+        self.tx
+            .send(PersistCommand::Record(Box::new(record)))
+            .map_err(|_| {
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session writer stopped",
+                ))
+            })
+    }
+
+    pub fn finish(
+        mut self,
+        events_seen: u64,
+        events_rejected: u64,
+        graceful: bool,
+    ) -> Result<(), SessionError> {
+        self.tx
+            .send(PersistCommand::Finish {
+                events_seen,
+                events_rejected,
+                graceful,
+            })
+            .map_err(|_| {
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session writer stopped",
+                ))
+            })?;
+        self.worker
+            .take()
+            .expect("session writer worker exists")
+            .join()
+            .map_err(|_| SessionError::Io(std::io::Error::other("session writer panicked")))?
+    }
 }
 
 impl SessionWriter {
@@ -39,6 +137,7 @@ impl SessionWriter {
     }
 }
 
+#[derive(Debug)]
 pub struct LoadedAnalysis {
     pub engine: AnalysisEngine,
     pub accepted_events: u64,
@@ -46,12 +145,26 @@ pub struct LoadedAnalysis {
     pub integrity_ok: Option<bool>,
     pub graceful: Option<bool>,
     pub capabilities: Option<ProbeCapabilities>,
+    pub latest_aggregate: Option<AggregateSnapshot>,
+    pub heavy_hitters: Vec<HeavyHitterSnapshot>,
+    pub triggers: Vec<TriggerRecord>,
+    pub segments: Vec<SegmentRecord>,
+    pub stack_fingerprints: Vec<StackFingerprintRecord>,
 }
 
 pub fn load_analysis(path: &Path) -> Result<LoadedAnalysis, SessionError> {
     let loaded = SessionReader::default().read(BufReader::new(File::open(path)?))?;
     let accepted_events = loaded.events.len() as u64;
+    let latest_aggregate = loaded.aggregates.last().cloned();
+    let mut heavy_hitters = Vec::<HeavyHitterSnapshot>::new();
+    for snapshot in &loaded.heavy_hitters {
+        heavy_hitters.retain(|current| current.dimension != snapshot.dimension);
+        heavy_hitters.push(snapshot.clone());
+    }
     let mut engine = AnalysisEngine::new();
+    let triggers = loaded.triggers.clone();
+    let segments = loaded.segments.clone();
+    let stack_fingerprints = loaded.stack_fingerprints.clone();
     for event in loaded.events {
         engine.ingest(event);
     }
@@ -62,6 +175,11 @@ pub fn load_analysis(path: &Path) -> Result<LoadedAnalysis, SessionError> {
         integrity_ok: loaded.integrity_ok,
         graceful: loaded.graceful,
         capabilities: loaded.capabilities,
+        latest_aggregate,
+        heavy_hitters,
+        triggers,
+        segments,
+        stack_fingerprints,
     })
 }
 

@@ -8,7 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 4;
+pub const SCHEMA_VERSION: u16 = 5;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 const MAX_DERIVED_CACHE_ENTRIES: usize = 4_096;
@@ -159,6 +159,7 @@ pub enum IoNodeKind {
     BlockRequest,
     ScsiCommand,
     UfsCommand,
+    SchedulerContext,
     UicContext,
 }
 
@@ -623,6 +624,7 @@ pub enum PipelineLayer {
     BlockDevice,
     Scsi,
     Ufs,
+    SchedulerContext,
     UicContext,
 }
 
@@ -751,6 +753,10 @@ pub struct ProbeCapabilities {
     pub pipeline_layers: Vec<PipelineLayer>,
     #[serde(default)]
     pub attach_plan: Vec<ProbePlan>,
+    #[serde(default)]
+    pub scheduler_context: Option<CapabilityState>,
+    #[serde(default)]
+    pub stack_traces: Option<CapabilityState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -845,6 +851,537 @@ fn truncate_string(value: &mut String, limit: usize) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureMode {
+    Basic,
+    #[default]
+    Balanced,
+    Deep,
+    RawAll,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CaptureFilter {
+    #[serde(default)]
+    pub match_all: bool,
+    #[serde(default)]
+    pub pids: Vec<u32>,
+    #[serde(default)]
+    pub tids: Vec<u32>,
+    #[serde(default)]
+    pub uids: Vec<u32>,
+    #[serde(default)]
+    pub devices: Vec<(u32, u32)>,
+    #[serde(default)]
+    pub files: Vec<FileIdentity>,
+    #[serde(default)]
+    pub operations: Vec<IoOperation>,
+    #[serde(default)]
+    pub min_bytes: Option<u32>,
+    #[serde(default)]
+    pub max_bytes: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetailPolicy {
+    pub total_latency_ns: u64,
+    pub queue_latency_ns: u64,
+    pub device_latency_ns: u64,
+    /// Number of otherwise-fast requests sampled per 10,000 candidates.
+    pub sample_rate_permyriad: u16,
+    #[serde(default = "default_true")]
+    pub include_errors: bool,
+    #[serde(default = "default_true")]
+    pub include_correlation_failures: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DetailPolicy {
+    fn default() -> Self {
+        Self {
+            total_latency_ns: 5_000_000,
+            queue_latency_ns: 1_000_000,
+            device_latency_ns: 3_000_000,
+            sample_rate_permyriad: 100,
+            include_errors: true,
+            include_correlation_failures: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureConfig {
+    pub generation: u64,
+    pub mode: CaptureMode,
+    pub filter: CaptureFilter,
+    pub detail: DetailPolicy,
+    #[serde(default)]
+    pub trigger: Option<TriggerPolicy>,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CaptureConfigError {
+    #[error("config generation must be non-zero")]
+    ZeroGeneration,
+    #[error("filter key count {actual} exceeds limit {limit}")]
+    TooManyKeys { actual: usize, limit: usize },
+    #[error("filter keys must not contain duplicates")]
+    DuplicateKey,
+    #[error("minimum byte size exceeds maximum byte size")]
+    InvalidByteRange,
+    #[error("sample rate must be at most 10,000 permyriad")]
+    InvalidSampleRate,
+    #[error("invalid trigger policy: {0}")]
+    InvalidTrigger(String),
+}
+
+impl CaptureConfig {
+    pub fn validate(&self, max_keys: usize) -> Result<(), CaptureConfigError> {
+        if self.generation == 0 {
+            return Err(CaptureConfigError::ZeroGeneration);
+        }
+        let actual = self.filter.pids.len()
+            + self.filter.tids.len()
+            + self.filter.uids.len()
+            + self.filter.devices.len()
+            + self.filter.files.len()
+            + self.filter.operations.len();
+        if actual > max_keys {
+            return Err(CaptureConfigError::TooManyKeys {
+                actual,
+                limit: max_keys,
+            });
+        }
+        if has_duplicates(&self.filter.pids)
+            || has_duplicates(&self.filter.tids)
+            || has_duplicates(&self.filter.uids)
+            || has_duplicates(&self.filter.devices)
+            || has_duplicates(&self.filter.files)
+            || has_duplicates(&self.filter.operations)
+        {
+            return Err(CaptureConfigError::DuplicateKey);
+        }
+        if self
+            .filter
+            .min_bytes
+            .zip(self.filter.max_bytes)
+            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        {
+            return Err(CaptureConfigError::InvalidByteRange);
+        }
+        if self.detail.sample_rate_permyriad > 10_000 {
+            return Err(CaptureConfigError::InvalidSampleRate);
+        }
+        if let Some(policy) = &self.trigger {
+            AdaptiveController::new(policy.clone())
+                .map_err(|error| CaptureConfigError::InvalidTrigger(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+fn has_duplicates<T: Eq + std::hash::Hash>(values: &[T]) -> bool {
+    let mut seen = HashSet::with_capacity(values.len());
+    values.iter().any(|value| !seen.insert(value))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum CaptureControlCommand {
+    ApplyConfig {
+        config: Box<CaptureConfig>,
+    },
+    SetMode {
+        generation: u64,
+        mode: CaptureMode,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlOutcome {
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureControlAck {
+    pub requested_generation: u64,
+    pub active_generation: u64,
+    pub outcome: ControlOutcome,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistogramMetric {
+    TotalLatency,
+    QueueLatency,
+    DeviceLatency,
+    FilesystemLatency,
+    ScsiLatency,
+    UfsLatency,
+    IoSize,
+    QueueDepth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Histogram {
+    /// Inclusive upper bounds. `counts` contains one additional overflow bucket.
+    pub boundaries: Vec<u64>,
+    pub counts: Vec<u64>,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum HistogramError {
+    #[error("histogram boundaries must not be empty")]
+    EmptyBoundaries,
+    #[error("histogram boundaries must be strictly increasing")]
+    NonIncreasingBoundaries,
+}
+
+impl Histogram {
+    pub fn new(boundaries: Vec<u64>) -> Result<Self, HistogramError> {
+        if boundaries.is_empty() {
+            return Err(HistogramError::EmptyBoundaries);
+        }
+        if boundaries.windows(2).any(|window| window[0] >= window[1]) {
+            return Err(HistogramError::NonIncreasingBoundaries);
+        }
+        Ok(Self {
+            counts: vec![0; boundaries.len() + 1],
+            boundaries,
+        })
+    }
+
+    pub fn record(&mut self, value: u64) {
+        let index = self
+            .boundaries
+            .partition_point(|boundary| *boundary < value);
+        self.counts[index] = self.counts[index].saturating_add(1);
+    }
+
+    pub fn total_count(&self) -> u64 {
+        self.counts.iter().copied().sum()
+    }
+
+    /// Returns the inclusive range containing the requested percentile. The
+    /// percentile is approximate because only the bucket is retained.
+    pub fn percentile_range(&self, percentile: u8) -> Option<(u64, Option<u64>)> {
+        let total = self.total_count();
+        if total == 0 || percentile == 0 || percentile > 100 {
+            return None;
+        }
+        let rank = (total.saturating_mul(percentile as u64).saturating_add(99)) / 100;
+        let mut cumulative = 0_u64;
+        for (index, count) in self.counts.iter().copied().enumerate() {
+            cumulative = cumulative.saturating_add(count);
+            if cumulative < rank {
+                continue;
+            }
+            let lower = if index == 0 {
+                0
+            } else {
+                self.boundaries[index - 1].saturating_add(1)
+            };
+            return Some((lower, self.boundaries.get(index).copied()));
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AggregateCounters {
+    pub observed: u64,
+    pub bytes: u64,
+    pub failed: u64,
+    pub filter_passed: u64,
+    pub filter_suppressed: u64,
+    pub detail_emitted: u64,
+    pub suppressed_fast: u64,
+    pub sampled: u64,
+    pub forced_error: u64,
+    pub ring_reserve_failures: u64,
+    pub map_insert_failures: u64,
+    pub expired: u64,
+    pub key_reused: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateSnapshot {
+    pub session_id: String,
+    pub epoch: u64,
+    pub config_generation: u64,
+    pub start_ts_ns: u64,
+    pub end_ts_ns: u64,
+    pub counters: AggregateCounters,
+    pub histograms: Vec<(HistogramMetric, Histogram)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeavyHitterDimension {
+    Process,
+    User,
+    File,
+    Device,
+    Operation,
+    Stage,
+    Origin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeavyHitterMetric {
+    Count,
+    Bytes,
+    CumulativeLatency,
+    MaximumLatency,
+    P99Bucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavyHitterEntry {
+    pub key: String,
+    pub count: u64,
+    pub bytes: u64,
+    pub cumulative_latency_ns: u64,
+    pub max_latency_ns: u64,
+    #[serde(default)]
+    pub confidence: Option<EdgeConfidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavyHitterSnapshot {
+    pub epoch: u64,
+    pub dimension: HeavyHitterDimension,
+    pub metric: HeavyHitterMetric,
+    pub candidate_capacity: u32,
+    pub evicted_keys: u64,
+    pub covered_metric: u64,
+    pub total_metric: u64,
+    pub entries: Vec<HeavyHitterEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureState {
+    Basic,
+    Armed,
+    Deep,
+    Cooldown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerRecord {
+    pub ts_ns: u64,
+    pub from: CaptureState,
+    pub to: CaptureState,
+    pub rule: String,
+    pub observed: u64,
+    pub threshold: u64,
+    pub consecutive_windows: u32,
+    pub config_generation: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerPolicy {
+    pub rule: String,
+    pub threshold: u64,
+    pub consecutive_windows: u32,
+    pub deep_duration_ns: u64,
+    pub cooldown_ns: u64,
+    pub arming_timeout_ns: u64,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TriggerPolicyError {
+    #[error("trigger rule must not be empty")]
+    EmptyRule,
+    #[error("consecutive window count must be positive")]
+    ZeroConsecutiveWindows,
+    #[error("deep, cooldown and arming durations must be positive")]
+    ZeroDuration,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdaptiveController {
+    policy: TriggerPolicy,
+    state: CaptureState,
+    entered_ts_ns: u64,
+    consecutive: u32,
+    last_observed: u64,
+}
+
+impl AdaptiveController {
+    pub fn new(policy: TriggerPolicy) -> Result<Self, TriggerPolicyError> {
+        if policy.rule.trim().is_empty() {
+            return Err(TriggerPolicyError::EmptyRule);
+        }
+        if policy.consecutive_windows == 0 {
+            return Err(TriggerPolicyError::ZeroConsecutiveWindows);
+        }
+        if policy.deep_duration_ns == 0 || policy.cooldown_ns == 0 || policy.arming_timeout_ns == 0
+        {
+            return Err(TriggerPolicyError::ZeroDuration);
+        }
+        Ok(Self {
+            policy,
+            state: CaptureState::Basic,
+            entered_ts_ns: 0,
+            consecutive: 0,
+            last_observed: 0,
+        })
+    }
+
+    pub fn state(&self) -> CaptureState {
+        self.state
+    }
+
+    pub fn observe(
+        &mut self,
+        ts_ns: u64,
+        observed: u64,
+        config_generation: u64,
+    ) -> Option<TriggerRecord> {
+        self.last_observed = observed;
+        match self.state {
+            CaptureState::Basic if observed > self.policy.threshold => {
+                self.consecutive = 1;
+                self.transition(
+                    ts_ns,
+                    CaptureState::Armed,
+                    observed,
+                    config_generation,
+                    "threshold_observed",
+                )
+            }
+            CaptureState::Armed if observed <= self.policy.threshold => {
+                self.consecutive = 0;
+                self.transition(
+                    ts_ns,
+                    CaptureState::Basic,
+                    observed,
+                    config_generation,
+                    "signal_recovered",
+                )
+            }
+            CaptureState::Armed => {
+                self.consecutive = self.consecutive.saturating_add(1);
+                if self.consecutive >= self.policy.consecutive_windows {
+                    self.transition(
+                        ts_ns,
+                        CaptureState::Deep,
+                        observed,
+                        config_generation,
+                        "consecutive_threshold_exceeded",
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => self.tick(ts_ns, config_generation),
+        }
+    }
+
+    pub fn tick(&mut self, ts_ns: u64, config_generation: u64) -> Option<TriggerRecord> {
+        let elapsed = ts_ns.saturating_sub(self.entered_ts_ns);
+        match self.state {
+            CaptureState::Armed if elapsed >= self.policy.arming_timeout_ns => {
+                self.consecutive = 0;
+                self.transition(
+                    ts_ns,
+                    CaptureState::Basic,
+                    self.last_observed,
+                    config_generation,
+                    "arming_timeout",
+                )
+            }
+            CaptureState::Deep if elapsed >= self.policy.deep_duration_ns => self.transition(
+                ts_ns,
+                CaptureState::Cooldown,
+                self.last_observed,
+                config_generation,
+                "deep_budget_elapsed",
+            ),
+            CaptureState::Cooldown if elapsed >= self.policy.cooldown_ns => self.transition(
+                ts_ns,
+                CaptureState::Basic,
+                self.last_observed,
+                config_generation,
+                "cooldown_elapsed",
+            ),
+            _ => None,
+        }
+    }
+
+    fn transition(
+        &mut self,
+        ts_ns: u64,
+        to: CaptureState,
+        observed: u64,
+        config_generation: u64,
+        reason: &str,
+    ) -> Option<TriggerRecord> {
+        let from = self.state;
+        if from == to {
+            return None;
+        }
+        self.state = to;
+        self.entered_ts_ns = ts_ns;
+        Some(TriggerRecord {
+            ts_ns,
+            from,
+            to,
+            rule: self.policy.rule.clone(),
+            observed,
+            threshold: self.policy.threshold,
+            consecutive_windows: self.consecutive,
+            config_generation,
+            reason: reason.into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentRecord {
+    pub segment_id: u64,
+    pub trigger_ts_ns: u64,
+    pub requested_start_ts_ns: u64,
+    pub retained_start_ts_ns: u64,
+    pub end_ts_ns: u64,
+    pub retained_bytes: u64,
+    pub evicted_records: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StackKind {
+    User,
+    Kernel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackFingerprintRecord {
+    pub ts_ns: u64,
+    #[serde(default)]
+    pub transaction_id: Option<u64>,
+    pub kind: StackKind,
+    pub opaque_stack_id: u64,
+    pub frame_count: u32,
+    pub symbolized: bool,
+    pub sample_count: u64,
+    pub tail_count: u64,
+    pub cumulative_latency_ns: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]
 pub enum WireRecord {
@@ -877,6 +1414,30 @@ pub enum WireRecord {
         #[serde(default)]
         key_reused: u64,
     },
+    Control {
+        schema_version: u16,
+        acknowledgement: CaptureControlAck,
+    },
+    Aggregate {
+        schema_version: u16,
+        snapshot: AggregateSnapshot,
+    },
+    HeavyHitters {
+        schema_version: u16,
+        snapshot: HeavyHitterSnapshot,
+    },
+    Trigger {
+        schema_version: u16,
+        trigger: TriggerRecord,
+    },
+    Segment {
+        schema_version: u16,
+        segment: SegmentRecord,
+    },
+    StackFingerprint {
+        schema_version: u16,
+        fingerprint: StackFingerprintRecord,
+    },
     Footer {
         schema_version: u16,
         events_seen: u64,
@@ -894,6 +1455,12 @@ pub struct SessionLoad {
     pub capabilities: Option<ProbeCapabilities>,
     pub events: Vec<StorageEvent>,
     pub health: Vec<WireRecord>,
+    pub controls: Vec<CaptureControlAck>,
+    pub aggregates: Vec<AggregateSnapshot>,
+    pub heavy_hitters: Vec<HeavyHitterSnapshot>,
+    pub triggers: Vec<TriggerRecord>,
+    pub segments: Vec<SegmentRecord>,
+    pub stack_fingerprints: Vec<StackFingerprintRecord>,
     pub footer: Option<WireRecord>,
     pub total_lines: u64,
     pub rejected_lines: u64,
@@ -943,6 +1510,18 @@ impl SessionReader {
                 }
                 Ok(WireRecord::Event { event, .. }) => loaded.events.push(event),
                 Ok(record @ WireRecord::Health { .. }) => loaded.health.push(record),
+                Ok(WireRecord::Control {
+                    acknowledgement, ..
+                }) => loaded.controls.push(acknowledgement),
+                Ok(WireRecord::Aggregate { snapshot, .. }) => loaded.aggregates.push(snapshot),
+                Ok(WireRecord::HeavyHitters { snapshot, .. }) => {
+                    loaded.heavy_hitters.push(snapshot)
+                }
+                Ok(WireRecord::Trigger { trigger, .. }) => loaded.triggers.push(trigger),
+                Ok(WireRecord::Segment { segment, .. }) => loaded.segments.push(segment),
+                Ok(WireRecord::StackFingerprint { fingerprint, .. }) => {
+                    loaded.stack_fingerprints.push(fingerprint)
+                }
                 Ok(
                     record @ WireRecord::Footer {
                         events_seen,
@@ -1282,11 +1861,23 @@ struct MutableBucket {
     max_queue_depth: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct MutableCategory {
     completed_ios: u64,
     bytes: u64,
     latencies: Vec<u64>,
+    histogram: Histogram,
+}
+
+impl Default for MutableCategory {
+    fn default() -> Self {
+        Self {
+            completed_ios: 0,
+            bytes: 0,
+            latencies: Vec::new(),
+            histogram: latency_histogram(),
+        }
+    }
 }
 
 fn time_buckets(start_ts_ns: u64, end_ts_ns: u64) -> Vec<u64> {
@@ -1416,6 +2007,7 @@ pub struct AnalysisEngine {
     classifier: SequentialClassifier,
     summary: AnalysisSummary,
     latencies_ns: Vec<u64>,
+    live_latency_histogram: Histogram,
     buckets: BTreeMap<u64, MutableBucket>,
     categories: BTreeMap<(IoOperation, AccessPattern, IoSizeClass), MutableCategory>,
     busy_intervals: Vec<(u64, u64)>,
@@ -1432,6 +2024,8 @@ pub struct AnalysisEngine {
     pipeline_cache: RefCell<HashMap<(u64, u64, u64), IoPipeline>>,
     transaction_cache: RefCell<HashMap<(u64, u64, u64), IoTransactionGraph>>,
     analysis_index: RefCell<Option<AnalysisIndex>>,
+    slow_reason_cache: RefCell<HashMap<u64, Option<SlowReason>>>,
+    attribution_generation: u64,
 }
 
 impl AnalysisEngine {
@@ -1446,6 +2040,7 @@ impl AnalysisEngine {
             classifier: SequentialClassifier::new(),
             summary: AnalysisSummary::default(),
             latencies_ns: Vec::new(),
+            live_latency_histogram: latency_histogram(),
             buckets: BTreeMap::new(),
             categories: BTreeMap::new(),
             busy_intervals: Vec::new(),
@@ -1462,6 +2057,8 @@ impl AnalysisEngine {
             pipeline_cache: RefCell::new(HashMap::new()),
             transaction_cache: RefCell::new(HashMap::new()),
             analysis_index: RefCell::new(None),
+            slow_reason_cache: RefCell::new(HashMap::new()),
+            attribution_generation: 0,
         }
     }
 
@@ -1477,6 +2074,7 @@ impl AnalysisEngine {
             self.pipeline_cache.get_mut().clear();
             self.transaction_cache.get_mut().clear();
             self.analysis_index.get_mut().take();
+            self.slow_reason_cache.get_mut().clear();
         }
         match event {
             StorageEvent::BlockInsert(insert) => {
@@ -1486,6 +2084,7 @@ impl AnalysisEngine {
             }
             StorageEvent::BlockIssue(issue) => {
                 self.observe_ts(issue.ts_ns);
+                self.slow_reason_cache.get_mut().remove(&issue.request_id);
                 self.summary.issued_ios += 1;
                 let pattern = self.classifier.classify(&issue);
                 match pattern {
@@ -1520,6 +2119,7 @@ impl AnalysisEngine {
                 Some(completed)
             }
             StorageEvent::FileIo(file) => {
+                self.attribution_generation = self.attribution_generation.saturating_add(1);
                 self.observe_ts(file.start_ts_ns);
                 self.observe_ts(file.end_ts_ns);
                 self.summary.file_ios += 1;
@@ -1554,6 +2154,7 @@ impl AnalysisEngine {
                 None
             }
             StorageEvent::Pipeline(observation) => {
+                self.attribution_generation = self.attribution_generation.saturating_add(1);
                 self.observe_ts(observation.ts_ns);
                 if let Some(end) = observation.end_ts_ns {
                     self.observe_ts(end);
@@ -1610,12 +2211,14 @@ impl AnalysisEngine {
                 None
             }
             StorageEvent::Node(node) => {
+                self.attribution_generation = self.attribution_generation.saturating_add(1);
                 self.observe_ts(node.start_ts_ns);
                 self.observe_ts(node.end_or_start());
                 bounded_push(&mut self.graph_nodes, node);
                 None
             }
             StorageEvent::Edge(edge) => {
+                self.attribution_generation = self.attribution_generation.saturating_add(1);
                 bounded_push(&mut self.graph_edges, edge);
                 None
             }
@@ -1631,6 +2234,8 @@ impl AnalysisEngine {
             _ => self.summary.other_bytes += bytes,
         }
         self.latencies_ns.push(completed.total_latency_ns);
+        self.live_latency_histogram
+            .record(completed.total_latency_ns);
         let start = completed
             .insert
             .as_ref()
@@ -1658,6 +2263,7 @@ impl AnalysisEngine {
         category.completed_ios += 1;
         category.bytes += bytes;
         category.latencies.push(completed.total_latency_ns);
+        category.histogram.record(completed.total_latency_ns);
     }
 
     fn observe_ts(&mut self, ts_ns: u64) {
@@ -1729,11 +2335,54 @@ impl AnalysisEngine {
         summary
     }
 
+    /// A bounded-cost snapshot intended for live rendering. Percentiles are
+    /// the inclusive upper bound of a fixed histogram bucket and are therefore
+    /// approximate. `summary()` remains the exact offline/export contract.
+    pub fn live_summary(&self) -> AnalysisSummary {
+        let mut summary = self.summary.clone();
+        summary.p50_latency_ns = histogram_percentile_upper(&self.live_latency_histogram, 50);
+        summary.p95_latency_ns = histogram_percentile_upper(&self.live_latency_histogram, 95);
+        summary.p99_latency_ns = histogram_percentile_upper(&self.live_latency_histogram, 99);
+        summary.logging_ns = self
+            .first_ts_ns
+            .zip(self.last_ts_ns)
+            .map_or(0, |(first, last)| last.saturating_sub(first));
+        summary.busy_ns = self
+            .busy_intervals
+            .iter()
+            .map(|(start, end)| end.saturating_sub(*start))
+            .sum::<u64>()
+            .min(summary.logging_ns);
+        summary.idle_ns = summary.logging_ns.saturating_sub(summary.busy_ns);
+        summary.category_summaries = self
+            .categories
+            .iter()
+            .map(
+                |(&(operation, access_pattern, size_class), value)| CategorySummary {
+                    operation,
+                    access_pattern,
+                    size_class,
+                    completed_ios: value.completed_ios,
+                    bytes: value.bytes,
+                    average_chunk_bytes: value.bytes / value.completed_ios.max(1),
+                    p50_latency_ns: histogram_percentile_upper(&value.histogram, 50),
+                    p95_latency_ns: histogram_percentile_upper(&value.histogram, 95),
+                    p99_latency_ns: histogram_percentile_upper(&value.histogram, 99),
+                },
+            )
+            .collect();
+        summary
+    }
+
     pub fn completed_ios(&self) -> &[CompletedIo] {
         &self.completed
     }
     pub fn file_ios(&self) -> &[FileIo] {
         &self.file_ios
+    }
+
+    pub fn attribution_generation(&self) -> u64 {
+        self.attribution_generation
     }
 
     pub fn pipeline_observations(&self) -> &[PipelineObservation] {
@@ -1926,6 +2575,24 @@ impl AnalysisEngine {
         best
     }
 
+    /// Bounded render-path variant. It snapshots the explanation the first
+    /// time a completed request is selected; offline export can call
+    /// `why_slow` directly when it needs a freshly evaluated cohort.
+    pub fn cached_why_slow(&self, selected: &CompletedIo) -> Option<SlowReason> {
+        if let Some(reason) = self
+            .slow_reason_cache
+            .borrow()
+            .get(&selected.issue.request_id)
+        {
+            return reason.clone();
+        }
+        let reason = self.why_slow(selected);
+        self.slow_reason_cache
+            .borrow_mut()
+            .insert(selected.issue.request_id, reason.clone());
+        reason
+    }
+
     pub fn pipelines(&self) -> Vec<IoPipeline> {
         self.completed
             .iter()
@@ -1988,6 +2655,7 @@ fn pipeline_node_kind(layer: PipelineLayer) -> IoNodeKind {
         PipelineLayer::BlockDevice => IoNodeKind::BlockRequest,
         PipelineLayer::Scsi => IoNodeKind::ScsiCommand,
         PipelineLayer::Ufs => IoNodeKind::UfsCommand,
+        PipelineLayer::SchedulerContext => IoNodeKind::SchedulerContext,
         PipelineLayer::UicContext => IoNodeKind::UicContext,
     }
 }
@@ -2400,6 +3068,20 @@ fn evenly_sample_refs<'a, T>(values: &[&'a T], limit: usize) -> Vec<&'a T> {
     (0..limit)
         .map(|index| values[index * values.len() / limit])
         .collect()
+}
+
+fn latency_histogram() -> Histogram {
+    let boundaries = (0..32).map(|power| 1_000_u64 << power).collect::<Vec<_>>();
+    Histogram {
+        counts: vec![0; boundaries.len() + 1],
+        boundaries,
+    }
+}
+
+fn histogram_percentile_upper(histogram: &Histogram, percentile: u8) -> Option<u64> {
+    histogram
+        .percentile_range(percentile)
+        .map(|(lower, upper)| upper.unwrap_or(lower))
 }
 
 fn union_duration(intervals: &[(u64, u64)]) -> u64 {

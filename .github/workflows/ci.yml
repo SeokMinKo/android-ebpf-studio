@@ -20,6 +20,8 @@ jobs:
         run: cargo +1.98.0 clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo +1.98.0 test --workspace
+      - name: Benchmark 1M-request analysis
+        run: cargo +1.98.0 run --release -p android-ebpf-protocol --example analysis_benchmark -- 1000000
 
   windows-gui:
     runs-on: windows-latest

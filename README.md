@@ -21,6 +21,11 @@ Windows에서 실행되는 Rust GUI가 `adb root` 가능한 Android Phone에 eBP
 - stdout measurement와 stderr diagnostic JSONL 분리, 세션별 회전 로그와 diagnostic bundle export
 - stage inclusive/exclusive/critical-path/unaccounted 계산과 cohort 기반 `Why slow?`
 - Phone 없이 GUI 파이프라인을 확인하는 deterministic simulator
+- PID/TID/UID/device/op/size live filter와 Basic/Balanced/Deep/RawAll capture mode
+- 커널 per-CPU histogram·정확한 count/bytes 집계, slow-I/O detail suppression과 Top Offenders
+- Basic → Armed → Deep → Cooldown 자동 전환, bounded flight-recorder segment와 trigger evidence
+- Deep 전용 scheduler/FS/UIC context lane과 user/kernel stack fingerprint cohort
+- background session load/export/write, incremental Explorer와 Pipeline/RCA cache
 
 ## 구조
 
@@ -107,6 +112,8 @@ cargo binstall bpf-linker
 - **Compare**: 별도 baseline NDJSON을 읽기 전용으로 열어 현재 세션의 I/O, bytes, p50/p95/p99, queue depth, file attribution 변화량을 비교합니다.
 - **Diagnostics**: component/code/correlation filter, INFO/DEBUG/TRACE capture level, redacted bundle export를 사용합니다.
 
+좌측 `LIVE FILTER & MODE`에서 조건과 capture mode를 바꾼 뒤 `Apply live config`를 누르면 새 generation이 agent와 eBPF map에 원자적으로 적용됩니다. Summary의 kernel aggregate는 전체 관측 I/O이고, Block/File/Pipeline 표는 Balanced 정책으로 보존된 slow/sample detail입니다. 두 수치를 동일한 모집단으로 오해하지 마세요.
+
 ## 중요한 정확성 규칙
 
 - tracepoint가 `rq` pointer를 제공하면 issue/complete를 정확한 request identity로 연결합니다.
@@ -118,6 +125,8 @@ cargo binstall bpf-linker
 - 파일 경로는 syscall과 FD의 attribution입니다. buffered writeback, filesystem metadata, GC가 생성한 block I/O를 특정 파일과 exact하게 연결했다고 표시하지 않습니다.
 - `block_rq_insert` 또는 `raw_syscalls`가 없는 커널에서는 해당 queue latency 또는 file view가 unavailable이며 0으로 대체하지 않습니다.
 - event loss와 malformed record는 footer/health counter로 분리합니다. 값이 없는데 0으로 가장하지 않습니다.
+- Scheduler/GC/writeback/UIC marker와 stack fingerprint는 Deep capture의 원인 후보 문맥입니다. 직접 correlation edge가 없으면 `ContextOnly`이며 additive latency 또는 확정 원인으로 표시하지 않습니다.
+- histogram percentile은 bucket 범위 기반 근사치입니다. UI에 approximate로 표시하고 offline exact summary와 구분합니다.
 
 ## 검증
 

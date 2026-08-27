@@ -1,4 +1,4 @@
-# NDJSON Protocol v4
+# NDJSON Protocol v5
 
 각 stdout line은 독립적인 JSON object이고 `record` discriminator와 `schema_version`을 가집니다.
 
@@ -6,18 +6,18 @@
 
 1. `hello`
 2. `capabilities`
-3. zero or more `event` / periodic `health`
-4. graceful stop 시 `footer`
+3. zero or more `event` / periodic `aggregate` / `heavy_hitters` / `health`
+4. optional `control` / `trigger` / `segment` / `stack_fingerprint`
+5. graceful stop 시 `footer`
 
 Reader는 알 수 없는 JSON field를 무시하지만, 알 수 없는 `record` type과 malformed/1 MiB 초과 line을 rejection으로 계산합니다.
 
 ## Examples
 
 ```json
-{"record":"hello","schema_version":4,"agent_version":"0.5.0","boot_id":"...","kernel_release":"6.6.30-android15"}
-{"record":"event","schema_version":4,"sequence":1,"event":{"kind":"block_issue","data":{"ts_ns":1000000,"request_id":4660,"device_major":259,"device_minor":0,"sector":1024,"sectors":8,"bytes":4096,"operation":"read","pid":4242,"tid":4242,"cpu":3,"comm":"fio"}}}
-{"record":"event","schema_version":4,"sequence":2,"event":{"kind":"file_io","data":{"start_ts_ns":800000,"end_ts_ns":1300000,"operation":"read","fd":7,"requested_bytes":4096,"completed_bytes":4096,"pid":4242,"tid":4242,"comm":"fio","path":"/data/local/tmp/input.bin","confidence":"attributed","file_identity":{"fs_device_major":259,"fs_device_minor":7,"inode":1001,"mount_id":42},"path_snapshot":{"path":"/data/local/tmp/input.bin","source":"proc_fd","captured_ts_ns":1300000,"deleted":false}}}}
-{"record":"event","schema_version":4,"sequence":3,"event":{"kind":"pipeline","data":{"ts_ns":1050000,"end_ts_ns":1210000,"phase":"span","layer":"ufs","correlation_id":null,"stage_key":17,"sector":1024,"bytes":4096,"opcode":40,"status":0,"pid":4242,"tid":4242,"name":"UFS command","confidence":"probable"}}}
+{"record":"hello","schema_version":5,"agent_version":"0.8.0","boot_id":"...","kernel_release":"6.6.30-android15"}
+{"record":"event","schema_version":5,"sequence":1,"event":{"kind":"block_issue","data":{"ts_ns":1000000,"request_id":4660,"device_major":259,"device_minor":0,"sector":1024,"sectors":8,"bytes":4096,"operation":"read","pid":4242,"tid":4242,"cpu":3,"comm":"fio"}}}
+{"record":"aggregate","schema_version":5,"snapshot":{"session_id":"...","epoch":1,"config_generation":2,"start_ts_ns":0,"end_ts_ns":1000000000,"counters":{"observed":1000,"bytes":4096000,"failed":0,"filter_passed":1000,"filter_suppressed":0,"detail_emitted":47,"suppressed_fast":953,"sampled":10,"forced_error":0,"ring_reserve_failures":0,"map_insert_failures":0,"expired":0,"key_reused":0},"histograms":[]}}
 ```
 
 ## Time and units
@@ -46,7 +46,16 @@ Reader는 알 수 없는 JSON field를 무시하지만, 알 수 없는 `record` 
 - `probable_async`: inode/writeback 근거는 있으나 최초 syscall causation token이 없음.
 - `context_only`: UIC/link/GC 같은 동시 컨텍스트이며 latency 합산 제외.
 
-v1~v3 `hello`, `event`, `health`, `footer`는 계속 읽을 수 있습니다. 누락된 v4 필드는 unavailable로 해석합니다.
+## v5 adaptive records
+
+- `control`: requested/active generation과 applied/rejected 결과.
+- `aggregate`: eBPF per-CPU counter/histogram의 epoch snapshot. detail suppression과 무관하게 전체 filtered I/O를 집계합니다.
+- `heavy_hitters`: bounded candidate Top-N, capacity/eviction/coverage를 함께 제공합니다.
+- `trigger`: Basic/Armed/Deep/Cooldown 전환과 rule evidence.
+- `segment`: 요청/실제 pre-window, 종료, retained bytes와 eviction 수.
+- `stack_fingerprint`: session-salted opaque stack ID, user/kernel namespace, frame/sample/tail 집계. raw address는 diagnostic에 기록하지 않습니다.
+
+v1~v4 `hello`, `event`, `health`, `footer`는 계속 읽을 수 있습니다. 누락된 v5 필드는 unavailable로 해석합니다.
 
 ## Diagnostic stream
 
