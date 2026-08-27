@@ -7,7 +7,7 @@
 | TSK-003 | REQ-003, NFR-001 | TSK-001 | Explorer presets and advanced controls | done |
 | TSK-004 | REQ-004, CON-001 | TSK-001 | Read-only baseline session comparison | done |
 | TSK-005 | REQ-005, INV-001 | TSK-001 | Overview data-quality cards | done |
-| TSK-006 | all | TSK-002..005 | v0.6.0 metadata, CI, merge and release evidence | in_progress |
+| TSK-006 | all | TSK-002..005 | v0.6.0 metadata, CI, merge and release evidence | done |
 
 Single implementation stream. Planned paths: `crates/desktop/src/app.rs`, version metadata, release workflow, this change directory. Forbidden: protocol schema, collector probes, destructive repository operations.
 

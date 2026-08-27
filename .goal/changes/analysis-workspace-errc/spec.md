@@ -5,7 +5,7 @@ level: L3
 execution_mode: DURABLE
 route: DESIGN_FIRST
 confirmation: CONFIRMED-AUTO
-lifecycle: CONFIRMED
+lifecycle: SATISFIED
 confirmed_by: current user implementation request
 baseline: v0.5.1 / 172549f0ce8b3ec52244e047f88c3b982fe95d9f
 ---
@@ -81,3 +81,4 @@ BDD Discovery expansion: N/A — the current user explicitly confirmed the ERRC 
 - v0.6.0 release assets are published only after merge and successful release workflow.
 - Actual Windows visual and physical-device behavior remain explicitly marked manual verification.
 
+Release evidence: v0.6.0 targets merge commit `6a3f794fecc0e52be9e315148f22a1d095f517e7`; five assets were published by successful workflow run `33038984740`.
