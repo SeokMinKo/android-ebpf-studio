@@ -19,7 +19,7 @@ pub struct SessionWriter {
 }
 
 enum PersistCommand {
-    Record(WireRecord),
+    Record(Box<WireRecord>),
     Finish {
         events_seen: u64,
         events_rejected: u64,
@@ -77,7 +77,7 @@ impl AsyncSessionWriter {
     }
 
     pub fn append(&self, record: WireRecord) -> Result<(), SessionError> {
-        self.tx.send(PersistCommand::Record(record)).map_err(|_| {
+        self.tx.send(PersistCommand::Record(Box::new(record))).map_err(|_| {
             SessionError::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "session writer stopped",
