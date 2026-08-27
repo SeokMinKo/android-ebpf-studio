@@ -1,0 +1,7 @@
+# Evidence ledger — Adaptive eBPF Analysis
+
+| Sequence/time | Spec IDs | Task/Test ID | Exact command/check | Exit/status | Raw summary | Evidence scope | Artifact revision |
+|---|---|---|---|---|---|---|---|
+| 0001 / 2026-08-27 | NFR-201~206 | TSK-201 / TST-201 | `cargo run -p android-ebpf-protocol --release --example analysis_benchmark -- 1000000` | NOT RUN (`ENV`) | `/bin/bash: cargo: command not found` | Harness source added; no Rust compile or performance measurement | spec@1/tasks@1 |
+| 0002 / 2026-08-27 | REQ-201~208 | TSK-202 / TST-202 | `cargo test -p android-ebpf-protocol --test adaptive_analysis` | NOT RUN (`ENV`, predicted STRUCTURAL-RED) | Protocol v5 types and record variants do not exist before production delta; cargo unavailable | Test source only; RED not executable locally | spec@1/tasks@1/test-plan@1 |
+| 0003 / 2026-08-27 | REQ-205 | TSK-208 / TST-206 | `cargo test -p android-ebpf-protocol --test adaptive_controller` | NOT RUN (`ENV`, predicted STRUCTURAL-RED) | Adaptive controller did not exist before production delta; cargo unavailable | Test and implementation source only; no executable proof | spec@1/tasks@1/test-plan@1 |

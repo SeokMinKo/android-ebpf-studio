@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.6.0
+        default: v0.8.0
   push:
     branches:
       - main
@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || 'v0.6.0' }}
+  RELEASE_TAG: ${{ inputs.tag || 'v0.8.0' }}
 
 jobs:
   windows-gui:
@@ -113,11 +113,11 @@ jobs:
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
-              --notes "Analysis workspace redesign: Overview findings and data quality, unified request-level Investigate with Pipeline/File/Why slow/raw evidence, guided Explore presets including Group by File, and read-only baseline session comparison. Cached and bounded rendering remains enabled. Includes the Windows GUI, Android arm64 agent, and eBPF collector."
+              --notes "Protocol v5 adaptive eBPF analysis on the v0.6 workspace: Overview/Investigate/Explore/Compare, File Group By, live kernel filters and capture modes, per-CPU aggregates, slow-I/O detail, Top Offenders, background analysis, adaptive Deep capture, flight-recorder segments, ContextOnly overlays, and opaque stack fingerprints. Unsupported probes remain Unavailable."
             gh release upload "$RELEASE_TAG" release/* --clobber
           else
             gh release create "$RELEASE_TAG" release/* \
               --target "$GITHUB_SHA" \
               --title "Android eBPF Storage Studio ${RELEASE_TAG}" \
-              --notes "Analysis workspace redesign: Overview findings and data quality, unified request-level Investigate with Pipeline/File/Why slow/raw evidence, guided Explore presets including Group by File, and read-only baseline session comparison. Cached and bounded rendering remains enabled. Includes the Windows GUI, Android arm64 agent, and eBPF collector. Download the ZIP and verify it with SHA256SUMS.txt."
+              --notes "Protocol v5 adaptive eBPF analysis on the v0.6 workspace: Overview/Investigate/Explore/Compare, File Group By, live kernel filters and capture modes, per-CPU aggregates, slow-I/O detail, Top Offenders, background analysis, adaptive Deep capture, flight-recorder segments, ContextOnly overlays, and opaque stack fingerprints. Unsupported probes remain Unavailable. Download the ZIP and verify it with SHA256SUMS.txt."
           fi

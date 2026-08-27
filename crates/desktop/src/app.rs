@@ -9,10 +9,12 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AccessPattern, AnalysisEngine, AnalysisSummary, CapabilityState, CompletedIo,
-    CorrelationConfidence, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileOriginView,
-    GraphMetrics, IoNodeKind, IoOperation, IoPipeline, IoSizeClass, IoTransactionGraph,
-    PipelineLayer, ProbeCapabilities, SCHEMA_VERSION, SlowReason, WireRecord,
+    AccessPattern, AggregateSnapshot, AnalysisEngine, AnalysisSummary, CapabilityState,
+    CaptureConfig, CaptureControlCommand, CaptureFilter, CaptureMode, CompletedIo, ControlOutcome,
+    CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence,
+    FileOriginView, GraphMetrics, HeavyHitterSnapshot, HistogramMetric, IoNodeKind, IoOperation,
+    IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities, SCHEMA_VERSION,
+    SegmentRecord, SlowReason, StackFingerprintRecord, TriggerRecord, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -23,7 +25,7 @@ use crate::{
     artifacts::{CapturePaths, create_default_session_path},
     capture::{self, CaptureHandle, HostMessage},
     diagnostics::{RotatingJsonl, export_bundle, host_record},
-    session::{self, SessionWriter},
+    session::{self, AsyncSessionWriter},
     simulator,
 };
 
@@ -204,6 +206,13 @@ impl AxisMetric {
             }
         }
     }
+
+    fn requires_graph(self) -> bool {
+        matches!(
+            self,
+            Self::FilesystemLatencyMs | Self::UfsLatencyMs | Self::CriticalPathMs
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,6 +293,10 @@ impl GroupBy {
             }
         }
     }
+
+    fn requires_graph(self) -> bool {
+        matches!(self, Self::File | Self::Origin | Self::Confidence)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -331,7 +344,7 @@ pub struct StudioApp {
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
     simulator_stop: Option<Arc<AtomicBool>>,
-    writer: Option<SessionWriter>,
+    writer: Option<AsyncSessionWriter>,
     session_path: Option<PathBuf>,
     session_id: Option<String>,
     log_directory: Option<PathBuf>,
@@ -356,6 +369,18 @@ pub struct StudioApp {
     pipeline_view: Option<PipelineView>,
     summary_view: Option<(u64, Instant, AnalysisSummary)>,
     comparison: Option<ComparisonBaseline>,
+    capture_mode: CaptureMode,
+    filter_pid: u32,
+    filter_operation: Option<IoOperation>,
+    filter_min_bytes: u32,
+    slow_threshold_ms: f64,
+    control_generation: u64,
+    control_status: String,
+    latest_aggregate: Option<AggregateSnapshot>,
+    heavy_hitters: Vec<HeavyHitterSnapshot>,
+    triggers: VecDeque<TriggerRecord>,
+    segments: VecDeque<SegmentRecord>,
+    stack_fingerprints: VecDeque<StackFingerprintRecord>,
 }
 
 impl Default for StudioApp {
@@ -399,6 +424,18 @@ impl Default for StudioApp {
             pipeline_view: None,
             summary_view: None,
             comparison: None,
+            capture_mode: CaptureMode::Balanced,
+            filter_pid: 0,
+            filter_operation: None,
+            filter_min_bytes: 0,
+            slow_threshold_ms: 5.0,
+            control_generation: 1,
+            control_status: "Balanced · generation 1".into(),
+            latest_aggregate: None,
+            heavy_hitters: Vec::new(),
+            triggers: VecDeque::new(),
+            segments: VecDeque::new(),
+            stack_fingerprints: VecDeque::new(),
         }
     }
 }
@@ -435,7 +472,7 @@ impl StudioApp {
     }
 
     fn create_session_at(&mut self, path: PathBuf) -> bool {
-        match SessionWriter::create(&path) {
+        match AsyncSessionWriter::create(&path) {
             Ok(writer) => {
                 self.writer = Some(writer);
                 self.session_path = Some(path);
@@ -536,20 +573,57 @@ impl StudioApp {
         }
     }
 
+    fn apply_capture_control(&mut self) {
+        let Some(handle) = self.capture.clone() else {
+            self.push_diagnostic("Start a device capture before applying a live filter".into());
+            return;
+        };
+        let generation = self.control_generation.saturating_add(1);
+        let total_latency_ns = (self.slow_threshold_ms.max(0.001) * 1_000_000.0) as u64;
+        let config = CaptureConfig {
+            generation,
+            mode: self.capture_mode,
+            filter: CaptureFilter {
+                match_all: self.filter_pid == 0
+                    && self.filter_operation.is_none()
+                    && self.filter_min_bytes == 0,
+                pids: (self.filter_pid != 0).then_some(self.filter_pid).into_iter().collect(),
+                operations: self.filter_operation.into_iter().collect(),
+                min_bytes: (self.filter_min_bytes != 0).then_some(self.filter_min_bytes),
+                ..CaptureFilter::default()
+            },
+            detail: DetailPolicy {
+                total_latency_ns,
+                ..DetailPolicy::default()
+            },
+            trigger: Some(android_ebpf_protocol::TriggerPolicy {
+                rule: "p99_total_latency".into(),
+                threshold: total_latency_ns,
+                consecutive_windows: 3,
+                deep_duration_ns: 10_000_000_000,
+                cooldown_ns: 10_000_000_000,
+                arming_timeout_ns: 5_000_000_000,
+            }),
+        };
+        if let Err(error) = config.validate(256) {
+            self.push_diagnostic(format!("invalid live capture config: {error}"));
+            return;
+        }
+        match handle.send_control(&CaptureControlCommand::ApplyConfig { config }) {
+            Ok(()) => {
+                self.control_status = format!("Applying generation {generation}…");
+            }
+            Err(error) => self.push_diagnostic(error),
+        }
+    }
+
     fn finish_session(&mut self) {
         if let Some(writer) = self.writer.take() {
-            let persisted = writer.persisted;
-            let rejected = writer.rejected + self.rejected_records;
-            let dropped = self.received_events.saturating_sub(persisted + rejected);
-            let footer = WireRecord::Footer {
-                schema_version: SCHEMA_VERSION,
-                events_seen: persisted + dropped + rejected,
-                events_persisted: persisted,
-                events_dropped: dropped,
-                events_rejected: rejected,
-                graceful: Some(self.agent_graceful == Some(true)),
-            };
-            if let Err(error) = writer.finish(&footer) {
+            if let Err(error) = writer.finish(
+                self.received_events,
+                self.rejected_records,
+                self.agent_graceful == Some(true),
+            ) {
                 self.push_diagnostic(error.to_string());
             }
         }
@@ -574,9 +648,18 @@ impl StudioApp {
         else {
             return;
         };
-        match session::load_analysis(&path) {
-            Ok(loaded) => {
-                self.recent = loaded
+        self.status = "Loading session in background…".into();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = session::load_analysis(&path)
+                .map(Box::new)
+                .map_err(|error| error.to_string());
+            let _ = tx.send(HostMessage::SessionLoaded(path, result));
+        });
+    }
+
+    fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
+        self.recent = loaded
                     .engine
                     .completed_ios()
                     .iter()
@@ -595,19 +678,21 @@ impl StudioApp {
                 self.received_events = loaded.accepted_events;
                 self.rejected_records = loaded.rejected_lines;
                 self.capabilities = loaded.capabilities;
+                self.latest_aggregate = loaded.latest_aggregate;
+                self.heavy_hitters = loaded.heavy_hitters;
+                self.triggers = loaded.triggers.into_iter().collect();
+                self.segments = loaded.segments.into_iter().collect();
+                self.stack_fingerprints = loaded.stack_fingerprints.into_iter().collect();
                 self.session_path = Some(path);
                 self.session_id = None;
                 self.log_directory = None;
                 self.host_diagnostic_writer = None;
-                self.status = match (loaded.integrity_ok, loaded.graceful) {
-                    (Some(true), Some(true)) => "Offline session loaded · integrity OK".into(),
-                    (Some(true), _) => "Offline partial session loaded".into(),
-                    (Some(false), _) => "Offline session loaded · integrity mismatch".into(),
-                    (None, _) => "Offline legacy/partial session loaded".into(),
-                };
-            }
-            Err(error) => self.push_diagnostic(error.to_string()),
-        }
+        self.status = match (loaded.integrity_ok, loaded.graceful) {
+            (Some(true), Some(true)) => "Offline session loaded · integrity OK".into(),
+            (Some(true), _) => "Offline partial session loaded".into(),
+            (Some(false), _) => "Offline session loaded · integrity mismatch".into(),
+            (None, _) => "Offline legacy/partial session loaded".into(),
+        };
     }
 
     fn open_comparison_session(&mut self) {
@@ -646,16 +731,19 @@ impl StudioApp {
         else {
             return;
         };
-        match session::export_csv(&session_path, &path) {
-            Ok(summary) => self.status = format!("Exported CSV and {}", summary.display()),
-            Err(error) => self.push_diagnostic(error.to_string()),
-        }
+        self.status = "Exporting CSV in background…".into();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result =
+                session::export_csv(&session_path, &path).map_err(|error| error.to_string());
+            let _ = tx.send(HostMessage::Exported(result));
+        });
     }
 
     fn drain_messages(&mut self) {
         let started = Instant::now();
         for _ in 0..MAX_MESSAGES_PER_FRAME {
-            if started.elapsed() >= Duration::from_millis(8) {
+            if started.elapsed() >= Duration::from_millis(4) {
                 break;
             }
             let Ok(message) = self.rx.try_recv() else {
@@ -685,6 +773,14 @@ impl StudioApp {
                 HostMessage::Status(status) => self.status = status,
                 HostMessage::Record(record) => self.ingest_record(record),
                 HostMessage::Diagnostic(value) => self.push_diagnostic_record(value),
+                HostMessage::SessionLoaded(path, Ok(loaded)) => {
+                    self.apply_loaded_session(path, *loaded);
+                }
+                HostMessage::SessionLoaded(_, Err(error)) => self.push_diagnostic(error),
+                HostMessage::Exported(Ok(summary)) => {
+                    self.status = format!("Exported CSV and {}", summary.display());
+                }
+                HostMessage::Exported(Err(error)) => self.push_diagnostic(error),
                 HostMessage::Ended(result) => {
                     if let Err(error) = result {
                         self.push_diagnostic(error);
@@ -718,8 +814,8 @@ impl StudioApp {
             self.agent_graceful = *graceful;
         }
         if !matches!(&record, WireRecord::Footer { .. })
-            && let Some(writer) = self.writer.as_mut()
-            && let Err(error) = writer.append(&record)
+            && let Some(writer) = self.writer.as_ref()
+            && let Err(error) = writer.append(record.clone())
         {
             self.rejected_records += 1;
             self.push_diagnostic(error.to_string());
@@ -780,6 +876,47 @@ impl StudioApp {
             WireRecord::Capabilities { capabilities, .. } => {
                 self.capabilities = Some(capabilities);
             }
+            WireRecord::Control {
+                acknowledgement, ..
+            } => {
+                self.control_generation = acknowledgement.active_generation;
+                self.control_status = match acknowledgement.outcome {
+                    ControlOutcome::Applied => {
+                        format!("Applied generation {}", acknowledgement.active_generation)
+                    }
+                    ControlOutcome::Rejected => format!(
+                        "Rejected · {}",
+                        acknowledgement.reason.as_deref().unwrap_or("unknown reason")
+                    ),
+                };
+            }
+            WireRecord::Aggregate { snapshot, .. } => {
+                self.latest_aggregate = Some(snapshot);
+            }
+            WireRecord::HeavyHitters { snapshot, .. } => {
+                self.heavy_hitters
+                    .retain(|current| current.dimension != snapshot.dimension);
+                self.heavy_hitters.push(snapshot);
+            }
+            WireRecord::Trigger { trigger, .. } => {
+                if self.triggers.len() == 100 {
+                    self.triggers.pop_front();
+                }
+                self.control_status = format!("Adaptive state · {:?}", trigger.to);
+                self.triggers.push_back(trigger);
+            }
+            WireRecord::Segment { segment, .. } => {
+                if self.segments.len() == 100 {
+                    self.segments.pop_front();
+                }
+                self.segments.push_back(segment);
+            }
+            WireRecord::StackFingerprint { fingerprint, .. } => {
+                if self.stack_fingerprints.len() == 1_000 {
+                    self.stack_fingerprints.pop_front();
+                }
+                self.stack_fingerprints.push_back(fingerprint);
+            }
             _ => {}
         }
     }
@@ -798,6 +935,11 @@ impl StudioApp {
         self.agent_graceful = None;
         self.capabilities = None;
         self.selected_pipeline_request = None;
+        self.latest_aggregate = None;
+        self.heavy_hitters.clear();
+        self.triggers.clear();
+        self.segments.clear();
+        self.stack_fingerprints.clear();
     }
 
     fn push_diagnostic(&mut self, value: String) {
@@ -905,30 +1047,62 @@ impl StudioApp {
 
     fn metrics_ui(&mut self, ui: &mut egui::Ui) {
         let summary = self.analysis_summary();
+        let completed = self
+            .latest_aggregate
+            .as_ref()
+            .map_or(summary.completed_ios, |snapshot| snapshot.counters.observed);
+        let (bytes_label, bytes_value) = self.latest_aggregate.as_ref().map_or_else(
+            || {
+                (
+                    "READ / WRITE",
+                    format!(
+                        "{} / {}",
+                        format_bytes(summary.read_bytes),
+                        format_bytes(summary.write_bytes)
+                    ),
+                )
+            },
+            |snapshot| ("TOTAL BYTES", format_bytes(snapshot.counters.bytes)),
+        );
+        let p50 = self
+            .latest_aggregate
+            .as_ref()
+            .and_then(|snapshot| aggregate_percentile(snapshot, HistogramMetric::TotalLatency, 50))
+            .or(summary.p50_latency_ns);
+        let p95 = self
+            .latest_aggregate
+            .as_ref()
+            .and_then(|snapshot| aggregate_percentile(snapshot, HistogramMetric::TotalLatency, 95))
+            .or(summary.p95_latency_ns);
+        let p99 = self
+            .latest_aggregate
+            .as_ref()
+            .and_then(|snapshot| aggregate_percentile(snapshot, HistogramMetric::TotalLatency, 99))
+            .or(summary.p99_latency_ns);
         ui.columns(3, |columns| {
             metric_card(
                 &mut columns[0],
                 "COMPLETED I/O",
-                summary.completed_ios.to_string(),
+                completed.to_string(),
                 "requests",
                 ACCENT,
             );
             metric_card(
                 &mut columns[1],
-                "READ / WRITE",
-                format!(
-                    "{} / {}",
-                    format_bytes(summary.read_bytes),
-                    format_bytes(summary.write_bytes)
-                ),
+                bytes_label,
+                bytes_value,
                 "transferred",
                 GREEN,
             );
             metric_card(
                 &mut columns[2],
                 "P95 LATENCY",
-                format_latency(summary.p95_latency_ns),
-                "end-to-end",
+                format_latency(p95),
+                if self.latest_aggregate.is_some() {
+                    "approximate bucket"
+                } else {
+                    "end-to-end"
+                },
                 AMBER,
             );
         });
@@ -937,15 +1111,23 @@ impl StudioApp {
             metric_card(
                 &mut columns[0],
                 "P50 LATENCY",
-                format_latency(summary.p50_latency_ns),
-                "median",
+                format_latency(p50),
+                if self.latest_aggregate.is_some() {
+                    "approximate bucket"
+                } else {
+                    "median"
+                },
                 GREEN,
             );
             metric_card(
                 &mut columns[1],
                 "P99 LATENCY",
-                format_latency(summary.p99_latency_ns),
-                "tail",
+                format_latency(p99),
+                if self.latest_aggregate.is_some() {
+                    "approximate bucket"
+                } else {
+                    "tail"
+                },
                 RED,
             );
             metric_card(
@@ -1152,6 +1334,27 @@ impl StudioApp {
             "Overview",
             "What happened, how trustworthy the capture is, and where to investigate next.",
         );
+        if let Some(snapshot) = &self.latest_aggregate {
+            card_frame().show(ui, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Kernel aggregate · {} observed · {} detailed · {} fast suppressed",
+                        snapshot.counters.observed,
+                        snapshot.counters.detail_emitted,
+                        snapshot.counters.suppressed_fast
+                    ))
+                    .color(GREEN),
+                );
+                ui.label(
+                    RichText::new(
+                        "Top KPIs use approximate histogram buckets; tables below describe retained detail.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
+            });
+            ui.add_space(10.0);
+        }
         ui.columns(4, |columns| {
             summary_card(
                 &mut columns[0],
@@ -1303,6 +1506,92 @@ impl StudioApp {
             );
         });
         ui.add_space(18.0);
+        if !self.heavy_hitters.is_empty() {
+            section_header(
+                ui,
+                "Live Top Offenders",
+                "Bounded candidates ranked by cumulative latency; coverage and evictions expose approximation limits.",
+            );
+            ui.columns(self.heavy_hitters.len().min(2), |columns| {
+                for (column, snapshot) in columns.iter_mut().zip(&self.heavy_hitters) {
+                    card_frame().show(column, |ui| {
+                        ui.strong(format!("{:?}", snapshot.dimension));
+                        ui.label(
+                            RichText::new(format!(
+                                "coverage {:.1}% · {} key evictions",
+                                ratio(snapshot.covered_metric, snapshot.total_metric),
+                                snapshot.evicted_keys
+                            ))
+                            .small()
+                            .color(MUTED),
+                        );
+                        for entry in snapshot.entries.iter().take(10) {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(&entry.key)
+                                        .monospace()
+                                        .color(TEXT),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(format_duration(entry.cumulative_latency_ns));
+                                    },
+                                );
+                            });
+                        }
+                    });
+                }
+            });
+            ui.add_space(18.0);
+        }
+        if !self.triggers.is_empty() || !self.segments.is_empty() || !self.stack_fingerprints.is_empty() {
+            section_header(
+                ui,
+                "Adaptive capture evidence",
+                "Trigger transitions, retained flight-recorder windows, and Deep-mode stack cohorts.",
+            );
+            ui.columns(3, |columns| {
+                summary_card(
+                    &mut columns[0],
+                    "State transitions",
+                    self.triggers.len().to_string(),
+                );
+                summary_card(
+                    &mut columns[1],
+                    "Retained segments",
+                    self.segments.len().to_string(),
+                );
+                summary_card(
+                    &mut columns[2],
+                    "Stack cohorts",
+                    self.stack_fingerprints.len().to_string(),
+                );
+            });
+            if let Some(segment) = self.segments.back() {
+                card_frame().show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Latest segment #{} · {} retained · {} evictions",
+                            segment.segment_id,
+                            format_bytes(segment.retained_bytes),
+                            segment.evicted_records
+                        ))
+                        .color(TEXT),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "requested pre-window {} · actual pre-window {}",
+                            format_duration(segment.trigger_ts_ns.saturating_sub(segment.requested_start_ts_ns)),
+                            format_duration(segment.trigger_ts_ns.saturating_sub(segment.retained_start_ts_ns))
+                        ))
+                        .small()
+                        .color(MUTED),
+                    );
+                });
+            }
+            ui.add_space(18.0);
+        }
         section_header(
             ui,
             "Workload breakdown",
@@ -2240,6 +2529,87 @@ impl eframe::App for StudioApp {
                             }
                         });
                 });
+                ui.add_space(6.0);
+                ui.collapsing("LIVE FILTER & MODE", |ui| {
+                    egui::ComboBox::from_id_salt("capture-mode")
+                        .selected_text(capture_mode_label(self.capture_mode))
+                        .width(190.0)
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                CaptureMode::Basic,
+                                CaptureMode::Balanced,
+                                CaptureMode::Deep,
+                                CaptureMode::RawAll,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.capture_mode,
+                                    mode,
+                                    capture_mode_label(mode),
+                                );
+                            }
+                        });
+                    ui.horizontal(|ui| {
+                        ui.label("PID (0 = all)");
+                        ui.add(egui::DragValue::new(&mut self.filter_pid).range(0..=u32::MAX));
+                    });
+                    egui::ComboBox::from_id_salt("filter-operation")
+                        .selected_text(
+                            self.filter_operation
+                                .map_or("All operations".into(), |value| format!("{value:?}")),
+                        )
+                        .width(190.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.filter_operation,
+                                None,
+                                "All operations",
+                            );
+                            for operation in [IoOperation::Read, IoOperation::Write] {
+                                ui.selectable_value(
+                                    &mut self.filter_operation,
+                                    Some(operation),
+                                    format!("{operation:?}"),
+                                );
+                            }
+                        });
+                    ui.horizontal(|ui| {
+                        ui.label("Min bytes");
+                        ui.add(
+                            egui::DragValue::new(&mut self.filter_min_bytes)
+                                .range(0..=u32::MAX),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Slow I/O ms");
+                        ui.add(
+                            egui::DragValue::new(&mut self.slow_threshold_ms)
+                                .speed(0.1)
+                                .range(0.001..=60_000.0),
+                        );
+                    });
+                    if ui
+                        .add_enabled(
+                            self.capture.is_some(),
+                            egui::Button::new("Apply live config")
+                                .min_size(egui::vec2(190.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        self.apply_capture_control();
+                    }
+                    ui.label(
+                        RichText::new(&self.control_status)
+                            .size(10.0)
+                            .color(MUTED),
+                    );
+                    if self.capture_mode == CaptureMode::RawAll {
+                        ui.label(
+                            RichText::new("RawAll can generate high event and UI load")
+                                .size(10.0)
+                                .color(AMBER),
+                        );
+                    }
+                });
                 let can_start = self
                     .preflight
                     .as_ref()
@@ -2410,6 +2780,28 @@ impl eframe::App for StudioApp {
                 });
             });
     }
+}
+
+fn capture_mode_label(mode: CaptureMode) -> &'static str {
+    match mode {
+        CaptureMode::Basic => "Basic · aggregates only",
+        CaptureMode::Balanced => "Balanced · tail + sample",
+        CaptureMode::Deep => "Deep · pipeline/context",
+        CaptureMode::RawAll => "RawAll · every event",
+    }
+}
+
+fn aggregate_percentile(
+    snapshot: &AggregateSnapshot,
+    metric: HistogramMetric,
+    percentile: u8,
+) -> Option<u64> {
+    snapshot
+        .histograms
+        .iter()
+        .find(|(candidate, _)| *candidate == metric)
+        .and_then(|(_, histogram)| histogram.percentile_range(percentile))
+        .map(|(lower, upper)| upper.unwrap_or(lower))
 }
 
 fn apply_theme(ctx: &egui::Context) {
@@ -2727,6 +3119,7 @@ fn pipeline_layer_label(value: PipelineLayer) -> &'static str {
         PipelineLayer::BlockDevice => "Kernel / Block Device",
         PipelineLayer::Scsi => "Kernel / SCSI",
         PipelineLayer::Ufs => "Kernel / UFS",
+        PipelineLayer::SchedulerContext => "Scheduler Context",
         PipelineLayer::UicContext => "UIC Context",
     }
 }
@@ -2743,6 +3136,7 @@ fn pipeline_layer_y(value: PipelineLayer) -> f64 {
         PipelineLayer::BlockDevice => 4.0,
         PipelineLayer::Scsi => 3.0,
         PipelineLayer::Ufs => 2.0,
+        PipelineLayer::SchedulerContext => 1.5,
         PipelineLayer::UicContext => 1.0,
     }
 }
@@ -2759,6 +3153,7 @@ fn pipeline_layer_color(value: PipelineLayer) -> Color32 {
         PipelineLayer::BlockDevice => Color32::from_rgb(255, 153, 85),
         PipelineLayer::Scsi => Color32::from_rgb(235, 118, 137),
         PipelineLayer::Ufs => Color32::from_rgb(190, 126, 255),
+        PipelineLayer::SchedulerContext => Color32::from_rgb(120, 180, 205),
         PipelineLayer::UicContext => Color32::from_rgb(157, 166, 184),
     }
 }

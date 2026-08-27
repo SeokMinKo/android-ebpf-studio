@@ -2,18 +2,23 @@
 #![no_main]
 
 use android_ebpf_types::{
-    FileStart, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO,
-    KIND_PIPELINE, KernelEvent, LAYER_FILESYSTEM, LAYER_SCSI, LAYER_UFS, LAYER_UIC, OFFSET_MISSING,
-    OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END, PHASE_INSTANT,
-    PipelineTraceLayout, RawSyscallLayout, TraceLayout,
+    BlockStart, FileStart, FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT,
+    KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE, KernelAggregate, KernelEvent, LAYER_FILESYSTEM,
+    LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS, LAYER_UIC, MODE_BALANCED, MODE_BASIC, MODE_DEEP,
+    MODE_RAW_ALL,
+    OFFSET_MISSING, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END,
+    PHASE_INSTANT, PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE,
+    TraceLayout,
 };
 use aya_ebpf::{
     helpers::{
-        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_smp_processor_id, bpf_ktime_get_ns,
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
+        bpf_get_smp_processor_id, bpf_ktime_get_ns,
     },
     macros::{map, tracepoint},
-    maps::{Array, HashMap, RingBuf},
+    maps::{Array, HashMap, PerCpuArray, RingBuf, StackTrace},
     programs::TracePointContext,
+    programs::tracing::StackIdContext,
 };
 
 #[map]
@@ -47,21 +52,51 @@ static FS_DONE_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0
 static FILE_STARTS: HashMap<u64, FileStart> = HashMap::with_max_entries(32_768, 0);
 
 #[map]
+static FILTER_ACTIVE: Array<u64> = Array::with_max_entries(1, 0);
+
+#[map]
+static FILTER_CONFIGS: HashMap<u64, RawFilterConfig> = HashMap::with_max_entries(64, 0);
+
+#[map]
+static FILTER_PIDS: HashMap<FilterKey, u8> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static FILTER_TIDS: HashMap<FilterKey, u8> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static FILTER_UIDS: HashMap<FilterKey, u8> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static FILTER_DEVICES: HashMap<FilterKey, u8> = HashMap::with_max_entries(4096, 0);
+
+#[map]
+static FILTER_OPERATIONS: HashMap<FilterKey, u8> = HashMap::with_max_entries(256, 0);
+
+#[map]
+static BLOCK_STARTS: HashMap<u64, BlockStart> = HashMap::with_max_entries(65_536, 0);
+
+#[map]
+static AGGREGATES: PerCpuArray<KernelAggregate> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static STACK_TRACES: StackTrace = StackTrace::with_max_entries(16_384, 0);
+
+#[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(16 * 1024 * 1024, 0);
 
 #[tracepoint]
 pub fn block_rq_issue(ctx: TracePointContext) -> u32 {
-    emit(ctx, KIND_BLOCK_ISSUE, &ISSUE_LAYOUT).unwrap_or(0)
+    handle_block(ctx, KIND_BLOCK_ISSUE, &ISSUE_LAYOUT).unwrap_or(0)
 }
 
 #[tracepoint]
 pub fn block_rq_complete(ctx: TracePointContext) -> u32 {
-    emit(ctx, KIND_BLOCK_COMPLETE, &COMPLETE_LAYOUT).unwrap_or(0)
+    handle_block(ctx, KIND_BLOCK_COMPLETE, &COMPLETE_LAYOUT).unwrap_or(0)
 }
 
 #[tracepoint]
 pub fn block_rq_insert(ctx: TracePointContext) -> u32 {
-    emit(ctx, KIND_BLOCK_INSERT, &INSERT_LAYOUT).unwrap_or(0)
+    handle_block(ctx, KIND_BLOCK_INSERT, &INSERT_LAYOUT).unwrap_or(0)
 }
 
 #[tracepoint]
@@ -112,8 +147,33 @@ pub fn fs_context(ctx: TracePointContext) -> u32 {
     emit_context(ctx, LAYER_FILESYSTEM).unwrap_or(0)
 }
 
+#[tracepoint]
+pub fn sched_context(ctx: TracePointContext) -> u32 {
+    emit_context(ctx, LAYER_SCHEDULER).unwrap_or(0)
+}
+
 fn emit_context(_ctx: TracePointContext, layer: u8) -> Result<u32, i32> {
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    if config.mode < MODE_DEEP {
+        return Ok(0);
+    }
     let pid_tgid = bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    if !matches_filter(
+        pid,
+        tid,
+        bpf_get_current_uid_gid() as u32,
+        0,
+        0,
+        OP_OTHER,
+    ) {
+        return Ok(0);
+    }
     let event = KernelEvent {
         ts_ns: unsafe { bpf_ktime_get_ns() },
         start_ts_ns: 0,
@@ -121,11 +181,13 @@ fn emit_context(_ctx: TracePointContext, layer: u8) -> Result<u32, i32> {
         sector: 0,
         requested_bytes: 0,
         return_value: 0,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
         device: 0,
         sectors: 0,
         bytes: 0,
-        pid: (pid_tgid >> 32) as u32,
-        tid: pid_tgid as u32,
+        pid,
+        tid,
         cpu: unsafe { bpf_get_smp_processor_id() },
         status: 0,
         fd: -1,
@@ -137,9 +199,7 @@ fn emit_context(_ctx: TracePointContext, layer: u8) -> Result<u32, i32> {
         reserved: 0,
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
     };
-    let mut entry = EVENTS.reserve::<KernelEvent>(0).ok_or(2_i32)?;
-    entry.write(event);
-    entry.submit(0);
+    submit_event(event, config.generation)?;
     Ok(0)
 }
 
@@ -171,6 +231,14 @@ fn emit_pipeline(
     layouts: &Array<PipelineTraceLayout>,
     exact: bool,
 ) -> Result<u32, i32> {
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    if config.mode < MODE_DEEP {
+        return Ok(0);
+    }
     let layout = layouts.get(0).ok_or(1_i32)?;
     let request_id = if layout.key_size == 8 {
         read_u64(&ctx, layout.key_offset)?
@@ -198,6 +266,12 @@ fn emit_pipeline(
         read_i32(&ctx, layout.status_offset)?
     };
     let pid_tgid = bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    let uid = bpf_get_current_uid_gid() as u32;
+    if !matches_filter(pid, tid, uid, 0, bytes, operation) {
+        return Ok(0);
+    }
     let event = KernelEvent {
         ts_ns: unsafe { bpf_ktime_get_ns() },
         start_ts_ns: 0,
@@ -205,11 +279,13 @@ fn emit_pipeline(
         sector,
         requested_bytes: 0,
         return_value: 0,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
         device: 0,
         sectors: 0,
         bytes,
-        pid: (pid_tgid >> 32) as u32,
-        tid: pid_tgid as u32,
+        pid,
+        tid,
         cpu: unsafe { bpf_get_smp_processor_id() },
         status,
         fd: -1,
@@ -222,13 +298,15 @@ fn emit_pipeline(
             | (u8::from(layout.operation_offset != OFFSET_MISSING) << 1),
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
     };
-    let mut entry = EVENTS.reserve::<KernelEvent>(0).ok_or(2_i32)?;
-    entry.write(event);
-    entry.submit(0);
+    submit_event(event, config.generation)?;
     Ok(0)
 }
 
-fn emit(ctx: TracePointContext, kind: u8, layouts: &Array<TraceLayout>) -> Result<u32, i32> {
+fn handle_block(
+    ctx: TracePointContext,
+    kind: u8,
+    layouts: &Array<TraceLayout>,
+) -> Result<u32, i32> {
     let layout = layouts.get(0).ok_or(1_i32)?;
     let device = read_u32(&ctx, layout.dev_offset)?;
     let sector = read_u64(&ctx, layout.sector_offset)?;
@@ -254,18 +332,24 @@ fn emit(ctx: TracePointContext, kind: u8, layouts: &Array<TraceLayout>) -> Resul
         read_i32(&ctx, layout.status_offset)?
     };
     let pid_tgid = bpf_get_current_pid_tgid();
-    let event = KernelEvent {
-        ts_ns: unsafe { bpf_ktime_get_ns() },
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    let uid = bpf_get_current_uid_gid() as u32;
+    let ts_ns = unsafe { bpf_ktime_get_ns() };
+    let mut event = KernelEvent {
+        ts_ns,
         start_ts_ns: 0,
         request_id,
         sector,
         requested_bytes: 0,
         return_value: 0,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
         device,
         sectors,
         bytes,
-        pid: (pid_tgid >> 32) as u32,
-        tid: pid_tgid as u32,
+        pid,
+        tid,
         cpu: unsafe { bpf_get_smp_processor_id() },
         status,
         fd: -1,
@@ -277,10 +361,286 @@ fn emit(ctx: TracePointContext, kind: u8, layouts: &Array<TraceLayout>) -> Resul
         reserved: 0,
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
     };
-    let mut entry = EVENTS.reserve::<KernelEvent>(0).ok_or(2_i32)?;
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    match kind {
+        KIND_BLOCK_INSERT => {
+            if !matches_filter(pid, tid, uid, device, bytes, operation) {
+                aggregate_filter_suppressed(config.generation);
+                return Ok(0);
+            }
+            let start = BlockStart {
+                insert_ts_ns: ts_ns,
+                issue_ts_ns: 0,
+                request_id,
+                sector,
+                device,
+                sectors,
+                bytes,
+                pid,
+                tid,
+                cpu: event.cpu,
+                operation,
+                correlation_exact,
+                comm: event.comm,
+            };
+            if BLOCK_STARTS.insert(&request_id, &start, 0).is_err() {
+                aggregate_map_failure(config.generation);
+            }
+            if config.mode == MODE_DEEP || config.mode == MODE_RAW_ALL {
+                submit_event(event, config.generation)?;
+            }
+        }
+        KIND_BLOCK_ISSUE => {
+            if !matches_filter(pid, tid, uid, device, bytes, operation) {
+                let _ = BLOCK_STARTS.remove(&request_id);
+                aggregate_filter_suppressed(config.generation);
+                return Ok(0);
+            }
+            let prior = unsafe { BLOCK_STARTS.get(&request_id) }.copied();
+            if prior.is_some_and(|value| value.issue_ts_ns != 0) {
+                aggregate_key_reused(config.generation);
+            }
+            let start = BlockStart {
+                insert_ts_ns: prior.map_or(0, |value| value.insert_ts_ns),
+                issue_ts_ns: ts_ns,
+                request_id,
+                sector,
+                device,
+                sectors,
+                bytes,
+                pid,
+                tid,
+                cpu: event.cpu,
+                operation,
+                correlation_exact,
+                comm: event.comm,
+            };
+            if BLOCK_STARTS.insert(&request_id, &start, 0).is_err() {
+                aggregate_map_failure(config.generation);
+                return Ok(0);
+            }
+            aggregate_filter_passed(config.generation);
+            if config.mode == MODE_DEEP || config.mode == MODE_RAW_ALL {
+                submit_event(event, config.generation)?;
+            }
+        }
+        KIND_BLOCK_COMPLETE => {
+            let Some(start) = unsafe { BLOCK_STARTS.get(&request_id) }.copied() else {
+                aggregate_expired(config.generation);
+                return Ok(0);
+            };
+            let _ = BLOCK_STARTS.remove(&request_id);
+            if start.issue_ts_ns == 0 || ts_ns < start.issue_ts_ns {
+                aggregate_expired(config.generation);
+                return Ok(0);
+            }
+            let device_latency = ts_ns.saturating_sub(start.issue_ts_ns);
+            let queue_latency = if start.insert_ts_ns == 0 {
+                0
+            } else {
+                start.issue_ts_ns.saturating_sub(start.insert_ts_ns)
+            };
+            let total_latency = if start.insert_ts_ns == 0 {
+                device_latency
+            } else {
+                ts_ns.saturating_sub(start.insert_ts_ns)
+            };
+            aggregate_completion(
+                config.generation,
+                ts_ns,
+                start.bytes,
+                status,
+                total_latency,
+                queue_latency,
+                device_latency,
+            );
+            let sampled = config.sample_rate_permyriad != 0
+                && request_id % 10_000 < config.sample_rate_permyriad as u64;
+            let slow = total_latency >= config.total_latency_ns
+                || (queue_latency != 0 && queue_latency >= config.queue_latency_ns)
+                || device_latency >= config.device_latency_ns;
+            let forced_error = config.include_errors != 0 && status != 0;
+            let detail = match config.mode {
+                MODE_BASIC => false,
+                MODE_BALANCED => slow || sampled || forced_error,
+                MODE_DEEP | MODE_RAW_ALL => true,
+                _ => false,
+            };
+            if detail {
+                aggregate_detail(config.generation, sampled, forced_error);
+                if config.mode == MODE_DEEP {
+                    event.start_ts_ns = if start.insert_ts_ns == 0 {
+                        start.issue_ts_ns
+                    } else {
+                        start.insert_ts_ns
+                    };
+                    event.kernel_stack_id = ctx
+                        .get_stackid(&STACK_TRACES, 0)
+                        .map_or(STACK_ID_UNAVAILABLE, |value| value as u64);
+                }
+                if config.mode == MODE_BALANCED {
+                    if start.insert_ts_ns != 0 {
+                        submit_event(block_event_from_start(&start, KIND_BLOCK_INSERT), config.generation)?;
+                    }
+                    submit_event(block_event_from_start(&start, KIND_BLOCK_ISSUE), config.generation)?;
+                }
+                submit_event(event, config.generation)?;
+            } else {
+                aggregate_suppressed_fast(config.generation);
+            }
+        }
+        _ => {}
+    }
+    Ok(0)
+}
+
+fn block_event_from_start(start: &BlockStart, kind: u8) -> KernelEvent {
+    KernelEvent {
+        ts_ns: if kind == KIND_BLOCK_INSERT {
+            start.insert_ts_ns
+        } else {
+            start.issue_ts_ns
+        },
+        start_ts_ns: 0,
+        request_id: start.request_id,
+        sector: start.sector,
+        requested_bytes: 0,
+        return_value: 0,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
+        device: start.device,
+        sectors: start.sectors,
+        bytes: start.bytes,
+        pid: start.pid,
+        tid: start.tid,
+        cpu: start.cpu,
+        status: 0,
+        fd: -1,
+        kind,
+        operation: start.operation,
+        correlation_exact: start.correlation_exact,
+        pipeline_layer: 0,
+        pipeline_phase: 0,
+        reserved: 0,
+        comm: start.comm,
+    }
+}
+
+fn submit_event(event: KernelEvent, generation: u64) -> Result<(), i32> {
+    let Some(mut entry) = EVENTS.reserve::<KernelEvent>(0) else {
+        aggregate_reserve_failure(generation);
+        return Err(2_i32);
+    };
     entry.write(event);
     entry.submit(0);
-    Ok(0)
+    Ok(())
+}
+
+fn aggregate_mut(generation: u64) -> Option<&'static mut KernelAggregate> {
+    let pointer = AGGREGATES.get_ptr_mut(0)?;
+    let aggregate = unsafe { &mut *pointer };
+    if aggregate.generation != generation {
+        *aggregate = KernelAggregate {
+            generation,
+            ..KernelAggregate::default()
+        };
+    }
+    Some(aggregate)
+}
+
+fn aggregate_filter_passed(generation: u64) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.filter_passed = value.filter_passed.saturating_add(1);
+    }
+}
+
+fn aggregate_filter_suppressed(generation: u64) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.filter_suppressed = value.filter_suppressed.saturating_add(1);
+    }
+}
+
+fn aggregate_map_failure(generation: u64) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.map_insert_failures = value.map_insert_failures.saturating_add(1);
+    }
+}
+
+fn aggregate_key_reused(generation: u64) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.key_reused = value.key_reused.saturating_add(1);
+    }
+}
+
+fn aggregate_expired(generation: u64) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.expired = value.expired.saturating_add(1);
+    }
+}
+
+fn aggregate_reserve_failure(generation: u64) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.ring_reserve_failures = value.ring_reserve_failures.saturating_add(1);
+    }
+}
+
+fn aggregate_suppressed_fast(generation: u64) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.suppressed_fast = value.suppressed_fast.saturating_add(1);
+    }
+}
+
+fn aggregate_detail(generation: u64, sampled: bool, forced_error: bool) {
+    if let Some(value) = aggregate_mut(generation) {
+        value.detail_emitted = value.detail_emitted.saturating_add(1);
+        value.sampled = value.sampled.saturating_add(sampled as u64);
+        value.forced_error = value.forced_error.saturating_add(forced_error as u64);
+    }
+}
+
+fn aggregate_completion(
+    generation: u64,
+    ts_ns: u64,
+    bytes: u32,
+    status: i32,
+    total_latency: u64,
+    queue_latency: u64,
+    device_latency: u64,
+) {
+    if let Some(value) = aggregate_mut(generation) {
+        if value.first_ts_ns == 0 {
+            value.first_ts_ns = ts_ns;
+        }
+        value.last_ts_ns = ts_ns;
+        value.observed = value.observed.saturating_add(1);
+        value.bytes = value.bytes.saturating_add(bytes as u64);
+        value.failed = value.failed.saturating_add((status != 0) as u64);
+        value.total_latency[histogram_index(total_latency)] =
+            value.total_latency[histogram_index(total_latency)].saturating_add(1);
+        value.queue_latency[histogram_index(queue_latency)] =
+            value.queue_latency[histogram_index(queue_latency)].saturating_add(1);
+        value.device_latency[histogram_index(device_latency)] =
+            value.device_latency[histogram_index(device_latency)].saturating_add(1);
+        value.io_size[histogram_index(bytes as u64)] =
+            value.io_size[histogram_index(bytes as u64)].saturating_add(1);
+    }
+}
+
+fn histogram_index(value: u64) -> usize {
+    let index = if value == 0 {
+        0
+    } else {
+        63_u32.saturating_sub(value.leading_zeros()) as usize
+    };
+    if index >= HISTOGRAM_BUCKETS {
+        HISTOGRAM_BUCKETS - 1
+    } else {
+        index
+    }
 }
 
 fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
@@ -295,20 +655,89 @@ fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
     let fd = read_i64(&ctx, layout.enter_args_offset)? as i32;
     let requested_bytes = read_u64_at(&ctx, layout.enter_args_offset as usize + 16)?;
     let pid_tgid = bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    let uid = bpf_get_current_uid_gid() as u32;
+    if !matches_filter(
+        pid,
+        tid,
+        uid,
+        0,
+        requested_bytes.min(u32::MAX as u64) as u32,
+        operation,
+    ) {
+        return Ok(0);
+    }
     let start = FileStart {
         start_ts_ns: unsafe { bpf_ktime_get_ns() },
         requested_bytes,
         fd,
         operation,
         reserved: [0; 3],
-        pid: (pid_tgid >> 32) as u32,
-        tid: pid_tgid as u32,
+        pid,
+        tid,
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
     };
     FILE_STARTS
         .insert(&pid_tgid, &start, 0)
         .map_err(|_| 2_i32)?;
     Ok(0)
+}
+
+fn active_filter() -> Option<RawFilterConfig> {
+    let generation = unsafe { FILTER_ACTIVE.get(0) }.copied()?;
+    if generation == 0 {
+        return None;
+    }
+    unsafe { FILTER_CONFIGS.get(&generation) }.copied()
+}
+
+fn matches_filter(
+    pid: u32,
+    tid: u32,
+    uid: u32,
+    device: u32,
+    bytes: u32,
+    operation: u8,
+) -> bool {
+    let Some(config) = active_filter() else {
+        return true;
+    };
+    if config.min_bytes != 0 && bytes < config.min_bytes {
+        return false;
+    }
+    if config.max_bytes != 0 && bytes > config.max_bytes {
+        return false;
+    }
+    if config.pid_count != 0 && !filter_contains(&FILTER_PIDS, config.generation, pid as u64) {
+        return false;
+    }
+    if config.tid_count != 0 && !filter_contains(&FILTER_TIDS, config.generation, tid as u64) {
+        return false;
+    }
+    if config.uid_count != 0 && !filter_contains(&FILTER_UIDS, config.generation, uid as u64) {
+        return false;
+    }
+    if config.device_count != 0
+        && !filter_contains(&FILTER_DEVICES, config.generation, device as u64)
+    {
+        return false;
+    }
+    if config.operation_count != 0
+        && !filter_contains(
+            &FILTER_OPERATIONS,
+            config.generation,
+            operation as u64,
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn filter_contains(map: &HashMap<FilterKey, u8>, generation: u64, value: u64) -> bool {
+    let key = FilterKey { generation, value };
+    unsafe { map.get(&key) }.is_some()
 }
 
 fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
@@ -318,13 +747,48 @@ fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
         .copied()
         .ok_or(0_i32)?;
     let _ = FILE_STARTS.remove(&pid_tgid);
+    let ts_ns = unsafe { bpf_ktime_get_ns() };
+    let return_value = read_i64(&ctx, layout.exit_ret_offset)?;
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    let latency = ts_ns.saturating_sub(start.start_ts_ns);
+    let sampled = config.sample_rate_permyriad != 0
+        && pid_tgid % 10_000 < config.sample_rate_permyriad as u64;
+    let detail = match config.mode {
+        MODE_BASIC => false,
+        MODE_BALANCED => {
+            latency >= config.total_latency_ns
+                || sampled
+                || (config.include_errors != 0 && return_value < 0)
+        }
+        MODE_DEEP | MODE_RAW_ALL => true,
+        _ => false,
+    };
+    if !detail {
+        return Ok(0);
+    }
     let event = KernelEvent {
-        ts_ns: unsafe { bpf_ktime_get_ns() },
+        ts_ns,
         start_ts_ns: start.start_ts_ns,
         request_id: pid_tgid,
         sector: 0,
         requested_bytes: start.requested_bytes,
-        return_value: read_i64(&ctx, layout.exit_ret_offset)?,
+        return_value,
+        kernel_stack_id: if config.mode == MODE_DEEP {
+            ctx.get_stackid(&STACK_TRACES, 0)
+                .map_or(STACK_ID_UNAVAILABLE, |value| value as u64)
+        } else {
+            STACK_ID_UNAVAILABLE
+        },
+        user_stack_id: if config.mode == MODE_DEEP {
+            ctx.get_stackid(&STACK_TRACES, 1 << 8)
+                .map_or(STACK_ID_UNAVAILABLE, |value| value as u64)
+        } else {
+            STACK_ID_UNAVAILABLE
+        },
         device: 0,
         sectors: 0,
         bytes: 0,
@@ -341,9 +805,7 @@ fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
         reserved: 0,
         comm: start.comm,
     };
-    let mut entry = EVENTS.reserve::<KernelEvent>(0).ok_or(2_i32)?;
-    entry.write(event);
-    entry.submit(0);
+    submit_event(event, config.generation)?;
     Ok(0)
 }
 

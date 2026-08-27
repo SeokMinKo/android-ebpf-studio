@@ -328,7 +328,7 @@ impl AdbClient {
         ]);
         Ok(Command::new(spec.program)
             .args(spec.args)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?)

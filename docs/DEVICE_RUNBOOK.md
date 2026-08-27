@@ -53,6 +53,8 @@ stdout은 measurement NDJSON 전용이고 stderr는 structured diagnostic JSONL 
 | missing block format | `/sys/kernel/tracing/events/block` | kernel config/vendor trace event 차이입니다. full mode를 중단합니다. |
 | verifier rejection | agent stderr, `dmesg` | layout, helper, map 또는 kernel BPF feature 불일치입니다. object/profile을 수정합니다. |
 | high userspace/kernel drops | `health` records | probe 축소, ring buffer 확대 또는 host 처리율 개선 후 새 session을 시작합니다. |
+| UI가 밀리거나 detail이 너무 많음 | Summary aggregate/detail/suppressed, mode | `Balanced` 또는 `Basic`을 사용하고 PID/op/size filter를 적용합니다. 세션 write/load/export는 background에서 수행됩니다. |
+| Stack cohort가 없음 | capability의 `stack_traces`, `STACK_CAPTURE_HEALTH` | Deep mode가 아니거나 stack helper/map lookup이 장비 커널에서 실패했습니다. raw address를 임의 복원하지 않습니다. |
 | p95/p99가 비정상적으로 0 | footer/rejected/uncorrelated | 실제 0으로 간주하지 말고 correlation과 record rejection을 확인합니다. |
 | Queue latency가 모두 없음 | `block_rq_insert/format`, capability | 커널이 insert tracepoint를 노출하지 않거나 attach가 실패했습니다. |
 | File I/O가 없음 | `raw_syscalls/*/format`, capability | syscall tracepoint가 없거나 해당 수집 동안 read/write가 관측되지 않았습니다. |
