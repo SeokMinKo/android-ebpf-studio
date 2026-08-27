@@ -9,10 +9,10 @@ use std::{
 
 use android_ebpf_protocol::{
     AggregateCounters, AggregateSnapshot, AttributionConfidence, BlockComplete, BlockInsert,
-    BlockIssue, CorrelationConfidence, FileIo, HeavyHitterDimension, HeavyHitterEntry,
-    HeavyHitterMetric, HeavyHitterSnapshot, Histogram, HistogramMetric, IoOperation, PipelineLayer,
-    PipelineObservation, PipelinePhase, SCHEMA_VERSION, SegmentRecord, StackFingerprintRecord,
-    StackKind, StorageEvent, TriggerRecord, CaptureState, WireRecord,
+    BlockIssue, CaptureState, CorrelationConfidence, FileIo, HeavyHitterDimension,
+    HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram, HistogramMetric,
+    IoOperation, PipelineLayer, PipelineObservation, PipelinePhase, SCHEMA_VERSION, SegmentRecord,
+    StackFingerprintRecord, StackKind, StorageEvent, TriggerRecord, WireRecord,
 };
 use crossbeam_channel::Sender;
 

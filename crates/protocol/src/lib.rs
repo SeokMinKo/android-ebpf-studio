@@ -992,7 +992,9 @@ fn has_duplicates<T: Eq + std::hash::Hash>(values: &[T]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum CaptureControlCommand {
-    ApplyConfig { config: CaptureConfig },
+    ApplyConfig {
+        config: CaptureConfig,
+    },
     SetMode {
         generation: u64,
         mode: CaptureMode,
@@ -1059,7 +1061,9 @@ impl Histogram {
     }
 
     pub fn record(&mut self, value: u64) {
-        let index = self.boundaries.partition_point(|boundary| *boundary < value);
+        let index = self
+            .boundaries
+            .partition_point(|boundary| *boundary < value);
         self.counts[index] = self.counts[index].saturating_add(1);
     }
 
@@ -1224,9 +1228,7 @@ impl AdaptiveController {
         if policy.consecutive_windows == 0 {
             return Err(TriggerPolicyError::ZeroConsecutiveWindows);
         }
-        if policy.deep_duration_ns == 0
-            || policy.cooldown_ns == 0
-            || policy.arming_timeout_ns == 0
+        if policy.deep_duration_ns == 0 || policy.cooldown_ns == 0 || policy.arming_timeout_ns == 0
         {
             return Err(TriggerPolicyError::ZeroDuration);
         }
@@ -1511,9 +1513,7 @@ impl SessionReader {
                 Ok(WireRecord::Control {
                     acknowledgement, ..
                 }) => loaded.controls.push(acknowledgement),
-                Ok(WireRecord::Aggregate { snapshot, .. }) => {
-                    loaded.aggregates.push(snapshot)
-                }
+                Ok(WireRecord::Aggregate { snapshot, .. }) => loaded.aggregates.push(snapshot),
                 Ok(WireRecord::HeavyHitters { snapshot, .. }) => {
                     loaded.heavy_hitters.push(snapshot)
                 }
@@ -2357,17 +2357,19 @@ impl AnalysisEngine {
         summary.category_summaries = self
             .categories
             .iter()
-            .map(|(&(operation, access_pattern, size_class), value)| CategorySummary {
-                operation,
-                access_pattern,
-                size_class,
-                completed_ios: value.completed_ios,
-                bytes: value.bytes,
-                average_chunk_bytes: value.bytes / value.completed_ios.max(1),
-                p50_latency_ns: histogram_percentile_upper(&value.histogram, 50),
-                p95_latency_ns: histogram_percentile_upper(&value.histogram, 95),
-                p99_latency_ns: histogram_percentile_upper(&value.histogram, 99),
-            })
+            .map(
+                |(&(operation, access_pattern, size_class), value)| CategorySummary {
+                    operation,
+                    access_pattern,
+                    size_class,
+                    completed_ios: value.completed_ios,
+                    bytes: value.bytes,
+                    average_chunk_bytes: value.bytes / value.completed_ios.max(1),
+                    p50_latency_ns: histogram_percentile_upper(&value.histogram, 50),
+                    p95_latency_ns: histogram_percentile_upper(&value.histogram, 95),
+                    p99_latency_ns: histogram_percentile_upper(&value.histogram, 99),
+                },
+            )
             .collect();
         summary
     }
@@ -3069,9 +3071,7 @@ fn evenly_sample_refs<'a, T>(values: &[&'a T], limit: usize) -> Vec<&'a T> {
 }
 
 fn latency_histogram() -> Histogram {
-    let boundaries = (0..32)
-        .map(|power| 1_000_u64 << power)
-        .collect::<Vec<_>>();
+    let boundaries = (0..32).map(|power| 1_000_u64 << power).collect::<Vec<_>>();
     Histogram {
         counts: vec![0; boundaries.len() + 1],
         boundaries,

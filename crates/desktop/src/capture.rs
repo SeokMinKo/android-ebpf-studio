@@ -9,9 +9,7 @@ use std::{
     thread,
 };
 
-use android_ebpf_protocol::{
-    CaptureControlCommand, DiagnosticLevel, DiagnosticRecord, WireRecord,
-};
+use android_ebpf_protocol::{CaptureControlCommand, DiagnosticLevel, DiagnosticRecord, WireRecord};
 use crossbeam_channel::Sender;
 
 use crate::adb::{AdbClient, AdbDevice, PreflightReport};

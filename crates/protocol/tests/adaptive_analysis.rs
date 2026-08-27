@@ -1,11 +1,11 @@
 use std::io::Cursor;
 
 use android_ebpf_protocol::{
-    AggregateCounters, AggregateSnapshot, CaptureConfig, CaptureControlAck,
-    CaptureFilter, CaptureMode, CaptureState, ControlOutcome, DetailPolicy,
-    HeavyHitterDimension, HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot,
-    Histogram, HistogramMetric, SegmentRecord, SessionReader, StackFingerprintRecord,
-    StackKind, TriggerRecord, WireRecord, write_record,
+    AggregateCounters, AggregateSnapshot, CaptureConfig, CaptureControlAck, CaptureFilter,
+    CaptureMode, CaptureState, ControlOutcome, DetailPolicy, HeavyHitterDimension,
+    HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram, HistogramMetric,
+    SegmentRecord, SessionReader, StackFingerprintRecord, StackKind, TriggerRecord, WireRecord,
+    write_record,
 };
 
 #[test]

@@ -13,16 +13,28 @@ fn controller_requires_consecutive_windows_and_cools_down() {
     .unwrap();
 
     let armed = controller.observe(1_000, 6_000_000, 2).unwrap();
-    assert_eq!((armed.from, armed.to), (CaptureState::Basic, CaptureState::Armed));
+    assert_eq!(
+        (armed.from, armed.to),
+        (CaptureState::Basic, CaptureState::Armed)
+    );
     assert!(controller.observe(2_000, 6_000_000, 2).is_none());
     let deep = controller.observe(3_000, 7_000_000, 2).unwrap();
-    assert_eq!((deep.from, deep.to), (CaptureState::Armed, CaptureState::Deep));
+    assert_eq!(
+        (deep.from, deep.to),
+        (CaptureState::Armed, CaptureState::Deep)
+    );
 
     let cooldown = controller.tick(13_000, 2).unwrap();
-    assert_eq!((cooldown.from, cooldown.to), (CaptureState::Deep, CaptureState::Cooldown));
+    assert_eq!(
+        (cooldown.from, cooldown.to),
+        (CaptureState::Deep, CaptureState::Cooldown)
+    );
     assert!(controller.tick(17_999, 2).is_none());
     let basic = controller.tick(18_000, 2).unwrap();
-    assert_eq!((basic.from, basic.to), (CaptureState::Cooldown, CaptureState::Basic));
+    assert_eq!(
+        (basic.from, basic.to),
+        (CaptureState::Cooldown, CaptureState::Basic)
+    );
 }
 
 #[test]

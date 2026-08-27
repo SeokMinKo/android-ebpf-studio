@@ -16,22 +16,21 @@ use android_ebpf_agent::trace_format::{
     parse_layout, parse_pipeline_layout, parse_raw_syscall_layout, validate_pair,
 };
 use android_ebpf_protocol::{
-    AdaptiveController, AggregateCounters, AggregateSnapshot, AttributionConfidence,
-    BlockComplete, BlockInsert, BlockIssue, CapabilityState, CaptureConfig, CaptureControlAck,
+    AdaptiveController, AggregateCounters, AggregateSnapshot, AttributionConfidence, BlockComplete,
+    BlockInsert, BlockIssue, CapabilityState, CaptureConfig, CaptureControlAck,
     CaptureControlCommand, CaptureFilter, CaptureMode, CaptureState, ControlOutcome,
-    CorrelationConfidence, DetailPolicy,
-    DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileIo, HeavyHitterDimension,
-    HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram, HistogramMetric,
-    IoOperation, PipelineLayer, PipelineObservation, PipelinePhase, ProbeCapabilities, ProbePlan,
-    SCHEMA_VERSION, SegmentRecord, StackFingerprintRecord, StackKind, StorageEvent, WireRecord,
-    write_record,
+    CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileIo,
+    HeavyHitterDimension, HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram,
+    HistogramMetric, IoOperation, PipelineLayer, PipelineObservation, PipelinePhase,
+    ProbeCapabilities, ProbePlan, SCHEMA_VERSION, SegmentRecord, StackFingerprintRecord, StackKind,
+    StorageEvent, WireRecord, write_record,
 };
 use android_ebpf_types::{
     FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE,
     KIND_FILE_IO, KIND_PIPELINE, KernelAggregate, KernelEvent, LAYER_FILESYSTEM, LAYER_SCHEDULER,
-    LAYER_SCSI, LAYER_UFS, MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD, OP_FLUSH,
-    OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END, PHASE_INSTANT, PipelineTraceLayout,
-    RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE, TraceLayout,
+    LAYER_SCSI, LAYER_UFS, MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD,
+    OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END, PHASE_INSTANT,
+    PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE, TraceLayout,
 };
 use anyhow::{Context, Result, bail};
 use aya::{
@@ -362,13 +361,17 @@ fn observe_stack_fingerprints(
         }
         health.attempts = health.attempts.saturating_add(1);
         let opaque_stack_id = opaque_key(
-            stack_id ^ if kind == StackKind::User { 1_u64 << 63 } else { 0 },
+            stack_id
+                ^ if kind == StackKind::User {
+                    1_u64 << 63
+                } else {
+                    0
+                },
             correlation_salt,
         );
         let key = (kind, opaque_stack_id);
         if !cohorts.contains_key(&key) && cohorts.len() >= 4_096 {
-            health.cohort_capacity_rejections =
-                health.cohort_capacity_rejections.saturating_add(1);
+            health.cohort_capacity_rejections = health.cohort_capacity_rejections.saturating_add(1);
             continue;
         }
         let frame_count = match stack_map.get(&(stack_id as u32), 0) {
@@ -435,7 +438,11 @@ impl LiveHeavyHitters {
                     .as_ref()
                     .and_then(|snapshot| snapshot.path.clone())
                     .or_else(|| file.path.clone())
-                    .or_else(|| file.file_identity.as_ref().map(|identity| identity.fallback_label()))
+                    .or_else(|| {
+                        file.file_identity
+                            .as_ref()
+                            .map(|identity| identity.fallback_label())
+                    })
                     .unwrap_or_else(|| "Unattributed".into());
                 let confidence = match file.confidence {
                     AttributionConfidence::Exact => Some(EdgeConfidence::Exact),
@@ -493,9 +500,21 @@ impl FilterMaps {
             bail!("file identity filter is unavailable without a direct VFS file identity probe")
         }
         let generation = config.generation;
-        insert_filter_values(&mut self.pids, generation, config.filter.pids.iter().map(|v| *v as u64))?;
-        insert_filter_values(&mut self.tids, generation, config.filter.tids.iter().map(|v| *v as u64))?;
-        insert_filter_values(&mut self.uids, generation, config.filter.uids.iter().map(|v| *v as u64))?;
+        insert_filter_values(
+            &mut self.pids,
+            generation,
+            config.filter.pids.iter().map(|v| *v as u64),
+        )?;
+        insert_filter_values(
+            &mut self.tids,
+            generation,
+            config.filter.tids.iter().map(|v| *v as u64),
+        )?;
+        insert_filter_values(
+            &mut self.uids,
+            generation,
+            config.filter.uids.iter().map(|v| *v as u64),
+        )?;
         insert_filter_values(
             &mut self.devices,
             generation,
@@ -508,7 +527,11 @@ impl FilterMaps {
         insert_filter_values(
             &mut self.operations,
             generation,
-            config.filter.operations.iter().map(|value| operation_code(*value) as u64),
+            config
+                .filter
+                .operations
+                .iter()
+                .map(|value| operation_code(*value) as u64),
         )?;
         let raw = RawFilterConfig {
             generation,
@@ -918,9 +941,9 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
         while let Some(item) = ring.next() {
             had_event = true;
             let raw_event = decode_kernel_event(&item);
-            match raw_event.and_then(|raw| {
-                parse_kernel_event(raw, correlation_salt).map(|event| (raw, event))
-            }) {
+            match raw_event
+                .and_then(|raw| parse_kernel_event(raw, correlation_salt).map(|event| (raw, event)))
+            {
                 Some((raw, event)) => {
                     observe_stack_fingerprints(
                         &raw,
@@ -948,10 +971,7 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
                         event,
                     };
                     flight_recorder.observe(event_ts_ns, record.clone());
-                    write_record(
-                        &mut output,
-                        &record,
-                    )?;
+                    write_record(&mut output, &record)?;
                     emitted += 1;
                 }
                 None => rejected += 1,
@@ -972,21 +992,12 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
                     snapshot: snapshot.clone(),
                 };
                 flight_recorder.observe(snapshot.end_ts_ns, aggregate_record.clone());
-                write_record(
-                    &mut output,
-                    &aggregate_record,
-                )?;
+                write_record(&mut output, &aggregate_record)?;
                 if let Some(controller) = adaptive_controller.as_mut()
-                    && let Some(observed) = aggregate_percentile_upper(
-                        snapshot,
-                        HistogramMetric::TotalLatency,
-                        99,
-                    )
-                    && let Some(mut trigger) = controller.observe(
-                        snapshot.end_ts_ns,
-                        observed,
-                        active_config.generation,
-                    )
+                    && let Some(observed) =
+                        aggregate_percentile_upper(snapshot, HistogramMetric::TotalLatency, 99)
+                    && let Some(mut trigger) =
+                        controller.observe(snapshot.end_ts_ns, observed, active_config.generation)
                 {
                     let target_mode = match trigger.to {
                         CaptureState::Deep => Some(CaptureMode::Deep),
@@ -1260,16 +1271,15 @@ fn read_aggregate_snapshot(
         merged.expired = merged.expired.saturating_add(value.expired);
         merged.key_reused = merged.key_reused.saturating_add(value.key_reused);
         for index in 0..HISTOGRAM_BUCKETS {
-            merged.total_latency[index] = merged.total_latency[index]
-                .saturating_add(value.total_latency[index]);
-            merged.queue_latency[index] = merged.queue_latency[index]
-                .saturating_add(value.queue_latency[index]);
-            merged.device_latency[index] = merged.device_latency[index]
-                .saturating_add(value.device_latency[index]);
-            merged.io_size[index] =
-                merged.io_size[index].saturating_add(value.io_size[index]);
-            merged.queue_depth[index] = merged.queue_depth[index]
-                .saturating_add(value.queue_depth[index]);
+            merged.total_latency[index] =
+                merged.total_latency[index].saturating_add(value.total_latency[index]);
+            merged.queue_latency[index] =
+                merged.queue_latency[index].saturating_add(value.queue_latency[index]);
+            merged.device_latency[index] =
+                merged.device_latency[index].saturating_add(value.device_latency[index]);
+            merged.io_size[index] = merged.io_size[index].saturating_add(value.io_size[index]);
+            merged.queue_depth[index] =
+                merged.queue_depth[index].saturating_add(value.queue_depth[index]);
         }
     }
     let boundaries = log2_histogram_boundaries();
@@ -1956,14 +1966,16 @@ fn capabilities() -> Result<CollectorConfig> {
             },
             pipeline_layers,
             attach_plan,
-            scheduler_context: Some(if sched_events
-                .iter()
-                .any(|event| event.ends_with("/sched_switch"))
-            {
-                CapabilityState::Context
-            } else {
-                CapabilityState::Unavailable
-            }),
+            scheduler_context: Some(
+                if sched_events
+                    .iter()
+                    .any(|event| event.ends_with("/sched_switch"))
+                {
+                    CapabilityState::Context
+                } else {
+                    CapabilityState::Unavailable
+                },
+            ),
             stack_traces: Some(CapabilityState::Measured),
         },
         issue,

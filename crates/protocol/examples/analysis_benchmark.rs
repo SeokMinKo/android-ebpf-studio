@@ -1,8 +1,6 @@
 use std::{env, hint::black_box, time::Instant};
 
-use android_ebpf_protocol::{
-    AnalysisEngine, BlockComplete, BlockIssue, IoOperation, StorageEvent,
-};
+use android_ebpf_protocol::{AnalysisEngine, BlockComplete, BlockIssue, IoOperation, StorageEvent};
 
 fn main() {
     let events = env::args()

@@ -587,7 +587,10 @@ impl StudioApp {
                 match_all: self.filter_pid == 0
                     && self.filter_operation.is_none()
                     && self.filter_min_bytes == 0,
-                pids: (self.filter_pid != 0).then_some(self.filter_pid).into_iter().collect(),
+                pids: (self.filter_pid != 0)
+                    .then_some(self.filter_pid)
+                    .into_iter()
+                    .collect(),
                 operations: self.filter_operation.into_iter().collect(),
                 min_bytes: (self.filter_min_bytes != 0).then_some(self.filter_min_bytes),
                 ..CaptureFilter::default()
@@ -660,33 +663,33 @@ impl StudioApp {
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
         self.recent = loaded
-                    .engine
-                    .completed_ios()
-                    .iter()
-                    .rev()
-                    .take(MAX_RECENT)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                self.analyzer = loaded.engine;
-                self.analysis_generation = self.analysis_generation.wrapping_add(1);
-                self.explorer_view = None;
-                self.pipeline_view = None;
-                self.summary_view = None;
-                self.received_events = loaded.accepted_events;
-                self.rejected_records = loaded.rejected_lines;
-                self.capabilities = loaded.capabilities;
-                self.latest_aggregate = loaded.latest_aggregate;
-                self.heavy_hitters = loaded.heavy_hitters;
-                self.triggers = loaded.triggers.into_iter().collect();
-                self.segments = loaded.segments.into_iter().collect();
-                self.stack_fingerprints = loaded.stack_fingerprints.into_iter().collect();
-                self.session_path = Some(path);
-                self.session_id = None;
-                self.log_directory = None;
-                self.host_diagnostic_writer = None;
+            .engine
+            .completed_ios()
+            .iter()
+            .rev()
+            .take(MAX_RECENT)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        self.analyzer = loaded.engine;
+        self.analysis_generation = self.analysis_generation.wrapping_add(1);
+        self.explorer_view = None;
+        self.pipeline_view = None;
+        self.summary_view = None;
+        self.received_events = loaded.accepted_events;
+        self.rejected_records = loaded.rejected_lines;
+        self.capabilities = loaded.capabilities;
+        self.latest_aggregate = loaded.latest_aggregate;
+        self.heavy_hitters = loaded.heavy_hitters;
+        self.triggers = loaded.triggers.into_iter().collect();
+        self.segments = loaded.segments.into_iter().collect();
+        self.stack_fingerprints = loaded.stack_fingerprints.into_iter().collect();
+        self.session_path = Some(path);
+        self.session_id = None;
+        self.log_directory = None;
+        self.host_diagnostic_writer = None;
         self.status = match (loaded.integrity_ok, loaded.graceful) {
             (Some(true), Some(true)) => "Offline session loaded · integrity OK".into(),
             (Some(true), _) => "Offline partial session loaded".into(),
@@ -886,7 +889,10 @@ impl StudioApp {
                     }
                     ControlOutcome::Rejected => format!(
                         "Rejected · {}",
-                        acknowledgement.reason.as_deref().unwrap_or("unknown reason")
+                        acknowledgement
+                            .reason
+                            .as_deref()
+                            .unwrap_or("unknown reason")
                     ),
                 };
             }
@@ -1527,11 +1533,7 @@ impl StudioApp {
                         );
                         for entry in snapshot.entries.iter().take(10) {
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(&entry.key)
-                                        .monospace()
-                                        .color(TEXT),
-                                );
+                                ui.label(RichText::new(&entry.key).monospace().color(TEXT));
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -1545,7 +1547,10 @@ impl StudioApp {
             });
             ui.add_space(18.0);
         }
-        if !self.triggers.is_empty() || !self.segments.is_empty() || !self.stack_fingerprints.is_empty() {
+        if !self.triggers.is_empty()
+            || !self.segments.is_empty()
+            || !self.stack_fingerprints.is_empty()
+        {
             section_header(
                 ui,
                 "Adaptive capture evidence",
@@ -1582,8 +1587,16 @@ impl StudioApp {
                     ui.label(
                         RichText::new(format!(
                             "requested pre-window {} · actual pre-window {}",
-                            format_duration(segment.trigger_ts_ns.saturating_sub(segment.requested_start_ts_ns)),
-                            format_duration(segment.trigger_ts_ns.saturating_sub(segment.retained_start_ts_ns))
+                            format_duration(
+                                segment
+                                    .trigger_ts_ns
+                                    .saturating_sub(segment.requested_start_ts_ns)
+                            ),
+                            format_duration(
+                                segment
+                                    .trigger_ts_ns
+                                    .saturating_sub(segment.retained_start_ts_ns)
+                            )
                         ))
                         .small()
                         .color(MUTED),
@@ -2559,11 +2572,7 @@ impl eframe::App for StudioApp {
                         )
                         .width(190.0)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.filter_operation,
-                                None,
-                                "All operations",
-                            );
+                            ui.selectable_value(&mut self.filter_operation, None, "All operations");
                             for operation in [IoOperation::Read, IoOperation::Write] {
                                 ui.selectable_value(
                                     &mut self.filter_operation,
@@ -2575,8 +2584,7 @@ impl eframe::App for StudioApp {
                     ui.horizontal(|ui| {
                         ui.label("Min bytes");
                         ui.add(
-                            egui::DragValue::new(&mut self.filter_min_bytes)
-                                .range(0..=u32::MAX),
+                            egui::DragValue::new(&mut self.filter_min_bytes).range(0..=u32::MAX),
                         );
                     });
                     ui.horizontal(|ui| {
@@ -2597,11 +2605,7 @@ impl eframe::App for StudioApp {
                     {
                         self.apply_capture_control();
                     }
-                    ui.label(
-                        RichText::new(&self.control_status)
-                            .size(10.0)
-                            .color(MUTED),
-                    );
+                    ui.label(RichText::new(&self.control_status).size(10.0).color(MUTED));
                     if self.capture_mode == CaptureMode::RawAll {
                         ui.label(
                             RichText::new("RawAll can generate high event and UI load")

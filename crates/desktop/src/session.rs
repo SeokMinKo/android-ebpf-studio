@@ -8,8 +8,8 @@ use std::{
 
 use android_ebpf_protocol::{
     AggregateSnapshot, AnalysisEngine, AnalysisSummary, HeavyHitterSnapshot, ProbeCapabilities,
-    SegmentRecord, SessionError, SessionReader, StackFingerprintRecord, StorageEvent, TriggerRecord,
-    WireRecord, write_record,
+    SegmentRecord, SessionError, SessionReader, StackFingerprintRecord, StorageEvent,
+    TriggerRecord, WireRecord, write_record,
 };
 
 pub struct SessionWriter {
@@ -77,14 +77,12 @@ impl AsyncSessionWriter {
     }
 
     pub fn append(&self, record: WireRecord) -> Result<(), SessionError> {
-        self.tx
-            .send(PersistCommand::Record(record))
-            .map_err(|_| {
-                SessionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "session writer stopped",
-                ))
-            })
+        self.tx.send(PersistCommand::Record(record)).map_err(|_| {
+            SessionError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "session writer stopped",
+            ))
+        })
     }
 
     pub fn finish(
