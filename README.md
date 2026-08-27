@@ -13,8 +13,8 @@ Windows에서 실행되는 Rust GUI가 `adb root` 가능한 Android Phone에 eBP
 - `FileIdentity(device/inode/mount)`와 변경 가능한 path snapshot 분리, block request별 다중 origin 및 Exact/Probable/Probable Async confidence
 - arm64 `raw_syscalls` read/write 추적과 `/proc/<pid>/fd/<fd>` metadata/path fallback attribution
 - 커널 tracepoint `format` 파일을 읽어 필드 offset을 런타임 구성하므로 고정 offset에 의존하지 않음
-- X/Y axis와 grouping을 실행 중 바꾸는 pan/zoom 가능한 Explorer scatter plot
-- Summary의 logging/busy/idle time, p50/p95/p99, Read/Write × Sequential/Random × Small/Large 집계
+- 대표 분석 프리셋과 고급 X/Y/Group 설정을 제공하는 pan/zoom Explore scatter plot
+- Overview의 logging/busy/idle time, p50/p95/p99, 데이터 품질, Read/Write × Sequential/Random × Small/Large 집계
 - 같은 device/direction stream에서 `previous sector + sectors == current sector`이면 Sequential, 아니면 Random
 - `bytes >= 32 KiB`이면 Large, 그 미만은 Small
 - 실시간 이벤트 테이블, NDJSON 기록, 오프라인 재분석, event/summary CSV export
@@ -101,11 +101,10 @@ cargo binstall bpf-linker
 
 ## 화면 사용법
 
-- **Summary**: 관측된 logging span, 요청 interval 합집합인 busy time, 나머지 idle time과 조합별 집계를 봅니다.
-- **Pipeline**: 요청을 선택하고 계층 waterfall, transaction node/edge, file origin, inclusive/exclusive/critical path와 `Why slow?`를 확인합니다.
-- **Explorer**: 기존 축에 FS/UFS/critical-path latency를, Group By에 file/origin/confidence를 조합할 수 있습니다.
-- **Block events**: 요청별 latency와 연결된 파일 또는 다중 origin 수를 봅니다.
-- **File I/O**: syscall 시점의 `FileIdentity`, path snapshot, FD, byte, syscall latency와 confidence를 봅니다.
+- **Overview**: 관측 시간, latency/workload 집계, 가장 느린 최근 요청, file/probe/event 데이터 품질을 봅니다.
+- **Investigate**: 요청 목록에서 하나를 선택해 Pipeline waterfall, file origin, critical path, `Why slow?`, block/transaction/raw file evidence를 한곳에서 확인합니다.
+- **Explore**: Latency over time, Latency by file, Queue pressure, Layer contribution, LBA 프리셋을 사용하거나 FS/UFS/critical-path 축과 file/origin/confidence Group By를 직접 조합합니다.
+- **Compare**: 별도 baseline NDJSON을 읽기 전용으로 열어 현재 세션의 I/O, bytes, p50/p95/p99, queue depth, file attribution 변화량을 비교합니다.
 - **Diagnostics**: component/code/correlation filter, INFO/DEBUG/TRACE capture level, redacted bundle export를 사용합니다.
 
 ## 중요한 정확성 규칙

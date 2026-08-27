@@ -41,6 +41,7 @@ impl SessionWriter {
 
 pub struct LoadedAnalysis {
     pub engine: AnalysisEngine,
+    pub accepted_events: u64,
     pub rejected_lines: u64,
     pub integrity_ok: Option<bool>,
     pub graceful: Option<bool>,
@@ -49,12 +50,14 @@ pub struct LoadedAnalysis {
 
 pub fn load_analysis(path: &Path) -> Result<LoadedAnalysis, SessionError> {
     let loaded = SessionReader::default().read(BufReader::new(File::open(path)?))?;
+    let accepted_events = loaded.events.len() as u64;
     let mut engine = AnalysisEngine::new();
     for event in loaded.events {
         engine.ingest(event);
     }
     Ok(LoadedAnalysis {
         engine,
+        accepted_events,
         rejected_lines: loaded.rejected_lines,
         integrity_ok: loaded.integrity_ok,
         graceful: loaded.graceful,
