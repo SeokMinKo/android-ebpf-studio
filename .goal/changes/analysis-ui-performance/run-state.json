@@ -1,0 +1,10 @@
+{
+  "change": "analysis-ui-performance",
+  "status": "verified",
+  "baseline": "c499fa7",
+  "current_task": "Publish v0.5.1",
+  "verification": {
+    "local_rust_toolchain": "unavailable",
+    "ci": "passed: 33035132553"
+  }
+}

@@ -6,8 +6,10 @@ on:
       tag:
         description: Release tag
         required: true
-        default: v0.5.0
+        default: v0.5.1
   push:
+    branches:
+      - main
     paths:
       - .github/workflows/release.yml
 
@@ -15,7 +17,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || 'v0.5.0' }}
+  RELEASE_TAG: ${{ inputs.tag || 'v0.5.1' }}
 
 jobs:
   windows-gui:
@@ -111,11 +113,11 @@ jobs:
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
-              --notes "Protocol v4 deep I/O attribution: File→VFS→FS→Block→SCSI→UFS transaction graph, multi-file origins, confidence-aware latency accounting, critical-path and unaccounted time, structured diagnostic logs/bundles, automatic capture paths, Windows GUI, Android arm64 agent, and eBPF collector. Unsupported device probes remain Unavailable. Download the ZIP for the complete package."
+              --notes "Performance patch: indexed File/Pipeline correlation, cached Summary/Pipeline/Explorer/RCA views, bounded live frame work, deterministic Explorer sampling, virtualized File I/O rows, and Explorer Group by File. Multi-file and unattributed requests remain explicit. Includes the Windows GUI, Android arm64 agent, and eBPF collector."
             gh release upload "$RELEASE_TAG" release/* --clobber
           else
             gh release create "$RELEASE_TAG" release/* \
               --target "$GITHUB_SHA" \
               --title "Android eBPF Storage Studio ${RELEASE_TAG}" \
-              --notes "Protocol v4 deep I/O attribution: File→VFS→FS→Block→SCSI→UFS transaction graph, multi-file origins, confidence-aware latency accounting, critical-path and unaccounted time, structured diagnostic logs/bundles, automatic capture paths, Windows GUI, Android arm64 agent, and eBPF collector. Unsupported device probes remain Unavailable. Download the ZIP and verify it with SHA256SUMS.txt."
+              --notes "Performance patch: indexed File/Pipeline correlation, cached Summary/Pipeline/Explorer/RCA views, bounded live frame work, deterministic Explorer sampling, virtualized File I/O rows, and Explorer Group by File. Multi-file and unattributed requests remain explicit. Includes the Windows GUI, Android arm64 agent, and eBPF collector. Download the ZIP and verify it with SHA256SUMS.txt."
           fi
