@@ -10,9 +10,9 @@ use std::{
 
 use android_ebpf_protocol::{
     AccessPattern, AnalysisEngine, AnalysisSummary, CompletedIo, CorrelationConfidence,
-    DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileOriginView, GraphMetrics, IoNodeKind,
-    IoOperation, IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities,
-    SCHEMA_VERSION, SlowReason, WireRecord,
+    CapabilityState, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileOriginView,
+    GraphMetrics, IoNodeKind, IoOperation, IoPipeline, IoSizeClass, IoTransactionGraph,
+    PipelineLayer, ProbeCapabilities, SCHEMA_VERSION, SlowReason, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -46,12 +46,74 @@ const RED: Color32 = Color32::from_rgb(242, 102, 112);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
-    Summary,
-    Pipeline,
-    Explorer,
-    Events,
-    Files,
+    Overview,
+    Investigate,
+    Explore,
+    Compare,
     Diagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExplorerPreset {
+    LatencyTimeline,
+    LatencyByFile,
+    QueuePressure,
+    LayerContribution,
+    LbaDistribution,
+    Custom,
+}
+
+impl ExplorerPreset {
+    const ALL: [Self; 6] = [
+        Self::LatencyTimeline,
+        Self::LatencyByFile,
+        Self::QueuePressure,
+        Self::LayerContribution,
+        Self::LbaDistribution,
+        Self::Custom,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LatencyTimeline => "Latency over time",
+            Self::LatencyByFile => "Latency by file",
+            Self::QueuePressure => "Queue depth vs latency",
+            Self::LayerContribution => "Filesystem vs UFS",
+            Self::LbaDistribution => "LBA distribution",
+            Self::Custom => "Custom",
+        }
+    }
+
+    fn query(self) -> Option<(AxisMetric, AxisMetric, GroupBy)> {
+        match self {
+            Self::LatencyTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::TotalLatencyMs,
+                GroupBy::Direction,
+            )),
+            Self::LatencyByFile => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::TotalLatencyMs,
+                GroupBy::File,
+            )),
+            Self::QueuePressure => Some((
+                AxisMetric::QueueDepth,
+                AxisMetric::TotalLatencyMs,
+                GroupBy::Direction,
+            )),
+            Self::LayerContribution => Some((
+                AxisMetric::FilesystemLatencyMs,
+                AxisMetric::UfsLatencyMs,
+                GroupBy::File,
+            )),
+            Self::LbaDistribution => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Sector,
+                GroupBy::Direction,
+            )),
+            Self::Custom => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +313,13 @@ struct PipelineView {
     built_at: Instant,
 }
 
+struct ComparisonBaseline {
+    path: PathBuf,
+    summary: AnalysisSummary,
+    rejected_records: u64,
+    capabilities: Option<ProbeCapabilities>,
+}
+
 pub struct StudioApp {
     adb: AdbClient,
     tx: Sender<HostMessage>,
@@ -282,11 +351,13 @@ pub struct StudioApp {
     x_axis: AxisMetric,
     y_axis: AxisMetric,
     group_by: GroupBy,
+    explorer_preset: ExplorerPreset,
     selected_pipeline_request: Option<u64>,
     analysis_generation: u64,
     explorer_view: Option<ExplorerView>,
     pipeline_view: Option<PipelineView>,
     summary_view: Option<(u64, Instant, AnalysisSummary)>,
+    comparison: Option<ComparisonBaseline>,
 }
 
 impl Default for StudioApp {
@@ -319,15 +390,17 @@ impl Default for StudioApp {
             last_sequence: None,
             agent_footer_seen: false,
             agent_graceful: None,
-            page: Page::Summary,
+            page: Page::Overview,
             x_axis: AxisMetric::TimeMs,
             y_axis: AxisMetric::TotalLatencyMs,
             group_by: GroupBy::Direction,
+            explorer_preset: ExplorerPreset::LatencyTimeline,
             selected_pipeline_request: None,
             analysis_generation: 0,
             explorer_view: None,
             pipeline_view: None,
             summary_view: None,
+            comparison: None,
         }
     }
 }
@@ -521,6 +594,7 @@ impl StudioApp {
                 self.explorer_view = None;
                 self.pipeline_view = None;
                 self.summary_view = None;
+                self.received_events = loaded.accepted_events;
                 self.rejected_records = loaded.rejected_lines;
                 self.capabilities = loaded.capabilities;
                 self.session_path = Some(path);
@@ -535,6 +609,30 @@ impl StudioApp {
                 };
             }
             Err(error) => self.push_diagnostic(error.to_string()),
+        }
+    }
+
+    fn open_comparison_session(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("NDJSON session", &["ndjson"])
+            .pick_file()
+        else {
+            return;
+        };
+        match session::load_analysis(&path) {
+            Ok(loaded) => {
+                self.comparison = Some(ComparisonBaseline {
+                    path,
+                    summary: loaded.engine.summary(),
+                    rejected_records: loaded.rejected_lines,
+                    capabilities: loaded.capabilities,
+                });
+                self.status = "Comparison baseline loaded".into();
+            }
+            Err(error) => self.push_diagnostic(format!(
+                "cannot load comparison baseline {}: {error}",
+                path.display()
+            )),
         }
     }
 
@@ -940,30 +1038,59 @@ impl StudioApp {
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
         section_header(
             ui,
-            "Interactive explorer",
-            "Choose any dimensions, then pan and zoom directly on the plot.",
+            "Explore hypotheses",
+            "Start with a focused view, then use advanced axes when the question needs it.",
         );
         card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                axis_combo(ui, "x-axis", "X AXIS", &mut self.x_axis);
-                ui.add_space(8.0);
-                axis_combo(ui, "y-axis", "Y AXIS", &mut self.y_axis);
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("GROUP BY").size(10.0).color(MUTED));
-                    egui::ComboBox::from_id_salt("group-by")
-                        .selected_text(self.group_by.label())
-                        .width(180.0)
-                        .show_ui(ui, |ui| {
-                            for group in GroupBy::ALL {
-                                ui.selectable_value(&mut self.group_by, group, group.label());
-                            }
-                        });
-                });
+                ui.label(RichText::new("VIEW").size(10.0).strong().color(MUTED));
+                let previous = self.explorer_preset;
+                egui::ComboBox::from_id_salt("explorer-preset")
+                    .selected_text(self.explorer_preset.label())
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for preset in ExplorerPreset::ALL {
+                            ui.selectable_value(
+                                &mut self.explorer_preset,
+                                preset,
+                                preset.label(),
+                            );
+                        }
+                    });
+                if previous != self.explorer_preset
+                    && let Some((x, y, group)) = self.explorer_preset.query()
+                {
+                    self.x_axis = x;
+                    self.y_axis = y;
+                    self.group_by = group;
+                }
                 ui.add_space(12.0);
                 ui.label(
                     RichText::new("Drag: pan  •  Wheel: zoom  •  Double-click: reset").color(MUTED),
                 );
+            });
+            ui.collapsing("Advanced axes and grouping", |ui| {
+                let before = (self.x_axis, self.y_axis, self.group_by);
+                ui.horizontal_wrapped(|ui| {
+                    axis_combo(ui, "x-axis", "X AXIS", &mut self.x_axis);
+                    ui.add_space(8.0);
+                    axis_combo(ui, "y-axis", "Y AXIS", &mut self.y_axis);
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("GROUP BY").size(10.0).color(MUTED));
+                        egui::ComboBox::from_id_salt("group-by")
+                            .selected_text(self.group_by.label())
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                for group in GroupBy::ALL {
+                                    ui.selectable_value(&mut self.group_by, group, group.label());
+                                }
+                            });
+                    });
+                });
+                if before != (self.x_axis, self.y_axis, self.group_by) {
+                    self.explorer_preset = ExplorerPreset::Custom;
+                }
             });
         });
         ui.add_space(10.0);
@@ -1028,8 +1155,8 @@ impl StudioApp {
         let summary = self.analysis_summary();
         section_header(
             ui,
-            "Session overview",
-            "A concise view of utilization, attribution, and latency by workload class.",
+            "Overview",
+            "What happened, how trustworthy the capture is, and where to investigate next.",
         );
         ui.columns(4, |columns| {
             summary_card(
@@ -1061,6 +1188,96 @@ impl StudioApp {
                 format!("{} / {}", summary.attributed_file_ios, summary.file_ios),
             );
         });
+        ui.add_space(18.0);
+        section_header(
+            ui,
+            "Session findings",
+            "Measured signals only; inferred causes remain in Investigate with confidence evidence.",
+        );
+        card_frame().show(ui, |ui| {
+            if let Some(slowest) = self
+                .recent
+                .iter()
+                .max_by_key(|request| request.total_latency_ns)
+                .cloned()
+            {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("SLOWEST RECENT REQUEST").size(10.0).color(MUTED));
+                    ui.label(RichText::new(format!(
+                        "#{} · {} · {} · {}",
+                        slowest.issue.request_id,
+                        operation_label(slowest.issue.operation),
+                        format_bytes(slowest.issue.bytes as u64),
+                        format_duration(slowest.total_latency_ns)
+                    )).strong());
+                    if ui.button("Investigate").clicked() {
+                        self.selected_pipeline_request = Some(slowest.issue.request_id);
+                        self.page = Page::Investigate;
+                    }
+                });
+            } else {
+                ui.label(RichText::new("No completed requests yet").color(MUTED));
+            }
+        });
+        ui.add_space(18.0);
+        section_header(
+            ui,
+            "Data quality",
+            "Coverage and loss indicators that bound what the analysis can claim.",
+        );
+        let probe_coverage = self.capabilities.as_ref().map(|capabilities| {
+            capabilities.attach_plan.iter().fold(
+                    (0, 0, 0, 0),
+                    |(measured, derived, context, unavailable), plan| match plan.state {
+                        CapabilityState::Measured => (measured + 1, derived, context, unavailable),
+                        CapabilityState::Derived => (measured, derived + 1, context, unavailable),
+                        CapabilityState::Context => (measured, derived, context + 1, unavailable),
+                        CapabilityState::Unavailable => {
+                            (measured, derived, context, unavailable + 1)
+                        }
+                    },
+                )
+        });
+        let file_coverage = if summary.file_ios == 0 {
+            "No file I/O".into()
+        } else {
+            format!("{:.1}%", ratio(summary.attributed_file_ios, summary.file_ios))
+        };
+        ui.columns(4, |columns| {
+            summary_card(
+                &mut columns[0],
+                "Accepted / rejected",
+                format!("{} / {}", self.received_events, self.rejected_records),
+            );
+            summary_card(
+                &mut columns[1],
+                "File coverage",
+                file_coverage,
+            );
+            summary_card(
+                &mut columns[2],
+                "Probe coverage",
+                probe_coverage.map_or_else(
+                    || "Not reported".into(),
+                    |(measured, derived, _, _)| {
+                        format!("{measured} measured · {derived} derived")
+                    },
+                ),
+            );
+            summary_card(
+                &mut columns[3],
+                "Context / unavailable",
+                probe_coverage.map_or_else(
+                    || "Not reported".into(),
+                    |(_, _, context, unavailable)| format!("{context} / {unavailable}"),
+                ),
+            );
+        });
+        ui.add_space(8.0);
+        info_banner(
+            ui,
+            "Missing probes and unattributed requests are excluded or labeled Unavailable; they are never converted to 0 ms.",
+        );
         ui.add_space(18.0);
         section_header(
             ui,
@@ -1135,16 +1352,68 @@ impl StudioApp {
         });
     }
 
-    fn pipeline_ui(&mut self, ui: &mut egui::Ui) {
+    fn investigate_ui(&mut self, ui: &mut egui::Ui) {
         section_header(
             ui,
-            "I/O pipeline waterfall",
-            "Follow one request across userspace and the measured kernel storage stack.",
+            "Investigate one I/O",
+            "Select a request, follow its critical path, and inspect file and raw correlation evidence.",
         );
         info_banner(
             ui,
             "Exact = direct request/tag association. Probable = time + LBA/size/thread correlation. UIC is context-only and is never added as command latency.",
         );
+        ui.add_space(10.0);
+
+        card_frame().show(ui, |ui| {
+            ui.label(RichText::new("RECENT REQUESTS").size(10.0).strong().color(MUTED));
+            let requests = self.analyzer.completed_ios();
+            let row_count = requests.len().min(500);
+            let mut selection = self.selected_pipeline_request;
+            egui::ScrollArea::vertical()
+                .id_salt("investigate-request-list")
+                .max_height(190.0)
+                .show_rows(ui, 26.0, row_count, |ui, range| {
+                    egui::Grid::new("investigate-request-rows")
+                        .striped(true)
+                        .min_col_width(82.0)
+                        .spacing([14.0, 5.0])
+                        .show(ui, |ui| {
+                            for heading in ["Request", "Op", "Bytes", "Total", "PID", "Process"] {
+                                ui.strong(heading);
+                            }
+                            ui.end_row();
+                            for position in range {
+                                let request = &requests[requests.len() - 1 - position];
+                                if ui
+                                    .selectable_label(
+                                        selection == Some(request.issue.request_id),
+                                        format!("#{}", request.issue.request_id),
+                                    )
+                                    .clicked()
+                                {
+                                    selection = Some(request.issue.request_id);
+                                }
+                                ui.label(operation_label(request.issue.operation));
+                                ui.label(format_bytes(request.issue.bytes as u64));
+                                ui.label(format_duration(request.total_latency_ns));
+                                ui.label(request.issue.pid.to_string());
+                                ui.label(&request.issue.comm);
+                                ui.end_row();
+                            }
+                        });
+                });
+            if requests.len() > row_count {
+                ui.label(
+                    RichText::new(format!(
+                        "Showing the newest {row_count} of {} requests",
+                        requests.len()
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
+            }
+            self.selected_pipeline_request = selection;
+        });
         ui.add_space(10.0);
 
         let selected = self
@@ -1201,29 +1470,13 @@ impl StudioApp {
         card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("REQUEST").size(10.0).strong().color(MUTED));
-                egui::ComboBox::from_id_salt("pipeline-request")
-                    .selected_text(format!(
-                        "#{} · {} · {}",
-                        io.issue.request_id,
-                        operation_label(io.issue.operation),
-                        format_bytes(io.issue.bytes as u64)
-                    ))
-                    .width(280.0)
-                    .show_ui(ui, |ui| {
-                        for candidate in self.analyzer.completed_ios().iter().rev().take(500) {
-                            ui.selectable_value(
-                                &mut self.selected_pipeline_request,
-                                Some(candidate.issue.request_id),
-                                format!(
-                                    "#{} · {} · sector {} · {}",
-                                    candidate.issue.request_id,
-                                    operation_label(candidate.issue.operation),
-                                    candidate.issue.sector,
-                                    format_bytes(candidate.issue.bytes as u64)
-                                ),
-                            );
-                        }
-                    });
+                ui.label(RichText::new(format!(
+                    "#{} · {} · {} · sector {}",
+                    io.issue.request_id,
+                    operation_label(io.issue.operation),
+                    format_bytes(io.issue.bytes as u64),
+                    io.issue.sector
+                )).strong());
                 ui.separator();
                 ui.label(format!("Total {}", format_duration(pipeline.total_ns())));
                 ui.label(
@@ -1360,9 +1613,32 @@ impl StudioApp {
         });
         ui.add_space(10.0);
         card_frame().show(ui, |ui| {
+            ui.collapsing("Raw block evidence", |ui| {
+                egui::Grid::new("investigate-block-evidence")
+                    .striped(true)
+                    .spacing([18.0, 7.0])
+                    .show(ui, |ui| {
+                        for (name, value) in [
+                            ("Request ID", io.issue.request_id.to_string()),
+                            ("Device", format!("{}:{}", io.issue.device_major, io.issue.device_minor)),
+                            ("Sector", io.issue.sector.to_string()),
+                            ("Bytes", io.issue.bytes.to_string()),
+                            ("PID / TID", format!("{} / {}", io.issue.pid, io.issue.tid)),
+                            ("Process", io.issue.comm.clone()),
+                            ("Queue latency", format_latency(io.queue_latency_ns)),
+                            ("Device latency", format_duration(io.device_latency_ns)),
+                            ("Total latency", format_duration(io.total_latency_ns)),
+                        ] {
+                            ui.label(RichText::new(name).color(MUTED));
+                            ui.label(RichText::new(value).monospace());
+                            ui.end_row();
+                        }
+                    });
+            });
+            ui.separator();
             ui.collapsing(
                 format!(
-                    "Transaction graph · {} nodes / {} edges",
+                    "Raw transaction graph · {} nodes / {} edges",
                     graph.nodes.len(),
                     graph.edges.len()
                 ),
@@ -1415,6 +1691,12 @@ impl StudioApp {
                     }
                 },
             );
+        });
+        ui.add_space(10.0);
+        ui.collapsing("Recent raw session evidence", |ui| {
+            self.table_ui(ui);
+            ui.add_space(10.0);
+            self.files_ui(ui);
         });
     }
 
@@ -1550,6 +1832,146 @@ impl StudioApp {
                                 ui.end_row();
                             }
                         });
+                });
+        });
+    }
+
+    fn compare_ui(&mut self, ui: &mut egui::Ui) {
+        section_header(
+            ui,
+            "Compare sessions",
+            "Measure the current capture against a separately loaded baseline without replacing it.",
+        );
+        card_frame().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Open baseline session").clicked() {
+                    self.open_comparison_session();
+                }
+                if self.comparison.is_some() && ui.button("Clear baseline").clicked() {
+                    self.comparison = None;
+                }
+                ui.label(
+                    RichText::new("Delta = Current − Baseline; lower latency is normally better.")
+                        .color(MUTED),
+                );
+            });
+        });
+        ui.add_space(10.0);
+
+        let Some(baseline) = self.comparison.as_ref() else {
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("No baseline loaded").strong());
+                ui.label(
+                    RichText::new(
+                        "Open an earlier NDJSON session to compare workload, latency, queue pressure, and attribution.",
+                    )
+                    .color(MUTED),
+                );
+            });
+            return;
+        };
+        let baseline_summary = baseline.summary.clone();
+        let baseline_name = baseline
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("baseline.ndjson")
+            .to_owned();
+        let baseline_rejected = baseline.rejected_records;
+        let baseline_probe_count = baseline
+            .capabilities
+            .as_ref()
+            .map_or(0, |capabilities| capabilities.attach_plan.len());
+        let current = self.analysis_summary();
+
+        if baseline_summary.completed_ios == 0 && baseline_summary.file_ios == 0 {
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("Baseline has no analyzable I/O").strong());
+                ui.label(RichText::new("Choose a session containing completed block or file I/O events.").color(MUTED));
+            });
+            return;
+        }
+        if current.completed_ios == 0 && current.file_ios == 0 {
+            card_frame().show(ui, |ui| {
+                ui.label(RichText::new("Current session has no analyzable I/O").strong());
+                ui.label(RichText::new("Open or record the current session before calculating deltas.").color(MUTED));
+            });
+            return;
+        }
+
+        info_banner(
+            ui,
+            &format!(
+                "Baseline: {baseline_name} · {} rejected record(s) · {} declared probe(s)",
+                baseline_rejected, baseline_probe_count
+            ),
+        );
+        ui.add_space(10.0);
+        card_frame().show(ui, |ui| {
+            egui::Grid::new("session-comparison")
+                .striped(true)
+                .min_col_width(120.0)
+                .spacing([22.0, 10.0])
+                .show(ui, |ui| {
+                    for heading in ["Metric", "Baseline", "Current", "Delta"] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                    comparison_row(
+                        ui,
+                        "Completed I/O",
+                        baseline_summary.completed_ios,
+                        current.completed_ios,
+                        |value| value.to_string(),
+                    );
+                    comparison_row(
+                        ui,
+                        "Read bytes",
+                        baseline_summary.read_bytes,
+                        current.read_bytes,
+                        format_bytes,
+                    );
+                    comparison_row(
+                        ui,
+                        "Write bytes",
+                        baseline_summary.write_bytes,
+                        current.write_bytes,
+                        format_bytes,
+                    );
+                    comparison_optional_latency_row(
+                        ui,
+                        "p50 latency",
+                        baseline_summary.p50_latency_ns,
+                        current.p50_latency_ns,
+                    );
+                    comparison_optional_latency_row(
+                        ui,
+                        "p95 latency",
+                        baseline_summary.p95_latency_ns,
+                        current.p95_latency_ns,
+                    );
+                    comparison_optional_latency_row(
+                        ui,
+                        "p99 latency",
+                        baseline_summary.p99_latency_ns,
+                        current.p99_latency_ns,
+                    );
+                    comparison_row(
+                        ui,
+                        "Max queue depth",
+                        baseline_summary.max_queue_depth as u64,
+                        current.max_queue_depth as u64,
+                        |value| value.to_string(),
+                    );
+                    comparison_ratio_row(
+                        ui,
+                        "File attribution",
+                        ratio(
+                            baseline_summary.attributed_file_ios,
+                            baseline_summary.file_ios,
+                        ),
+                        ratio(current.attributed_file_ios, current.file_ios),
+                    );
                 });
         });
     }
@@ -1847,43 +2269,38 @@ impl eframe::App for StudioApp {
                 nav_item(
                     ui,
                     &mut self.page,
-                    Page::Summary,
+                    Page::Overview,
                     "▦",
-                    "Summary",
-                    "KPIs and workload mix",
+                    "Overview",
+                    "Findings and data quality",
                 );
                 nav_item(
                     ui,
                     &mut self.page,
-                    Page::Pipeline,
+                    Page::Investigate,
                     "⇢",
-                    "Pipeline",
-                    "Syscall → UFS waterfall",
+                    "Investigate",
+                    "Request, file and pipeline",
                 );
                 nav_item(
                     ui,
                     &mut self.page,
-                    Page::Explorer,
+                    Page::Explore,
                     "⌁",
-                    "Explorer",
-                    "Interactive axes and groups",
+                    "Explore",
+                    "Presets, axes and groups",
                 );
                 nav_item(
                     ui,
                     &mut self.page,
-                    Page::Events,
-                    "≡",
-                    "Block events",
-                    "Request-level pipeline",
+                    Page::Compare,
+                    "⇄",
+                    "Compare",
+                    "Baseline vs current",
                 );
-                nav_item(
-                    ui,
-                    &mut self.page,
-                    Page::Files,
-                    "▤",
-                    "File I/O",
-                    "Syscall path attribution",
-                );
+                ui.add_space(12.0);
+                ui.label(RichText::new("OPERATIONS").size(10.0).strong().color(MUTED));
+                ui.add_space(4.0);
                 nav_item(
                     ui,
                     &mut self.page,
@@ -1960,14 +2377,15 @@ impl eframe::App for StudioApp {
             )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.metrics_ui(ui);
-                    ui.add_space(20.0);
+                    if self.page == Page::Overview {
+                        self.metrics_ui(ui);
+                        ui.add_space(20.0);
+                    }
                     match self.page {
-                        Page::Summary => self.summary_ui(ui),
-                        Page::Pipeline => self.pipeline_ui(ui),
-                        Page::Explorer => self.explorer_ui(ui),
-                        Page::Events => self.table_ui(ui),
-                        Page::Files => self.files_ui(ui),
+                        Page::Overview => self.summary_ui(ui),
+                        Page::Investigate => self.investigate_ui(ui),
+                        Page::Explore => self.explorer_ui(ui),
+                        Page::Compare => self.compare_ui(ui),
                         Page::Diagnostics => self.diagnostics_ui(ui),
                     }
                     if let Some(report) = &self.preflight {
@@ -2192,6 +2610,64 @@ fn ratio(part: u64, total: u64) -> f64 {
     }
 }
 
+fn relative_delta_percent(baseline: u64, current: u64) -> Option<f64> {
+    (baseline != 0).then(|| (current as f64 - baseline as f64) * 100.0 / baseline as f64)
+}
+
+fn comparison_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    baseline: u64,
+    current: u64,
+    formatter: impl Fn(u64) -> String,
+) {
+    ui.label(label);
+    ui.label(formatter(baseline));
+    ui.label(formatter(current));
+    let delta = current as i128 - baseline as i128;
+    let sign = if delta > 0 {
+        "+"
+    } else if delta < 0 {
+        "−"
+    } else {
+        ""
+    };
+    let absolute = delta.unsigned_abs().min(u64::MAX as u128) as u64;
+    let percent = relative_delta_percent(baseline, current)
+        .map(|value| format!(" ({value:+.1}%)"))
+        .unwrap_or_else(|| " (baseline is zero)".into());
+    ui.label(format!("{sign}{}{percent}", formatter(absolute)));
+    ui.end_row();
+}
+
+fn comparison_optional_latency_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    baseline: Option<u64>,
+    current: Option<u64>,
+) {
+    match (baseline, current) {
+        (Some(baseline), Some(current)) => {
+            comparison_row(ui, label, baseline, current, format_duration)
+        }
+        _ => {
+            ui.label(label);
+            ui.label(format_latency(baseline));
+            ui.label(format_latency(current));
+            ui.label(RichText::new("Unavailable").color(MUTED));
+            ui.end_row();
+        }
+    }
+}
+
+fn comparison_ratio_row(ui: &mut egui::Ui, label: &str, baseline: f64, current: f64) {
+    ui.label(label);
+    ui.label(format!("{baseline:.1}%"));
+    ui.label(format!("{current:.1}%"));
+    ui.label(format!("{:+.1} pp", current - baseline));
+    ui.end_row();
+}
+
 fn evenly_sample_indices(length: usize, limit: usize) -> Vec<usize> {
     if length <= limit {
         return (0..length).collect();
@@ -2364,6 +2840,7 @@ mod ui_tests {
     fn workflow_starts_with_connect_and_advances_after_device_selection() {
         let mut app = StudioApp::default();
         assert_eq!(app.setup_step(), SetupStep::Connect);
+        assert_eq!(app.page, Page::Overview);
 
         app.selected_serial = Some("device-01".into());
         assert_eq!(app.setup_step(), SetupStep::Verify);
@@ -2405,5 +2882,33 @@ mod ui_tests {
             "Multiple files (2)"
         );
         assert_eq!(file_group_key(&[]), "Unattributed");
+    }
+
+    #[test]
+    fn explorer_presets_select_stable_queries() {
+        assert_eq!(
+            ExplorerPreset::LatencyByFile.query(),
+            Some((
+                AxisMetric::TimeMs,
+                AxisMetric::TotalLatencyMs,
+                GroupBy::File
+            ))
+        );
+        assert_eq!(
+            ExplorerPreset::QueuePressure.query(),
+            Some((
+                AxisMetric::QueueDepth,
+                AxisMetric::TotalLatencyMs,
+                GroupBy::Direction
+            ))
+        );
+        assert_eq!(ExplorerPreset::Custom.query(), None);
+    }
+
+    #[test]
+    fn comparison_delta_is_signed_and_zero_baseline_is_unavailable() {
+        assert_eq!(relative_delta_percent(100, 125), Some(25.0));
+        assert_eq!(relative_delta_percent(100, 75), Some(-25.0));
+        assert_eq!(relative_delta_percent(0, 25), None);
     }
 }
