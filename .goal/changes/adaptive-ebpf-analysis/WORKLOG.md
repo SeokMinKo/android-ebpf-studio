@@ -16,3 +16,11 @@
 - Added the deterministic 1M-request `analysis_benchmark` harness for v0.5/v0.6 comparison.
 - Local execution is blocked as `ENV`: `cargo` and `rustc` are absent. The harness remains unverified until GitHub CI or a Rust-equipped host executes it.
 - Advanced to Protocol v5 implementation without marking TSK-201 performance acceptance complete; TSK-201 remains partial until benchmark evidence exists.
+
+## 0003 — 2026-08-27 v0.8 implementation and CI
+
+- Rebased the adaptive implementation onto released v0.6.0 so the four-workspace ERRC UI and bounded rendering remain intact.
+- Implemented Protocol v5 control/aggregate/heavy-hitter/trigger/segment/stack records, kernel filtering and aggregation, adaptive capture, flight-recorder evidence, stack cohorts, background session I/O and live UI controls.
+- GitHub Actions run `33051988092` passed format, Clippy with warnings denied, workspace tests, Windows GUI check, Android arm64 agent and eBPF object build.
+- The permanent 1M-request analysis benchmark retained 100,000 detailed requests and reported ingest 450 ms, summary 60 ms and graph query 102 ms on the hosted Linux runner.
+- NFR-204 Windows p95 frame/selector evidence and NFR-206 physical-device overhead remain manual residual gates; they are not claimed satisfied by CI.
