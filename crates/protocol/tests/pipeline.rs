@@ -79,6 +79,22 @@ fn utilization_is_union_of_overlapping_request_intervals() {
 }
 
 #[test]
+fn slow_reason_bounds_large_cohort_work() {
+    let mut engine = AnalysisEngine::new();
+    let mut selected = None;
+    for id in 1..=600 {
+        let start = id * 1_000_000;
+        engine.ingest(issue(id, start, id * 8, 4096));
+        selected = engine.ingest(complete(id, start + id * 1_000));
+    }
+
+    let reason = engine
+        .why_slow(selected.as_ref().expect("last request completes"))
+        .expect("last request is slower than the cohort median");
+    assert!(reason.cohort_samples <= 512);
+}
+
+#[test]
 fn a_gap_between_requests_is_idle_time() {
     let mut engine = AnalysisEngine::new();
     engine.ingest(issue(1, 1_000_000, 100, 4096));

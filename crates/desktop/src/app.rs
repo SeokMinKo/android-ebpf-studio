@@ -5,12 +5,14 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use android_ebpf_protocol::{
-    AccessPattern, AnalysisEngine, CompletedIo, CorrelationConfidence, DiagnosticLevel,
-    DiagnosticRecord, EdgeConfidence, IoNodeKind, IoOperation, IoSizeClass, PipelineLayer,
-    ProbeCapabilities, SCHEMA_VERSION, WireRecord,
+    AccessPattern, AnalysisEngine, AnalysisSummary, CompletedIo, CorrelationConfidence, DiagnosticLevel,
+    DiagnosticRecord, EdgeConfidence, FileOriginView, GraphMetrics, IoNodeKind, IoOperation,
+    IoPipeline, IoSizeClass, IoTransactionGraph, PipelineLayer, ProbeCapabilities, SCHEMA_VERSION,
+    SlowReason, WireRecord,
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -26,6 +28,11 @@ use crate::{
 };
 
 const MAX_RECENT: usize = 2_000;
+const MAX_EXPLORER_POINTS: usize = 12_000;
+const MAX_GRAPH_EXPLORER_POINTS: usize = 2_000;
+const MAX_EXPLORER_GROUPS: usize = 32;
+const MAX_MESSAGES_PER_FRAME: usize = 1_000;
+const LIVE_ANALYSIS_REFRESH: Duration = Duration::from_millis(250);
 const BG: Color32 = Color32::from_rgb(12, 17, 27);
 const PANEL: Color32 = Color32::from_rgb(20, 27, 40);
 const PANEL_RAISED: Color32 = Color32::from_rgb(27, 36, 52);
@@ -103,7 +110,19 @@ impl AxisMetric {
         }
     }
 
-    fn value(self, analyzer: &AnalysisEngine, io: &CompletedIo, origin_ns: u64) -> Option<f64> {
+    fn needs_graph(self) -> bool {
+        matches!(
+            self,
+            Self::FilesystemLatencyMs | Self::UfsLatencyMs | Self::CriticalPathMs
+        )
+    }
+
+    fn value(
+        self,
+        io: &CompletedIo,
+        origin_ns: u64,
+        graph: Option<&IoTransactionGraph>,
+    ) -> Option<f64> {
         match self {
             Self::TimeMs => Some(io.completion.ts_ns.saturating_sub(origin_ns) as f64 / 1e6),
             Self::Sector => Some(io.issue.sector as f64),
@@ -115,14 +134,12 @@ impl AxisMetric {
             Self::Pid => Some(io.issue.pid as f64),
             Self::QueueDepth => Some(io.queue_depth_after as f64),
             Self::FilesystemLatencyMs => {
-                graph_kind_duration_ms(&analyzer.transaction_for(io), IoNodeKind::Filesystem)
+                graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
             Self::UfsLatencyMs => {
-                graph_kind_duration_ms(&analyzer.transaction_for(io), IoNodeKind::UfsCommand)
+                graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::UfsCommand))
             }
-            Self::CriticalPathMs => {
-                Some(analyzer.transaction_for(io).metrics().critical_path_ns as f64 / 1e6)
-            }
+            Self::CriticalPathMs => graph.map(|graph| graph.metrics().critical_path_ns as f64 / 1e6),
         }
     }
 }
@@ -157,12 +174,16 @@ impl GroupBy {
             Self::AccessPattern => "Sequential / Random",
             Self::SizeClass => "Small / Large",
             Self::Process => "Process",
-            Self::File => "File / inode",
+            Self::File => "File",
             Self::Origin => "Origin",
             Self::Confidence => "Attribution confidence",
         }
     }
-    fn key(self, analyzer: &AnalysisEngine, io: &CompletedIo) -> String {
+    fn needs_graph(self) -> bool {
+        matches!(self, Self::File | Self::Origin | Self::Confidence)
+    }
+
+    fn key(self, io: &CompletedIo, graph: Option<&IoTransactionGraph>) -> String {
         match self {
             Self::None => "All I/O".into(),
             Self::Direction => operation_label(io.issue.operation).into(),
@@ -170,7 +191,9 @@ impl GroupBy {
             Self::SizeClass => size_label(io.size_class).into(),
             Self::Process => format!("{} ({})", io.issue.comm, io.issue.pid),
             Self::File | Self::Origin | Self::Confidence => {
-                let graph = analyzer.transaction_for(io);
+                let Some(graph) = graph else {
+                    return "Unattributed".into();
+                };
                 let Some(request) = graph
                     .nodes
                     .iter()
@@ -180,16 +203,7 @@ impl GroupBy {
                 };
                 let origins = graph.file_origins_for(request.node_id);
                 match self {
-                    Self::File => origins.first().map_or_else(
-                        || "Unattributed".into(),
-                        |origin| {
-                            origin
-                                .path
-                                .as_ref()
-                                .and_then(|path| path.path.clone())
-                                .unwrap_or_else(|| origin.file.fallback_label())
-                        },
-                    ),
+                    Self::File => file_group_key(&origins),
                     Self::Origin => {
                         if origins.is_empty() {
                             "Unknown".into()
@@ -208,6 +222,31 @@ impl GroupBy {
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ExplorerView {
+    generation: u64,
+    x_axis: AxisMetric,
+    y_axis: AxisMetric,
+    group_by: GroupBy,
+    groups: Vec<(String, Vec<[f64; 2]>)>,
+    available: usize,
+    displayed: usize,
+    built_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct PipelineView {
+    generation: u64,
+    request_id: u64,
+    io: CompletedIo,
+    pipeline: IoPipeline,
+    graph: IoTransactionGraph,
+    graph_metrics: GraphMetrics,
+    origins: Vec<FileOriginView>,
+    slow_reason: Option<SlowReason>,
+    built_at: Instant,
 }
 
 pub struct StudioApp {
@@ -242,6 +281,10 @@ pub struct StudioApp {
     y_axis: AxisMetric,
     group_by: GroupBy,
     selected_pipeline_request: Option<u64>,
+    analysis_generation: u64,
+    explorer_view: Option<ExplorerView>,
+    pipeline_view: Option<PipelineView>,
+    summary_view: Option<(u64, Instant, AnalysisSummary)>,
 }
 
 impl Default for StudioApp {
@@ -279,6 +322,10 @@ impl Default for StudioApp {
             y_axis: AxisMetric::TotalLatencyMs,
             group_by: GroupBy::Direction,
             selected_pipeline_request: None,
+            analysis_generation: 0,
+            explorer_view: None,
+            pipeline_view: None,
+            summary_view: None,
         }
     }
 }
@@ -468,6 +515,10 @@ impl StudioApp {
                     .rev()
                     .collect();
                 self.analyzer = loaded.engine;
+                self.analysis_generation = self.analysis_generation.wrapping_add(1);
+                self.explorer_view = None;
+                self.pipeline_view = None;
+                self.summary_view = None;
                 self.rejected_records = loaded.rejected_lines;
                 self.capabilities = loaded.capabilities;
                 self.session_path = Some(path);
@@ -504,7 +555,11 @@ impl StudioApp {
     }
 
     fn drain_messages(&mut self) {
-        for _ in 0..5_000 {
+        let started = Instant::now();
+        for _ in 0..MAX_MESSAGES_PER_FRAME {
+            if started.elapsed() >= Duration::from_millis(8) {
+                break;
+            }
             let Ok(message) = self.rx.try_recv() else {
                 break;
             };
@@ -598,6 +653,7 @@ impl StudioApp {
                     }
                     self.recent.push_back(completed);
                 }
+                self.analysis_generation = self.analysis_generation.wrapping_add(1);
             }
             WireRecord::Health {
                 emitted_events,
@@ -632,6 +688,10 @@ impl StudioApp {
 
     fn reset_analysis(&mut self) {
         self.analyzer = AnalysisEngine::new();
+        self.analysis_generation = self.analysis_generation.wrapping_add(1);
+        self.explorer_view = None;
+        self.pipeline_view = None;
+        self.summary_view = None;
         self.recent.clear();
         self.received_events = 0;
         self.rejected_records = 0;
@@ -723,8 +783,29 @@ impl StudioApp {
         }
     }
 
-    fn metrics_ui(&self, ui: &mut egui::Ui) {
-        let summary = self.analyzer.summary();
+    fn analysis_summary(&mut self) -> AnalysisSummary {
+        let cache_valid = self.summary_view.as_ref().is_some_and(
+            |(generation, built_at, _)| {
+                *generation == self.analysis_generation
+                    || (self.is_running() && built_at.elapsed() < LIVE_ANALYSIS_REFRESH)
+            },
+        );
+        if !cache_valid {
+            self.summary_view = Some((
+                self.analysis_generation,
+                Instant::now(),
+                self.analyzer.summary(),
+            ));
+        }
+        self.summary_view
+            .as_ref()
+            .expect("summary view is rebuilt")
+            .2
+            .clone()
+    }
+
+    fn metrics_ui(&mut self, ui: &mut egui::Ui) {
+        let summary = self.analysis_summary();
         ui.columns(3, |columns| {
             metric_card(
                 &mut columns[0],
@@ -778,6 +859,81 @@ impl StudioApp {
         });
     }
 
+    fn rebuild_explorer_view(&mut self) {
+        let samples = self.analyzer.completed_ios();
+        let available = samples.len();
+        let origin_ns = samples.first().map_or(0, |io| io.completion.ts_ns);
+        let needs_graph =
+            self.x_axis.needs_graph() || self.y_axis.needs_graph() || self.group_by.needs_graph();
+        let limit = if needs_graph {
+            MAX_GRAPH_EXPLORER_POINTS
+        } else {
+            MAX_EXPLORER_POINTS
+        };
+        let mut groups: BTreeMap<String, Vec<[f64; 2]>> = BTreeMap::new();
+        for index in evenly_sample_indices(samples.len(), limit) {
+            let io = &samples[index];
+            let graph = needs_graph.then(|| self.analyzer.transaction_for(io));
+            let graph = graph.as_ref();
+            let (Some(x), Some(y)) = (
+                self.x_axis.value(io, origin_ns, graph),
+                self.y_axis.value(io, origin_ns, graph),
+            ) else {
+                continue;
+            };
+            groups
+                .entry(self.group_by.key(io, graph))
+                .or_default()
+                .push([x, y]);
+        }
+        let displayed = groups.values().map(Vec::len).sum();
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        if groups.len() > MAX_EXPLORER_GROUPS {
+            groups.sort_by(|left, right| right.1.len().cmp(&left.1.len()));
+            let overflow = groups.split_off(MAX_EXPLORER_GROUPS - 1);
+            let mut other = Vec::new();
+            for (_, mut values) in overflow {
+                other.append(&mut values);
+            }
+            groups.push(("Other groups".into(), other));
+        }
+        groups.sort_by(|left, right| left.0.cmp(&right.0));
+        self.explorer_view = Some(ExplorerView {
+            generation: self.analysis_generation,
+            x_axis: self.x_axis,
+            y_axis: self.y_axis,
+            group_by: self.group_by,
+            groups,
+            available,
+            displayed,
+            built_at: Instant::now(),
+        });
+    }
+
+    fn rebuild_pipeline_view(&mut self, io: CompletedIo) {
+        let pipeline = self.analyzer.pipeline_for(&io);
+        let graph = self.analyzer.transaction_for(&io);
+        let graph_metrics = graph.metrics();
+        let origins = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == IoNodeKind::BlockRequest)
+            .map(|node| graph.file_origins_for(node.node_id))
+            .unwrap_or_default();
+        let slow_reason = self.analyzer.why_slow(&io);
+        self.pipeline_view = Some(PipelineView {
+            generation: self.analysis_generation,
+            request_id: io.issue.request_id,
+            io,
+            pipeline,
+            graph,
+            graph_metrics,
+            origins,
+            slow_reason,
+            built_at: Instant::now(),
+        });
+    }
+
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
         section_header(
             ui,
@@ -809,21 +965,17 @@ impl StudioApp {
         });
         ui.add_space(10.0);
 
-        let samples = self.analyzer.completed_ios();
-        let origin_ns = samples.first().map_or(0, |io| io.completion.ts_ns);
-        let mut groups: BTreeMap<String, Vec<[f64; 2]>> = BTreeMap::new();
-        for io in samples.iter().rev().take(50_000).rev() {
-            let (Some(x), Some(y)) = (
-                self.x_axis.value(&self.analyzer, io, origin_ns),
-                self.y_axis.value(&self.analyzer, io, origin_ns),
-            ) else {
-                continue;
-            };
-            groups
-                .entry(self.group_by.key(&self.analyzer, io))
-                .or_default()
-                .push([x, y]);
+        let cache_valid = self.explorer_view.as_ref().is_some_and(|view| {
+            (view.generation == self.analysis_generation
+                || (self.is_running() && view.built_at.elapsed() < LIVE_ANALYSIS_REFRESH))
+                && view.x_axis == self.x_axis
+                && view.y_axis == self.y_axis
+                && view.group_by == self.group_by
+        });
+        if !cache_valid {
+            self.rebuild_explorer_view();
         }
+        let view = self.explorer_view.as_ref().expect("explorer view is rebuilt");
         let palette = [
             Color32::LIGHT_BLUE,
             Color32::LIGHT_GREEN,
@@ -840,20 +992,34 @@ impl StudioApp {
             .y_axis_label(self.y_axis.label())
             .legend(Legend::default())
             .show(ui, |plot| {
-                for (index, (name, values)) in groups.into_iter().enumerate() {
-                    let points: PlotPoints = values.into_iter().collect();
+                for (index, (name, values)) in view.groups.iter().enumerate() {
+                    let points: PlotPoints = values.iter().copied().collect();
                     plot.points(
-                        Points::new(name, points)
+                        Points::new(name.clone(), points)
                             .radius(2.5)
                             .color(palette[index % palette.len()]),
                     );
                 }
             });
+        ui.label(
+            RichText::new(format!(
+                "Showing {} of {} completed I/O samples{}",
+                view.displayed,
+                view.available,
+                if view.available > view.displayed {
+                    " · evenly sampled for interactive rendering"
+                } else {
+                    ""
+                }
+            ))
+            .small()
+            .color(MUTED),
+        );
         ui.label(RichText::new("ⓘ Queue latency requires block_rq_insert. Missing values are excluded instead of displayed as zero.").small().color(MUTED));
     }
 
-    fn summary_ui(&self, ui: &mut egui::Ui) {
-        let summary = self.analyzer.summary();
+    fn summary_ui(&mut self, ui: &mut egui::Ui) {
+        let summary = self.analysis_summary();
         section_header(
             ui,
             "Session overview",
@@ -981,6 +1147,7 @@ impl StudioApp {
                 self.analyzer
                     .completed_ios()
                     .iter()
+                    .rev()
                     .find(|io| io.issue.request_id == request_id)
             })
             .cloned()
@@ -1002,15 +1169,28 @@ impl StudioApp {
             return;
         };
         self.selected_pipeline_request = Some(io.issue.request_id);
-        let pipeline = self.analyzer.pipeline_for(&io);
-        let graph = self.analyzer.transaction_for(&io);
-        let graph_metrics = graph.metrics();
-        let origins = graph
-            .nodes
-            .iter()
-            .find(|node| node.kind == IoNodeKind::BlockRequest)
-            .map(|node| graph.file_origins_for(node.node_id))
-            .unwrap_or_default();
+        let cache_valid = self.pipeline_view.as_ref().is_some_and(|view| {
+            (view.generation == self.analysis_generation
+                || (self.is_running() && view.built_at.elapsed() < LIVE_ANALYSIS_REFRESH))
+                && view.request_id == io.issue.request_id
+        });
+        if !cache_valid {
+            self.rebuild_pipeline_view(io);
+        }
+        let view = self
+            .pipeline_view
+            .as_ref()
+            .expect("pipeline view is rebuilt")
+            .clone();
+        let PipelineView {
+            io,
+            pipeline,
+            graph,
+            graph_metrics,
+            origins,
+            slow_reason,
+            ..
+        } = view;
 
         card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -1105,7 +1285,7 @@ impl StudioApp {
                     });
                 }
             }
-            if let Some(reason) = self.analyzer.why_slow(&io) {
+            if let Some(reason) = slow_reason {
                 ui.separator();
                 ui.label(RichText::new("WHY SLOW?").size(10.0).strong().color(MUTED));
                 ui.label(format!(
@@ -1244,27 +1424,34 @@ impl StudioApp {
         );
         ui.add_space(10.0);
         card_frame().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("file-ios")
+            egui::Grid::new("file-ios-header")
+                .spacing([16.0, 9.0])
+                .show(ui, |ui| {
+                    for heading in [
+                        "End ns",
+                        "Op",
+                        "Requested",
+                        "Completed",
+                        "Latency",
+                        "PID",
+                        "FD",
+                        "Confidence",
+                        "Identity",
+                        "Path snapshot",
+                    ] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                });
+            let files = self.analyzer.file_ios();
+            let row_count = files.len().min(1_000);
+            egui::ScrollArea::vertical().show_rows(ui, 27.0, row_count, |ui, range| {
+                egui::Grid::new("file-ios-rows")
                     .striped(true)
                     .spacing([16.0, 9.0])
                     .show(ui, |ui| {
-                        for heading in [
-                            "End ns",
-                            "Op",
-                            "Requested",
-                            "Completed",
-                            "Latency",
-                            "PID",
-                            "FD",
-                            "Confidence",
-                            "Identity",
-                            "Path snapshot",
-                        ] {
-                            ui.strong(heading);
-                        }
-                        ui.end_row();
-                        for file in self.analyzer.file_ios().iter().rev().take(1_000) {
+                        for position in range {
+                            let file = &files[files.len() - 1 - position];
                             ui.label(file.end_ts_ns.to_string());
                             ui.label(operation_label(file.operation));
                             ui.label(format_bytes(file.requested_bytes));
@@ -1461,8 +1648,9 @@ impl StudioApp {
 impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_messages();
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(100));
+        if self.is_running() || !self.rx.is_empty() {
+            ui.ctx().request_repaint_after(Duration::from_millis(33));
+        }
         apply_theme(ui.ctx());
 
         egui::Panel::top("app-header")
@@ -1998,6 +2186,15 @@ fn ratio(part: u64, total: u64) -> f64 {
     }
 }
 
+fn evenly_sample_indices(length: usize, limit: usize) -> Vec<usize> {
+    if length <= limit {
+        return (0..length).collect();
+    }
+    (0..limit)
+        .map(|index| index * length / limit)
+        .collect()
+}
+
 fn operation_label(value: IoOperation) -> &'static str {
     match value {
         IoOperation::Read => "Read",
@@ -2115,6 +2312,18 @@ fn graph_kind_duration_ms(
     found.then_some(duration as f64 / 1e6)
 }
 
+fn file_group_key(origins: &[FileOriginView]) -> String {
+    match origins {
+        [] => "Unattributed".into(),
+        [origin] => origin
+            .path
+            .as_ref()
+            .and_then(|path| path.path.clone())
+            .unwrap_or_else(|| origin.file.fallback_label()),
+        _ => format!("Multiple files ({})", origins.len()),
+    }
+}
+
 fn axis_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut AxisMetric) {
     ui.vertical(|ui| {
         ui.label(RichText::new(label).size(10.0).color(MUTED));
@@ -2145,6 +2354,7 @@ fn summary_card(ui: &mut egui::Ui, label: &str, value: String) {
 #[cfg(test)]
 mod ui_tests {
     use super::*;
+    use android_ebpf_protocol::{FileIdentity, PathSnapshot, PathSource};
 
     #[test]
     fn workflow_starts_with_connect_and_advances_after_device_selection() {
@@ -2153,5 +2363,37 @@ mod ui_tests {
 
         app.selected_serial = Some("device-01".into());
         assert_eq!(app.setup_step(), SetupStep::Verify);
+    }
+
+    #[test]
+    fn explorer_sampling_is_bounded_and_spans_the_session() {
+        let indices = evenly_sample_indices(100_000, 2_000);
+        assert_eq!(indices.len(), 2_000);
+        assert_eq!(indices[0], 0);
+        assert!(indices.last().is_some_and(|index| *index >= 99_900));
+        assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn file_group_uses_path_and_preserves_multiple_origins() {
+        let origin = FileOriginView {
+            file: FileIdentity {
+                fs_device_major: 259,
+                fs_device_minor: 7,
+                inode: 42,
+                inode_generation: None,
+                mount_id: Some(1),
+            },
+            path: Some(PathSnapshot {
+                path: Some("/data/test.bin".into()),
+                source: PathSource::ProcFd,
+                captured_ts_ns: 100,
+                deleted: false,
+            }),
+            confidence: EdgeConfidence::Probable,
+        };
+        assert_eq!(file_group_key(std::slice::from_ref(&origin)), "/data/test.bin");
+        assert_eq!(file_group_key(&[origin.clone(), origin]), "Multiple files (2)");
+        assert_eq!(file_group_key(&[]), "Unattributed");
     }
 }

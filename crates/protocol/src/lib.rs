@@ -1,6 +1,7 @@
 //! Platform-independent event protocol and storage analysis core.
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     io::{self, BufRead, Write},
 };
@@ -10,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA_VERSION: u16 = 4;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
+const MAX_DERIVED_CACHE_ENTRIES: usize = 4_096;
+const MAX_RCA_COHORT_SAMPLES: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1286,6 +1289,131 @@ struct MutableCategory {
     latencies: Vec<u64>,
 }
 
+fn time_buckets(start_ts_ns: u64, end_ts_ns: u64) -> Vec<u64> {
+    if end_ts_ns < start_ts_ns {
+        return Vec::new();
+    }
+    let start = start_ts_ns / 1_000_000_000;
+    let end = end_ts_ns / 1_000_000_000;
+    let count = end.saturating_sub(start).saturating_add(1).min(121);
+    (0..count).map(|offset| start + offset).collect()
+}
+
+fn request_time_buckets(io: &CompletedIo) -> Vec<u64> {
+    let start = io
+        .insert
+        .as_ref()
+        .map_or(io.issue.ts_ns, |insert| insert.ts_ns)
+        .saturating_sub(10_000_000)
+        / 1_000_000_000;
+    let end = io.completion.ts_ns.saturating_add(10_000_000) / 1_000_000_000;
+    (start..=end).collect()
+}
+
+fn request_cache_key(io: &CompletedIo) -> (u64, u64, u64) {
+    (
+        io.issue.request_id,
+        io.issue.ts_ns,
+        io.completion.ts_ns,
+    )
+}
+
+#[derive(Debug, Default)]
+struct AnalysisIndex {
+    files_by_pid_time: HashMap<(u32, u64), Vec<usize>>,
+    files_by_tid_time: HashMap<(u32, u64), Vec<usize>>,
+    long_files: Vec<usize>,
+    observations_by_request: HashMap<u64, Vec<usize>>,
+    observations_by_pid_time: HashMap<(u32, u64), Vec<usize>>,
+    observations_by_sector_time: HashMap<(u64, u64), Vec<usize>>,
+    context_observations_by_time: HashMap<u64, Vec<usize>>,
+    long_observations: Vec<usize>,
+    nodes_by_transaction: HashMap<u64, Vec<usize>>,
+    edges_by_transaction: HashMap<u64, Vec<usize>>,
+}
+
+impl AnalysisIndex {
+    fn build(engine: &AnalysisEngine) -> Self {
+        let mut index = Self::default();
+        for (position, file) in engine.file_ios.iter().enumerate() {
+            let seconds = time_buckets(file.start_ts_ns, file.end_ts_ns);
+            if seconds.len() > 120 {
+                index.long_files.push(position);
+                continue;
+            }
+            for second in seconds {
+                index
+                    .files_by_pid_time
+                    .entry((file.pid, second))
+                    .or_default()
+                    .push(position);
+                if file.tid != 0 {
+                    index
+                        .files_by_tid_time
+                        .entry((file.tid, second))
+                        .or_default()
+                        .push(position);
+                }
+            }
+        }
+        for (position, observation) in engine.pipeline_observations.iter().enumerate() {
+            if let Some(request_id) = observation.correlation_id {
+                index
+                    .observations_by_request
+                    .entry(request_id)
+                    .or_default()
+                    .push(position);
+            }
+            let end_ts_ns = observation.end_ts_ns.unwrap_or(observation.ts_ns);
+            let seconds = time_buckets(observation.ts_ns, end_ts_ns);
+            if seconds.len() > 120 {
+                index.long_observations.push(position);
+                continue;
+            }
+            for second in seconds {
+                index
+                    .observations_by_pid_time
+                    .entry((observation.pid, second))
+                    .or_default()
+                    .push(position);
+                if let Some(sector) = observation.sector {
+                    index
+                        .observations_by_sector_time
+                        .entry((sector, second))
+                        .or_default()
+                        .push(position);
+                }
+                if observation.confidence == CorrelationConfidence::ContextOnly {
+                    index
+                        .context_observations_by_time
+                        .entry(second)
+                        .or_default()
+                        .push(position);
+                }
+            }
+        }
+        for (position, node) in engine.graph_nodes.iter().enumerate() {
+            if let Some(transaction_id) = node.transaction_id {
+                index
+                    .nodes_by_transaction
+                    .entry(transaction_id)
+                    .or_default()
+                    .push(position);
+            }
+        }
+        for (position, edge) in engine.graph_edges.iter().enumerate() {
+            if let Some(transaction_id) = edge.transaction_id {
+                index
+                    .edges_by_transaction
+                    .entry(transaction_id)
+                    .or_default()
+                    .push(position);
+            }
+        }
+        index
+    }
+}
+
 #[derive(Debug)]
 pub struct AnalysisEngine {
     correlator: RequestCorrelator,
@@ -1304,6 +1432,10 @@ pub struct AnalysisEngine {
     ambiguous_pipeline: HashMap<(PipelineLayer, u64, String), u64>,
     graph_nodes: Vec<IoNode>,
     graph_edges: Vec<IoEdge>,
+    summary_cache: RefCell<Option<AnalysisSummary>>,
+    pipeline_cache: RefCell<HashMap<(u64, u64, u64), IoPipeline>>,
+    transaction_cache: RefCell<HashMap<(u64, u64, u64), IoTransactionGraph>>,
+    analysis_index: RefCell<Option<AnalysisIndex>>,
 }
 
 impl AnalysisEngine {
@@ -1330,10 +1462,26 @@ impl AnalysisEngine {
             ambiguous_pipeline: HashMap::new(),
             graph_nodes: Vec::new(),
             graph_edges: Vec::new(),
+            summary_cache: RefCell::new(None),
+            pipeline_cache: RefCell::new(HashMap::new()),
+            transaction_cache: RefCell::new(HashMap::new()),
+            analysis_index: RefCell::new(None),
         }
     }
 
     pub fn ingest(&mut self, event: StorageEvent) -> Option<CompletedIo> {
+        self.summary_cache.get_mut().take();
+        if matches!(
+            &event,
+            StorageEvent::FileIo(_)
+                | StorageEvent::Pipeline(_)
+                | StorageEvent::Node(_)
+                | StorageEvent::Edge(_)
+        ) {
+            self.pipeline_cache.get_mut().clear();
+            self.transaction_cache.get_mut().clear();
+            self.analysis_index.get_mut().take();
+        }
         match event {
             StorageEvent::BlockInsert(insert) => {
                 self.observe_ts(insert.ts_ns);
@@ -1522,6 +1670,9 @@ impl AnalysisEngine {
     }
 
     pub fn summary(&self) -> AnalysisSummary {
+        if let Some(summary) = self.summary_cache.borrow().as_ref() {
+            return summary.clone();
+        }
         let mut summary = self.summary.clone();
         let mut values = self.latencies_ns.clone();
         values.sort_unstable();
@@ -1578,6 +1729,7 @@ impl AnalysisEngine {
                 Some(EdgeConfidence::ContextOnly) | None => summary.attribution.unattributed += 1,
             }
         }
+        *self.summary_cache.borrow_mut() = Some(summary.clone());
         summary
     }
 
@@ -1593,17 +1745,121 @@ impl AnalysisEngine {
     }
 
     pub fn pipeline_for(&self, io: &CompletedIo) -> IoPipeline {
-        build_io_pipeline(io, &self.pipeline_observations)
+        let cache_key = request_cache_key(io);
+        if let Some(pipeline) = self.pipeline_cache.borrow().get(&cache_key) {
+            return pipeline.clone();
+        }
+        if self.analysis_index.borrow().is_none() {
+            *self.analysis_index.borrow_mut() = Some(AnalysisIndex::build(self));
+        }
+        let index = self.analysis_index.borrow();
+        let index = index.as_ref().expect("analysis index is initialized");
+        let mut positions = index.long_observations.clone();
+        if let Some(candidates) = index.observations_by_request.get(&io.issue.request_id) {
+            positions.extend_from_slice(candidates);
+        }
+        for second in request_time_buckets(io) {
+            for candidates in [
+                index.observations_by_pid_time.get(&(io.issue.pid, second)),
+                index
+                    .observations_by_sector_time
+                    .get(&(io.issue.sector, second)),
+                index.context_observations_by_time.get(&second),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                positions.extend_from_slice(candidates);
+            }
+        }
+        positions.sort_unstable();
+        positions.dedup();
+        let observations: Vec<_> = positions
+            .into_iter()
+            .map(|position| self.pipeline_observations[position].clone())
+            .collect();
+        drop(index);
+        let pipeline = build_io_pipeline(io, &observations);
+        let mut cache = self.pipeline_cache.borrow_mut();
+        if cache.len() >= MAX_DERIVED_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(cache_key, pipeline.clone());
+        pipeline
     }
 
     pub fn transaction_for(&self, io: &CompletedIo) -> IoTransactionGraph {
-        build_transaction_graph(
-            io,
-            &self.file_ios,
-            &self.pipeline_observations,
-            &self.graph_nodes,
-            &self.graph_edges,
-        )
+        let cache_key = request_cache_key(io);
+        if let Some(graph) = self.transaction_cache.borrow().get(&cache_key) {
+            return graph.clone();
+        }
+        if self.analysis_index.borrow().is_none() {
+            *self.analysis_index.borrow_mut() = Some(AnalysisIndex::build(self));
+        }
+        let index = self.analysis_index.borrow();
+        let index = index.as_ref().expect("analysis index is initialized");
+        let mut file_positions = index.long_files.clone();
+        for second in request_time_buckets(io) {
+            if let Some(positions) = index.files_by_pid_time.get(&(io.issue.pid, second)) {
+                file_positions.extend_from_slice(positions);
+            }
+            if let Some(positions) = index.files_by_tid_time.get(&(io.issue.tid, second)) {
+                file_positions.extend_from_slice(positions);
+            }
+        }
+        file_positions.sort_unstable();
+        file_positions.dedup();
+        let files: Vec<_> = file_positions
+            .into_iter()
+            .map(|position| self.file_ios[position].clone())
+            .collect();
+
+        let mut observation_positions = index.long_observations.clone();
+        if let Some(positions) = index.observations_by_request.get(&io.issue.request_id) {
+            observation_positions.extend_from_slice(positions);
+        }
+        for second in request_time_buckets(io) {
+            for positions in [
+                index.observations_by_pid_time.get(&(io.issue.pid, second)),
+                index
+                    .observations_by_sector_time
+                    .get(&(io.issue.sector, second)),
+                index.context_observations_by_time.get(&second),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                observation_positions.extend_from_slice(positions);
+            }
+        }
+        observation_positions.sort_unstable();
+        observation_positions.dedup();
+        let observations: Vec<_> = observation_positions
+            .into_iter()
+            .map(|position| self.pipeline_observations[position].clone())
+            .collect();
+        let nodes: Vec<_> = index
+            .nodes_by_transaction
+            .get(&io.issue.request_id)
+            .into_iter()
+            .flatten()
+            .map(|&position| self.graph_nodes[position].clone())
+            .collect();
+        let edges: Vec<_> = index
+            .edges_by_transaction
+            .get(&io.issue.request_id)
+            .into_iter()
+            .flatten()
+            .map(|&position| self.graph_edges[position].clone())
+            .collect();
+        drop(index);
+        let graph = build_transaction_graph(io, &files, &observations, &nodes, &edges);
+        let mut cache = self.transaction_cache.borrow_mut();
+        if cache.len() >= MAX_DERIVED_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(cache_key, graph.clone());
+        graph
     }
 
     pub fn transactions(&self) -> Vec<IoTransactionGraph> {
@@ -1631,16 +1887,16 @@ impl AnalysisEngine {
         if cohort.len() < 3 {
             return None;
         }
+        let cohort = evenly_sample_refs(&cohort, MAX_RCA_COHORT_SAMPLES);
+        let cohort_durations: Vec<_> = cohort
+            .iter()
+            .map(|io| durations_by_kind(&self.transaction_for(io)))
+            .collect();
         let mut best: Option<SlowReason> = None;
         for (&kind, &selected_ns) in &selected_durations {
-            let mut values: Vec<_> = cohort
+            let mut values: Vec<_> = cohort_durations
                 .iter()
-                .map(|io| {
-                    durations_by_kind(&self.transaction_for(io))
-                        .get(&kind)
-                        .copied()
-                        .unwrap_or(0)
-                })
+                .map(|durations| durations.get(&kind).copied().unwrap_or(0))
                 .collect();
             values.sort_unstable();
             let median = percentile(&values, 50).unwrap_or(0);
@@ -1668,7 +1924,7 @@ impl AnalysisEngine {
                 cohort_median_ns: median,
                 delta_ns: delta,
                 confidence,
-                cohort_samples: cohort.len(),
+                cohort_samples: cohort_durations.len(),
             });
         }
         best
@@ -2139,6 +2395,15 @@ fn percentile(sorted: &[u64], percentile: usize) -> Option<u64> {
     }
     let rank = ((percentile * sorted.len()).div_ceil(100)).max(1);
     sorted.get(rank - 1).copied()
+}
+
+fn evenly_sample_refs<'a, T>(values: &[&'a T], limit: usize) -> Vec<&'a T> {
+    if values.len() <= limit {
+        return values.to_vec();
+    }
+    (0..limit)
+        .map(|index| values[index * values.len() / limit])
+        .collect()
 }
 
 fn union_duration(intervals: &[(u64, u64)]) -> u64 {

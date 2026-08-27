@@ -1,0 +1,10 @@
+{
+  "change": "analysis-ui-performance",
+  "status": "in_progress",
+  "baseline": "c499fa7",
+  "current_task": "Add analysis result caches and safe invalidation",
+  "verification": {
+    "local_rust_toolchain": "unavailable",
+    "ci": "pending"
+  }
+}
