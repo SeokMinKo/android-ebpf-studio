@@ -44,3 +44,10 @@
 - Implemented bounded UI update/message drain/Summary/Explorer/Pipeline latency windows, backlog peaks, capture-efficiency presentation, reset and diagnostic-bundle serialization.
 - Initial CI exposed a `DiagnosticRecord.duration_ms` integer contract mismatch only on the Windows GUI feature path; retained 0.001 ms detail text while rounding the common field to integer milliseconds.
 - GitHub Actions run `33058448179` passed all four jobs after the correction. TSK-213 is done; TSK-214 is active for v0.8.1 packaging.
+
+## 0007 — 2026-08-27 v0.8.1 release
+
+- Final PR CI run `33058876694` passed all four jobs; PR #7 squash-merged as `281aff944a0611a55bdda43d97d901f8663f2a36`.
+- Release workflow run `33059044284` passed Windows GUI, Android arm64 agent, eBPF object and publish jobs.
+- v0.8.1 published the complete ZIP, executable, agent, object and SHA256 manifest. TSK-214 is done.
+- Reference-Windows user measurements and physical-device mode overhead remain the exact resume boundary; runtime telemetry now captures the necessary evidence.
