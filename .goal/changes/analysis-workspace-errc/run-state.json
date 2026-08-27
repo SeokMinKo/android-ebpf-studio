@@ -5,16 +5,16 @@
   "execution_mode": "DURABLE",
   "route": "DESIGN_FIRST",
   "run_status": "ACTIVE",
-  "phase": "P9",
+  "phase": "P10",
   "max_active_streams": 1,
-  "evidence_order": ["0001"],
+  "evidence_order": ["0001", "0002"],
   "required_spec_ids": ["REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006", "REQ-007", "NFR-001", "CON-001", "INV-001"],
   "spec": {
     "path": "spec.md",
     "revision": 1,
     "hash": "sha256:83280d60b147244a7683e8817680fb1a8085748f494bbdf54b04d83a1553419b",
     "confirmation": "CONFIRMED-AUTO",
-    "lifecycle": "CONFIRMED"
+    "lifecycle": "IMPLEMENTED"
   },
   "artifacts": [
     {"id":"design","role":"DESIGN","path":"design.md","revision":1,"status":"CONFIRMED","current":true,"derived_from":["spec@1"]},
@@ -23,12 +23,12 @@
     {"id":"evidence","role":"EVIDENCE","path":"evidence/ledger.md","revision":1,"status":"DRAFT","current":true,"derived_from":["spec@1","tasks@1"]}
   ],
   "tasks": [
-    {"id":"TSK-001","spec_ids":["REQ-001","REQ-006","REQ-007"],"depends_on":[],"status":"in_progress","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":["crates/desktop/src/app.rs"],"forbidden_paths":["crates/protocol/**","crates/android-ebpf/**"],"tdd_required":true},
-    {"id":"TSK-002","spec_ids":["REQ-002","NFR-001","INV-001"],"depends_on":["TSK-001"],"status":"pending","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
-    {"id":"TSK-003","spec_ids":["REQ-003","NFR-001"],"depends_on":["TSK-001"],"status":"pending","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
-    {"id":"TSK-004","spec_ids":["REQ-004","CON-001"],"depends_on":["TSK-001"],"status":"pending","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
-    {"id":"TSK-005","spec_ids":["REQ-005","INV-001"],"depends_on":["TSK-001"],"status":"pending","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
-    {"id":"TSK-006","spec_ids":["REQ-001","REQ-002","REQ-003","REQ-004","REQ-005","REQ-006","REQ-007","NFR-001","CON-001","INV-001"],"depends_on":["TSK-002","TSK-003","TSK-004","TSK-005"],"status":"pending","stream_id":"release","planned_paths":["Cargo.toml","Cargo.lock","crates/android-ebpf/Cargo.toml","crates/android-ebpf/Cargo.lock",".github/workflows/release.yml"],"leased_paths":[],"forbidden_paths":[],"tdd_required":false}
+    {"id":"TSK-001","spec_ids":["REQ-001","REQ-006","REQ-007"],"depends_on":[],"status":"done","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**","crates/android-ebpf/**"],"tdd_required":true},
+    {"id":"TSK-002","spec_ids":["REQ-002","NFR-001","INV-001"],"depends_on":["TSK-001"],"status":"done","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
+    {"id":"TSK-003","spec_ids":["REQ-003","NFR-001"],"depends_on":["TSK-001"],"status":"done","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
+    {"id":"TSK-004","spec_ids":["REQ-004","CON-001"],"depends_on":["TSK-001"],"status":"done","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs","crates/desktop/src/session.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
+    {"id":"TSK-005","spec_ids":["REQ-005","INV-001"],"depends_on":["TSK-001"],"status":"done","stream_id":"desktop-ui","planned_paths":["crates/desktop/src/app.rs"],"leased_paths":[],"forbidden_paths":["crates/protocol/**"],"tdd_required":true},
+    {"id":"TSK-006","spec_ids":["REQ-001","REQ-002","REQ-003","REQ-004","REQ-005","REQ-006","REQ-007","NFR-001","CON-001","INV-001"],"depends_on":["TSK-002","TSK-003","TSK-004","TSK-005"],"status":"in_progress","stream_id":"release","planned_paths":["Cargo.toml","Cargo.lock","crates/android-ebpf/Cargo.toml","crates/android-ebpf/Cargo.lock",".github/workflows/release.yml"],"leased_paths":[],"forbidden_paths":[],"tdd_required":false}
   ],
-  "resume": {"next_action":"Implement TSK-001 in crates/desktop/src/app.rs","last_checkpoint":"P8 confirmed"}
+  "resume": {"next_action":"Merge PR #4 after current documentation-only CI and verify v0.6.0 release assets","last_checkpoint":"CI 33038722552 passed"}
 }
