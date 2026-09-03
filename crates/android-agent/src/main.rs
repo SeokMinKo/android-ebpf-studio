@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod btf_layout;
+
 use android_ebpf_agent::trace_format::{
     parse_layout, parse_pipeline_layout, parse_raw_syscall_layout, validate_pair,
 };
@@ -21,22 +23,26 @@ use android_ebpf_protocol::{
     CaptureControlCommand, CaptureFilter, CaptureMode, CaptureState, ControlOutcome,
     CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileIo,
     HeavyHitterDimension, HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram,
-    HistogramMetric, IoOperation, PipelineLayer, PipelineObservation, PipelinePhase,
-    ProbeCapabilities, ProbePlan, SCHEMA_VERSION, SegmentRecord, StackFingerprintRecord, StackKind,
-    StorageEvent, WireRecord, write_record,
+    HistogramMetric, IoOperation, IoOrigin, PipelineLayer, PipelineObservation, PipelinePhase,
+    ProbeCapabilities, ProbePlan, RequestOrigin, SCHEMA_VERSION, SegmentRecord,
+    StackFingerprintRecord, StackKind, StorageEvent, WireRecord, write_record,
 };
 use android_ebpf_types::{
-    FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE,
-    KIND_FILE_IO, KIND_PIPELINE, KernelAggregate, KernelEvent, LAYER_FILESYSTEM, LAYER_SCHEDULER,
-    LAYER_SCSI, LAYER_UFS, MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD,
-    OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END, PHASE_INSTANT,
-    PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE, TraceLayout,
+    FileIdentityLayout, FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT,
+    KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN, KernelAggregate,
+    KernelEvent, LAYER_FILESYSTEM, LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS, MODE_BALANCED,
+    MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE,
+    ORIGIN_CHECKPOINT, ORIGIN_FILE, ORIGIN_FILESYSTEM_METADATA, ORIGIN_GARBAGE_COLLECTION,
+    ORIGIN_INCOMPLETE, ORIGIN_INODE_GENERATION_VALID, ORIGIN_JOURNAL, ORIGIN_KIND_MASK,
+    ORIGIN_MOUNT_ID_VALID, ORIGIN_READAHEAD, ORIGIN_SWAP, ORIGIN_WRITEBACK, PHASE_BEGIN, PHASE_END,
+    PHASE_INSTANT, PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE,
+    TraceLayout,
 };
 use anyhow::{Context, Result, bail};
 use aya::{
-    Ebpf, Pod,
+    Btf, Ebpf, Pod,
     maps::{Array, HashMap as UserHashMap, MapData, PerCpuArray, RingBuf, StackTraceMap},
-    programs::TracePoint,
+    programs::{BtfTracePoint, FEntry, FExit, TracePoint},
 };
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -45,6 +51,7 @@ const COMPLETE_FORMAT: &str = "/sys/kernel/tracing/events/block/block_rq_complet
 const INSERT_FORMAT: &str = "/sys/kernel/tracing/events/block/block_rq_insert/format";
 const SYS_ENTER_FORMAT: &str = "/sys/kernel/tracing/events/raw_syscalls/sys_enter/format";
 const SYS_EXIT_FORMAT: &str = "/sys/kernel/tracing/events/raw_syscalls/sys_exit/format";
+const VMLINUX_BTF: &str = "/sys/kernel/btf/vmlinux";
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(2);
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -93,6 +100,12 @@ unsafe impl Pod for RawSyscallLayoutValue {}
 struct PipelineTraceLayoutValue(PipelineTraceLayout);
 
 unsafe impl Pod for PipelineTraceLayoutValue {}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct FileIdentityLayoutValue(FileIdentityLayout);
+
+unsafe impl Pod for FileIdentityLayoutValue {}
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -146,6 +159,7 @@ struct CollectorConfig {
     complete: TraceLayout,
     insert: Option<TraceLayout>,
     syscall: Option<RawSyscallLayout>,
+    file_identity_layout: Option<FileIdentityLayout>,
     pipeline_probes: Vec<PipelineProbe>,
     context_probes: Vec<ContextProbe>,
 }
@@ -456,6 +470,19 @@ impl LiveHeavyHitters {
                     confidence,
                 );
             }
+            StorageEvent::RequestOrigin(origin) => {
+                let key = origin
+                    .path
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.path.clone())
+                    .unwrap_or_else(|| origin.file.fallback_label());
+                self.files.observe(
+                    key,
+                    origin.bytes.unwrap_or_default(),
+                    0,
+                    Some(EdgeConfidence::Exact),
+                );
+            }
             _ => {}
         }
     }
@@ -733,6 +760,112 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
                 PipelineLayer::Syscall,
                 "sys_enter/sys_exit",
                 true,
+            );
+        }
+    }
+    if let Some(layout) = config.file_identity_layout {
+        let mut writeback_attached = false;
+        let result = (|| -> Result<()> {
+            configure_file_identity_layout(&mut bpf, layout)?;
+            let btf = Btf::from_sys_fs().context("cannot load target kernel BTF")?;
+            attach_fexit(&mut bpf, "exact_vfs_read_exit", "vfs_read", &btf)?;
+            attach_fentry(&mut bpf, "exact_vfs_read", "vfs_read", &btf)?;
+            attach_fexit(&mut bpf, "exact_vfs_write_exit", "vfs_write", &btf)?;
+            attach_fentry(&mut bpf, "exact_vfs_write", "vfs_write", &btf)?;
+            attach_fentry(&mut bpf, "exact_submit_bio", "submit_bio", &btf)?;
+            attach_fentry(
+                &mut bpf,
+                "exact_bio_to_request",
+                "blk_mq_bio_to_request",
+                &btf,
+            )?;
+            attach_btf_tracepoint(
+                &mut bpf,
+                "exact_block_bio_backmerge",
+                "block_bio_backmerge",
+                &btf,
+            )?;
+            attach_btf_tracepoint(
+                &mut bpf,
+                "exact_block_bio_frontmerge",
+                "block_bio_frontmerge",
+                &btf,
+            )?;
+            if let Err(error) = attach_fentry(
+                &mut bpf,
+                "exact_submit_bio_noacct",
+                "submit_bio_noacct",
+                &btf,
+            ) {
+                emit_diagnostic(
+                    session_id,
+                    DiagnosticLevel::Warn,
+                    "probe.attach",
+                    "EXACT_AUX_PROBE_UNAVAILABLE",
+                    "partial",
+                    Some(format!("function=submit_bio_noacct error={error:#}")),
+                );
+            }
+            if layout.address_space_host_offset != android_ebpf_types::OFFSET_MISSING {
+                let generic = attach_fexit(
+                    &mut bpf,
+                    "exact_write_cache_pages_exit",
+                    "write_cache_pages",
+                    &btf,
+                )
+                .and_then(|_| {
+                    attach_fentry(
+                        &mut bpf,
+                        "exact_write_cache_pages",
+                        "write_cache_pages",
+                        &btf,
+                    )
+                });
+                let writeback = generic.or_else(|_| {
+                    attach_fexit(
+                        &mut bpf,
+                        "exact_f2fs_write_data_pages_exit",
+                        "f2fs_write_data_pages",
+                        &btf,
+                    )?;
+                    attach_fentry(
+                        &mut bpf,
+                        "exact_f2fs_write_data_pages",
+                        "f2fs_write_data_pages",
+                        &btf,
+                    )
+                });
+                match writeback {
+                    Ok(()) => writeback_attached = true,
+                    Err(error) => emit_diagnostic(
+                        session_id,
+                        DiagnosticLevel::Warn,
+                        "probe.attach",
+                        "EXACT_WRITEBACK_PROBE_UNAVAILABLE",
+                        "partial",
+                        Some(format!("error={error:#}")),
+                    ),
+                }
+            }
+            configure_exact_attribution_enabled(&mut bpf, true)?;
+            Ok(())
+        })();
+        if emit_optional_probe_result(
+            session_id,
+            PipelineLayer::Bio,
+            "fentry/vfs+submit_bio+blk_mq_bio_to_request+tp_btf/block_bio_merge",
+            result,
+        ) {
+            config.capabilities.exact_file_attribution = true;
+            mark_exact_adapter_state(&mut config.capabilities, CapabilityState::Measured, None);
+            mark_exact_writeback_state(&mut config.capabilities, writeback_attached);
+        } else {
+            let _ = configure_exact_attribution_enabled(&mut bpf, false);
+            config.capabilities.exact_file_attribution = false;
+            mark_exact_adapter_state(
+                &mut config.capabilities,
+                CapabilityState::Unavailable,
+                Some("runtime attach failed; tracepoint/heuristic fallback remains active"),
             );
         }
     }
@@ -1450,6 +1583,52 @@ fn mark_attach_failed(
     }
 }
 
+fn mark_exact_adapter_state(
+    capabilities: &mut ProbeCapabilities,
+    state: CapabilityState,
+    reason: Option<&str>,
+) {
+    for plan in capabilities.attach_plan.iter_mut().filter(|plan| {
+        matches!(plan.layer, PipelineLayer::Vfs | PipelineLayer::Bio)
+            && plan.probe_kind.starts_with("fentry")
+    }) {
+        plan.state = state;
+        plan.reason = reason.map(str::to_owned);
+    }
+    if state == CapabilityState::Unavailable {
+        for layer in [PipelineLayer::Vfs, PipelineLayer::Bio] {
+            if !capabilities
+                .attach_plan
+                .iter()
+                .any(|plan| plan.layer == layer && plan.state != CapabilityState::Unavailable)
+            {
+                capabilities.pipeline_layers.retain(|value| *value != layer);
+            }
+        }
+    }
+}
+
+fn mark_exact_writeback_state(capabilities: &mut ProbeCapabilities, attached: bool) {
+    for plan in capabilities.attach_plan.iter_mut().filter(|plan| {
+        plan.layer == PipelineLayer::Writeback && plan.probe_kind.starts_with("fentry")
+    }) {
+        if attached {
+            plan.state = CapabilityState::Measured;
+            plan.reason = None;
+        } else {
+            plan.state = CapabilityState::Unavailable;
+            plan.reason = Some("runtime attach failed; no exact writeback origin adapter".into());
+        }
+    }
+    if !capabilities.attach_plan.iter().any(|plan| {
+        plan.layer == PipelineLayer::Writeback && plan.state != CapabilityState::Unavailable
+    }) {
+        capabilities
+            .pipeline_layers
+            .retain(|layer| *layer != PipelineLayer::Writeback);
+    }
+}
+
 fn required_step<T>(session_id: &str, event: &str, code: &str, result: Result<T>) -> Result<T> {
     if let Err(error) = &result {
         emit_diagnostic(
@@ -1478,6 +1657,12 @@ fn emit_event_trace(session_id: &str, sequence: u64, event: &StorageEvent) {
             value.correlation_id.or(value.stage_key),
             None,
             "stage",
+        ),
+        StorageEvent::RequestOrigin(value) => (
+            "graph",
+            Some(value.request_id),
+            Some(value.origin_id),
+            "request_origin",
         ),
         StorageEvent::Node(value) => ("graph", value.transaction_id, Some(value.node_id), "node"),
         StorageEvent::Edge(value) => ("graph", value.transaction_id, None, "edge"),
@@ -1513,6 +1698,7 @@ fn storage_event_timestamp(event: &StorageEvent) -> u64 {
         StorageEvent::BlockComplete(value) => value.ts_ns,
         StorageEvent::FileIo(value) => value.end_ts_ns,
         StorageEvent::Pipeline(value) => value.end_ts_ns.unwrap_or(value.ts_ns),
+        StorageEvent::RequestOrigin(value) => value.ts_ns,
         StorageEvent::Node(value) => value.end_or_start(),
         // Edges carry causal evidence but no timestamp. Keeping them at the
         // start of the retention window avoids inventing a measurement.
@@ -1545,6 +1731,7 @@ fn update_probe_health(
             },
             Some(value),
         ),
+        StorageEvent::RequestOrigin(_) => ("graph.request_origin", None),
         StorageEvent::Node(_) => ("graph.node", None),
         StorageEvent::Edge(_) => ("graph.edge", None),
     };
@@ -1637,6 +1824,26 @@ fn capabilities() -> Result<CollectorConfig> {
     let issue = parse_layout(&issue_text)?;
     let complete = parse_layout(&complete_text)?;
     let exact = validate_pair(&issue, &complete)?;
+    let btf_present = Path::new(VMLINUX_BTF).is_file();
+    let (file_identity_layout, exact_preflight_failure) = if !exact {
+        (
+            None,
+            Some("block tracepoints do not expose a shared request identity".to_owned()),
+        )
+    } else if !btf_present {
+        (
+            None,
+            Some(format!("target BTF is missing at {VMLINUX_BTF}")),
+        )
+    } else {
+        match btf_layout::file_identity_layout_from_sysfs(Path::new(VMLINUX_BTF)) {
+            Ok(layout) => (Some(layout), None),
+            Err(error) => (
+                None,
+                Some(format!("target BTF file-identity layout failed: {error:#}")),
+            ),
+        }
+    };
     let insert = fs::read_to_string(INSERT_FORMAT)
         .ok()
         .and_then(|text| parse_layout(&text).ok());
@@ -1789,6 +1996,15 @@ fn capabilities() -> Result<CollectorConfig> {
     if syscall.is_some() {
         pipeline_layers.push(PipelineLayer::Syscall);
     }
+    if file_identity_layout.is_some() {
+        pipeline_layers.push(PipelineLayer::Vfs);
+        pipeline_layers.push(PipelineLayer::Bio);
+        if file_identity_layout.is_some_and(|layout| {
+            layout.address_space_host_offset != android_ebpf_types::OFFSET_MISSING
+        }) {
+            pipeline_layers.push(PipelineLayer::Writeback);
+        }
+    }
     for probe in &pipeline_probes {
         if !pipeline_layers.contains(&probe.layer) {
             pipeline_layers.push(probe.layer);
@@ -1855,6 +2071,57 @@ fn capabilities() -> Result<CollectorConfig> {
             "tracepoint format unavailable or unsupported",
         )
     });
+    if file_identity_layout.is_some() {
+        attach_plan.extend([
+            ProbePlan {
+                layer: PipelineLayer::Vfs,
+                probe_kind: "fentry/fexit".into(),
+                group: "vfs".into(),
+                event_or_function: "vfs_read/vfs_write".into(),
+                state: CapabilityState::Derived,
+                format_hash: None,
+                reason: Some(
+                    "BTF layout resolved; final support is decided by attach trial".into(),
+                ),
+            },
+            ProbePlan {
+                layer: PipelineLayer::Bio,
+                probe_kind: "fentry/tp_btf".into(),
+                group: "block".into(),
+                event_or_function: "submit_bio/blk_mq_bio_to_request/block_bio_front+backmerge"
+                    .into(),
+                state: CapabilityState::Derived,
+                format_hash: None,
+                reason: Some("direct object propagation including request merges".into()),
+            },
+        ]);
+        if file_identity_layout.is_some_and(|layout| {
+            layout.address_space_host_offset != android_ebpf_types::OFFSET_MISSING
+        }) {
+            attach_plan.push(ProbePlan {
+                layer: PipelineLayer::Writeback,
+                probe_kind: "fentry/fexit".into(),
+                group: "writeback".into(),
+                event_or_function: "write_cache_pages/f2fs_write_data_pages".into(),
+                state: CapabilityState::Derived,
+                format_hash: None,
+                reason: Some(
+                    "address_space.host resolved; generic then F2FS attach fallback is trialed"
+                        .into(),
+                ),
+            });
+        }
+    } else if let Some(reason) = exact_preflight_failure {
+        attach_plan.extend([
+            unavailable_plan(PipelineLayer::Vfs, "vfs", "vfs_read/vfs_write", &reason),
+            unavailable_plan(
+                PipelineLayer::Bio,
+                "block",
+                "submit_bio/blk_mq_bio_to_request/block_bio_front+backmerge",
+                &reason,
+            ),
+        ]);
+    }
     attach_plan.extend(pipeline_probes.iter().map(|probe| ProbePlan {
         layer: probe.layer,
         probe_kind: "tracepoint".into(),
@@ -1943,18 +2210,21 @@ fn capabilities() -> Result<CollectorConfig> {
     Ok(CollectorConfig {
         capabilities: ProbeCapabilities {
             bpf_syscall: true,
-            btf: Path::new("/sys/kernel/btf/vmlinux").is_file(),
+            btf: btf_present,
             ring_buffer: true,
             block_insert: insert.is_some(),
             block_issue: true,
             block_complete: true,
             file_io: syscall.is_some(),
             exact_request_correlation: exact,
+            // Probe mode performs a non-mutating preflight. Capture changes
+            // this to true only after every essential typed hook attaches.
+            exact_file_attribution: false,
             ufs_events,
             fs_events,
             scsi_events,
             ext4_events,
-            vfs_probe_candidates: if Path::new("/sys/kernel/btf/vmlinux").is_file() {
+            vfs_probe_candidates: if btf_present {
                 vec![
                     "vfs_read".into(),
                     "vfs_write".into(),
@@ -1982,6 +2252,7 @@ fn capabilities() -> Result<CollectorConfig> {
         complete,
         insert,
         syscall,
+        file_identity_layout,
         pipeline_probes,
         context_probes,
     })
@@ -2119,6 +2390,24 @@ fn configure_syscall_layout(bpf: &mut Ebpf, layout: RawSyscallLayout) -> Result<
     Ok(())
 }
 
+fn configure_file_identity_layout(bpf: &mut Ebpf, layout: FileIdentityLayout) -> Result<()> {
+    let map = bpf
+        .map_mut("FILE_IDENTITY_LAYOUT")
+        .context("FILE_IDENTITY_LAYOUT map is missing")?;
+    let mut array = Array::<_, FileIdentityLayoutValue>::try_from(map)?;
+    array.set(0, FileIdentityLayoutValue(layout), 0)?;
+    Ok(())
+}
+
+fn configure_exact_attribution_enabled(bpf: &mut Ebpf, enabled: bool) -> Result<()> {
+    let map = bpf
+        .map_mut("EXACT_ATTRIBUTION_ENABLED")
+        .context("EXACT_ATTRIBUTION_ENABLED map is missing")?;
+    let mut array = Array::<_, u8>::try_from(map)?;
+    array.set(0, u8::from(enabled), 0)?;
+    Ok(())
+}
+
 fn configure_pipeline_layout(
     bpf: &mut Ebpf,
     name: &str,
@@ -2139,6 +2428,41 @@ fn attach(bpf: &mut Ebpf, program_name: &str, group: &str, event_name: &str) -> 
         .try_into()?;
     program.load()?;
     program.attach(group, event_name)?;
+    Ok(())
+}
+
+fn attach_fentry(bpf: &mut Ebpf, program_name: &str, function: &str, btf: &Btf) -> Result<()> {
+    let program: &mut FEntry = bpf
+        .program_mut(program_name)
+        .with_context(|| format!("{program_name} program is missing"))?
+        .try_into()?;
+    program.load(function, btf)?;
+    program.attach()?;
+    Ok(())
+}
+
+fn attach_fexit(bpf: &mut Ebpf, program_name: &str, function: &str, btf: &Btf) -> Result<()> {
+    let program: &mut FExit = bpf
+        .program_mut(program_name)
+        .with_context(|| format!("{program_name} program is missing"))?
+        .try_into()?;
+    program.load(function, btf)?;
+    program.attach()?;
+    Ok(())
+}
+
+fn attach_btf_tracepoint(
+    bpf: &mut Ebpf,
+    program_name: &str,
+    tracepoint: &str,
+    btf: &Btf,
+) -> Result<()> {
+    let program: &mut BtfTracePoint = bpf
+        .program_mut(program_name)
+        .with_context(|| format!("{program_name} program is missing"))?
+        .try_into()?;
+    program.load(tracepoint, btf)?;
+    program.attach()?;
     Ok(())
 }
 
@@ -2222,6 +2546,41 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
                 }),
                 io_mode: resolve_fd_mode(event.pid, event.fd),
                 node_id: Some(request_id),
+            }))
+        }
+        KIND_REQUEST_ORIGIN => {
+            let origin = match event.origin_flags & ORIGIN_KIND_MASK {
+                ORIGIN_FILE => IoOrigin::File,
+                ORIGIN_FILESYSTEM_METADATA => IoOrigin::FilesystemMetadata,
+                ORIGIN_JOURNAL => IoOrigin::Journal,
+                ORIGIN_GARBAGE_COLLECTION => IoOrigin::GarbageCollection,
+                ORIGIN_CHECKPOINT => IoOrigin::Checkpoint,
+                ORIGIN_WRITEBACK => IoOrigin::Writeback,
+                ORIGIN_READAHEAD => IoOrigin::Readahead,
+                ORIGIN_SWAP => IoOrigin::Swap,
+                _ => IoOrigin::Unknown,
+            };
+            let (fs_device_major, fs_device_minor) = decode_device(event.fs_device);
+            Some(StorageEvent::RequestOrigin(RequestOrigin {
+                ts_ns: event.ts_ns,
+                request_id,
+                origin_id: opaque_key(event.origin_id, correlation_salt),
+                file: android_ebpf_protocol::FileIdentity {
+                    fs_device_major,
+                    fs_device_minor,
+                    inode: event.inode,
+                    inode_generation: (event.origin_flags & ORIGIN_INODE_GENERATION_VALID != 0)
+                        .then_some(event.inode_generation),
+                    mount_id: (event.origin_flags & ORIGIN_MOUNT_ID_VALID != 0)
+                        .then_some(event.mount_id),
+                },
+                path: None,
+                origin,
+                operation: decode_operation(event.operation),
+                bytes: (event.bytes != 0).then_some(u64::from(event.bytes)),
+                pid: event.pid,
+                tid: event.tid,
+                incomplete: event.origin_flags & ORIGIN_INCOMPLETE != 0,
             }))
         }
         KIND_PIPELINE => {
@@ -2464,5 +2823,125 @@ mod tests {
         assert_eq!(recorder.records.len(), 1);
         assert_eq!(recorder.retained_start(0), 20);
         assert_eq!(recorder.evicted_records, 2);
+    }
+
+    #[test]
+    fn request_origin_decode_hashes_object_keys_and_preserves_file_identity() {
+        let event = KernelEvent {
+            ts_ns: 100,
+            request_id: 0xfeed,
+            origin_id: 0xbeef,
+            fs_device: (259 << 8) | 7,
+            inode: 1234,
+            inode_generation: 9,
+            mount_id: 42,
+            bytes: 4096,
+            pid: 10,
+            tid: 11,
+            kind: android_ebpf_types::KIND_REQUEST_ORIGIN,
+            operation: OP_READ,
+            origin_flags: android_ebpf_types::ORIGIN_FILE
+                | android_ebpf_types::ORIGIN_INCOMPLETE
+                | android_ebpf_types::ORIGIN_INODE_GENERATION_VALID
+                | android_ebpf_types::ORIGIN_MOUNT_ID_VALID,
+            ..KernelEvent::default()
+        };
+
+        let decoded = parse_kernel_event(event, 77).expect("origin event");
+        let StorageEvent::RequestOrigin(origin) = decoded else {
+            panic!("expected request origin");
+        };
+        assert_ne!(origin.request_id, 0xfeed);
+        assert_ne!(origin.origin_id, 0xbeef);
+        assert_ne!(origin.request_id, origin.origin_id);
+        assert_eq!(origin.file.fs_device_major, 259);
+        assert_eq!(origin.file.fs_device_minor, 7);
+        assert_eq!(origin.file.inode, 1234);
+        assert_eq!(origin.file.inode_generation, Some(9));
+        assert_eq!(origin.file.mount_id, Some(42));
+        assert_eq!(origin.bytes, Some(4096));
+        assert!(origin.incomplete);
+    }
+
+    #[test]
+    fn exact_adapter_failure_preserves_mandatory_block_fallback() {
+        let mut capabilities = ProbeCapabilities {
+            bpf_syscall: true,
+            btf: true,
+            ring_buffer: true,
+            block_insert: true,
+            block_issue: true,
+            block_complete: true,
+            file_io: true,
+            exact_request_correlation: true,
+            exact_file_attribution: true,
+            ufs_events: Vec::new(),
+            fs_events: Vec::new(),
+            scsi_events: Vec::new(),
+            ext4_events: Vec::new(),
+            vfs_probe_candidates: vec!["vfs_read".into()],
+            pipeline_layers: vec![
+                PipelineLayer::BlockDevice,
+                PipelineLayer::Vfs,
+                PipelineLayer::Bio,
+            ],
+            attach_plan: vec![
+                ProbePlan {
+                    layer: PipelineLayer::BlockDevice,
+                    probe_kind: "tracepoint".into(),
+                    group: "block".into(),
+                    event_or_function: "block_rq_issue".into(),
+                    state: CapabilityState::Measured,
+                    format_hash: None,
+                    reason: None,
+                },
+                ProbePlan {
+                    layer: PipelineLayer::Vfs,
+                    probe_kind: "fentry/fexit".into(),
+                    group: "vfs".into(),
+                    event_or_function: "vfs_read/vfs_write".into(),
+                    state: CapabilityState::Derived,
+                    format_hash: None,
+                    reason: None,
+                },
+                ProbePlan {
+                    layer: PipelineLayer::Bio,
+                    probe_kind: "fentry".into(),
+                    group: "block".into(),
+                    event_or_function: "submit_bio/blk_mq_bio_to_request".into(),
+                    state: CapabilityState::Derived,
+                    format_hash: None,
+                    reason: None,
+                },
+            ],
+            scheduler_context: None,
+            stack_traces: None,
+        };
+
+        capabilities.exact_file_attribution = false;
+        mark_exact_adapter_state(
+            &mut capabilities,
+            CapabilityState::Unavailable,
+            Some("attach failed"),
+        );
+
+        assert!(capabilities.block_issue);
+        assert!(
+            capabilities
+                .pipeline_layers
+                .contains(&PipelineLayer::BlockDevice)
+        );
+        assert!(!capabilities.pipeline_layers.contains(&PipelineLayer::Vfs));
+        assert!(!capabilities.pipeline_layers.contains(&PipelineLayer::Bio));
+        assert!(capabilities.attach_plan.iter().any(|plan| {
+            plan.layer == PipelineLayer::BlockDevice && plan.state == CapabilityState::Measured
+        }));
+        assert!(
+            capabilities
+                .attach_plan
+                .iter()
+                .filter(|plan| { matches!(plan.layer, PipelineLayer::Vfs | PipelineLayer::Bio) })
+                .all(|plan| plan.state == CapabilityState::Unavailable)
+        );
     }
 }

@@ -6,6 +6,19 @@ pub const KIND_BLOCK_COMPLETE: u8 = 2;
 pub const KIND_BLOCK_INSERT: u8 = 3;
 pub const KIND_FILE_IO: u8 = 4;
 pub const KIND_PIPELINE: u8 = 5;
+pub const KIND_REQUEST_ORIGIN: u8 = 6;
+pub const ORIGIN_KIND_MASK: u32 = 0xff;
+pub const ORIGIN_FILE: u32 = 1;
+pub const ORIGIN_FILESYSTEM_METADATA: u32 = 2;
+pub const ORIGIN_JOURNAL: u32 = 3;
+pub const ORIGIN_GARBAGE_COLLECTION: u32 = 4;
+pub const ORIGIN_CHECKPOINT: u32 = 5;
+pub const ORIGIN_WRITEBACK: u32 = 6;
+pub const ORIGIN_READAHEAD: u32 = 7;
+pub const ORIGIN_SWAP: u32 = 8;
+pub const ORIGIN_INCOMPLETE: u32 = 1 << 8;
+pub const ORIGIN_INODE_GENERATION_VALID: u32 = 1 << 9;
+pub const ORIGIN_MOUNT_ID_VALID: u32 = 1 << 10;
 pub const LAYER_FILESYSTEM: u8 = 1;
 pub const LAYER_SCSI: u8 = 2;
 pub const LAYER_UFS: u8 = 3;
@@ -46,6 +59,37 @@ pub struct RawSyscallLayout {
     pub enter_args_offset: u16,
     pub exit_ret_offset: u16,
     pub reserved: u16,
+}
+
+/// Byte offsets resolved from the target kernel's BTF at runtime. Keeping
+/// these values outside the eBPF object provides CO-RE-like portability for
+/// the small set of fields needed by the exact-attribution adapter.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileIdentityLayout {
+    pub file_inode_offset: u16,
+    pub inode_superblock_offset: u16,
+    pub inode_number_offset: u16,
+    pub inode_generation_offset: u16,
+    pub superblock_device_offset: u16,
+    pub address_space_host_offset: u16,
+    pub reserved: [u16; 2],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KernelFileOrigin {
+    pub ts_ns: u64,
+    pub requested_bytes: u64,
+    pub inode: u64,
+    pub mount_id: u64,
+    pub fs_device: u32,
+    pub inode_generation: u32,
+    pub pid: u32,
+    pub tid: u32,
+    pub origin_flags: u32,
+    pub operation: u8,
+    pub reserved: [u8; 3],
 }
 
 #[repr(C)]
@@ -157,9 +201,17 @@ pub struct KernelEvent {
     pub return_value: i64,
     pub kernel_stack_id: u64,
     pub user_stack_id: u64,
+    /// Raw in-kernel object identity. The agent must session-hash this value
+    /// before producing a protocol event.
+    pub origin_id: u64,
+    pub inode: u64,
+    pub mount_id: u64,
     pub device: u32,
+    pub fs_device: u32,
     pub sectors: u32,
     pub bytes: u32,
+    pub inode_generation: u32,
+    pub origin_flags: u32,
     pub pid: u32,
     pub tid: u32,
     pub cpu: u32,

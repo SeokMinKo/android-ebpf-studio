@@ -2,24 +2,26 @@
 #![no_main]
 
 use android_ebpf_types::{
-    BlockStart, FileStart, FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT,
-    KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE, KernelAggregate, KernelEvent, LAYER_FILESYSTEM,
-    LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS, LAYER_UIC, MODE_BALANCED, MODE_BASIC, MODE_DEEP,
-    MODE_RAW_ALL,
-    OFFSET_MISSING, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, PHASE_BEGIN, PHASE_END,
-    PHASE_INSTANT, PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE,
-    TraceLayout,
+    BlockStart, FileIdentityLayout, FileStart, FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE,
+    KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN,
+    KernelAggregate, KernelEvent, KernelFileOrigin, LAYER_FILESYSTEM, LAYER_SCHEDULER, LAYER_SCSI,
+    LAYER_UFS, LAYER_UIC, MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OFFSET_MISSING,
+    OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, ORIGIN_FILE, ORIGIN_INCOMPLETE,
+    ORIGIN_INODE_GENERATION_VALID, ORIGIN_WRITEBACK, PHASE_BEGIN, PHASE_END, PHASE_INSTANT,
+    PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE, TraceLayout,
 };
 use aya_ebpf::{
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
-        bpf_get_smp_processor_id, bpf_ktime_get_ns,
+        bpf_get_smp_processor_id, bpf_ktime_get_ns, bpf_probe_read_kernel,
     },
-    macros::{map, tracepoint},
+    macros::{btf_tracepoint, fentry, fexit, map, tracepoint},
     maps::{Array, HashMap, PerCpuArray, RingBuf, StackTrace},
-    programs::TracePointContext,
     programs::tracing::StackIdContext,
+    programs::{BtfTracePointContext, FEntryContext, FExitContext, TracePointContext},
 };
+
+const MAX_REQUEST_ORIGINS: u8 = 8;
 
 #[map]
 static ISSUE_LAYOUT: Array<TraceLayout> = Array::with_max_entries(1, 0);
@@ -32,6 +34,12 @@ static INSERT_LAYOUT: Array<TraceLayout> = Array::with_max_entries(1, 0);
 
 #[map]
 static RAW_SYSCALL_LAYOUT: Array<RawSyscallLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static FILE_IDENTITY_LAYOUT: Array<FileIdentityLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static EXACT_ATTRIBUTION_ENABLED: Array<u8> = Array::with_max_entries(1, 0);
 
 #[map]
 static UFS_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0);
@@ -50,6 +58,15 @@ static FS_DONE_LAYOUT: Array<PipelineTraceLayout> = Array::with_max_entries(1, 0
 
 #[map]
 static FILE_STARTS: HashMap<u64, FileStart> = HashMap::with_max_entries(32_768, 0);
+
+#[map]
+static ACTIVE_FILE_ORIGINS: HashMap<u64, KernelFileOrigin> = HashMap::with_max_entries(32_768, 0);
+
+#[map]
+static BIO_FILE_ORIGINS: HashMap<u64, KernelFileOrigin> = HashMap::with_max_entries(65_536, 0);
+
+#[map]
+static REQUEST_ORIGIN_COUNTS: HashMap<u64, u8> = HashMap::with_max_entries(65_536, 0);
 
 #[map]
 static FILTER_ACTIVE: Array<u64> = Array::with_max_entries(1, 0);
@@ -109,6 +126,296 @@ pub fn raw_sys_exit(ctx: TracePointContext) -> u32 {
     capture_sys_exit(ctx).unwrap_or(0)
 }
 
+#[fentry(function = "vfs_read")]
+pub fn exact_vfs_read(ctx: FEntryContext) -> u32 {
+    capture_active_file(ctx, OP_READ).unwrap_or(0)
+}
+
+#[fexit(function = "vfs_read")]
+pub fn exact_vfs_read_exit(ctx: FExitContext) -> u32 {
+    clear_active_file(ctx).unwrap_or(0)
+}
+
+#[fentry(function = "vfs_write")]
+pub fn exact_vfs_write(ctx: FEntryContext) -> u32 {
+    capture_active_file(ctx, OP_WRITE).unwrap_or(0)
+}
+
+#[fexit(function = "vfs_write")]
+pub fn exact_vfs_write_exit(ctx: FExitContext) -> u32 {
+    clear_active_file(ctx).unwrap_or(0)
+}
+
+#[fentry(function = "write_cache_pages")]
+pub fn exact_write_cache_pages(ctx: FEntryContext) -> u32 {
+    capture_writeback_mapping(ctx).unwrap_or(0)
+}
+
+#[fexit(function = "write_cache_pages")]
+pub fn exact_write_cache_pages_exit(ctx: FExitContext) -> u32 {
+    clear_active_file(ctx).unwrap_or(0)
+}
+
+#[fentry(function = "f2fs_write_data_pages")]
+pub fn exact_f2fs_write_data_pages(ctx: FEntryContext) -> u32 {
+    capture_writeback_mapping(ctx).unwrap_or(0)
+}
+
+#[fexit(function = "f2fs_write_data_pages")]
+pub fn exact_f2fs_write_data_pages_exit(ctx: FExitContext) -> u32 {
+    clear_active_file(ctx).unwrap_or(0)
+}
+
+#[fentry(function = "submit_bio")]
+pub fn exact_submit_bio(ctx: FEntryContext) -> u32 {
+    bind_active_file_to_bio(ctx).unwrap_or(0)
+}
+
+#[fentry(function = "submit_bio_noacct")]
+pub fn exact_submit_bio_noacct(ctx: FEntryContext) -> u32 {
+    bind_active_file_to_bio(ctx).unwrap_or(0)
+}
+
+#[fentry(function = "blk_mq_bio_to_request")]
+pub fn exact_bio_to_request(ctx: FEntryContext) -> u32 {
+    let request_ptr: u64 = ctx.arg(0);
+    let bio_ptr: u64 = ctx.arg(1);
+    link_bio_ptrs(request_ptr, bio_ptr, true).unwrap_or(0)
+}
+
+#[btf_tracepoint(function = "block_bio_backmerge")]
+pub fn exact_block_bio_backmerge(ctx: BtfTracePointContext) -> u32 {
+    let request_ptr: u64 = ctx.arg(1);
+    let bio_ptr: u64 = ctx.arg(2);
+    link_bio_ptrs(request_ptr, bio_ptr, false).unwrap_or(0)
+}
+
+#[btf_tracepoint(function = "block_bio_frontmerge")]
+pub fn exact_block_bio_frontmerge(ctx: BtfTracePointContext) -> u32 {
+    let request_ptr: u64 = ctx.arg(1);
+    let bio_ptr: u64 = ctx.arg(2);
+    link_bio_ptrs(request_ptr, bio_ptr, false).unwrap_or(0)
+}
+
+fn capture_active_file(ctx: FEntryContext, operation: u8) -> Result<u32, i32> {
+    if !exact_attribution_enabled() {
+        return Ok(0);
+    }
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    if config.mode != MODE_DEEP && config.mode != MODE_RAW_ALL {
+        return Ok(0);
+    }
+    let file_ptr: u64 = ctx.arg(0);
+    let requested_bytes: u64 = ctx.arg(2);
+    if file_ptr == 0 {
+        return Ok(0);
+    }
+    let layout = FILE_IDENTITY_LAYOUT.get(0).ok_or(1_i32)?;
+    let inode_ptr = read_kernel_u64(file_ptr, layout.file_inode_offset)?;
+    if inode_ptr == 0 {
+        return Ok(0);
+    }
+    let superblock_ptr = read_kernel_u64(inode_ptr, layout.inode_superblock_offset)?;
+    if superblock_ptr == 0 {
+        return Ok(0);
+    }
+    let inode = read_kernel_u64(inode_ptr, layout.inode_number_offset)?;
+    let fs_device = read_kernel_u32(superblock_ptr, layout.superblock_device_offset)?;
+    let mut origin_flags = ORIGIN_FILE;
+    let inode_generation = if layout.inode_generation_offset == OFFSET_MISSING {
+        0
+    } else {
+        origin_flags |= ORIGIN_INODE_GENERATION_VALID;
+        read_kernel_u32(inode_ptr, layout.inode_generation_offset)?
+    };
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    if !matches_filter(
+        pid,
+        tid,
+        bpf_get_current_uid_gid() as u32,
+        0,
+        requested_bytes.min(u32::MAX as u64) as u32,
+        operation,
+    ) {
+        return Ok(0);
+    }
+    let origin = KernelFileOrigin {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        requested_bytes,
+        inode,
+        mount_id: 0,
+        fs_device,
+        inode_generation,
+        pid,
+        tid,
+        origin_flags,
+        operation,
+        reserved: [0; 3],
+    };
+    ACTIVE_FILE_ORIGINS
+        .insert(&pid_tgid, &origin, 0)
+        .map_err(|_| 2_i32)?;
+    Ok(0)
+}
+
+fn clear_active_file(_ctx: FExitContext) -> Result<u32, i32> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let _ = ACTIVE_FILE_ORIGINS.remove(&pid_tgid);
+    Ok(0)
+}
+
+fn capture_writeback_mapping(ctx: FEntryContext) -> Result<u32, i32> {
+    if !exact_attribution_enabled() {
+        return Ok(0);
+    }
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        ..RawFilterConfig::default()
+    });
+    if config.mode != MODE_DEEP && config.mode != MODE_RAW_ALL {
+        return Ok(0);
+    }
+    let layout = FILE_IDENTITY_LAYOUT.get(0).ok_or(1_i32)?;
+    if layout.address_space_host_offset == OFFSET_MISSING {
+        return Ok(0);
+    }
+    let mapping_ptr: u64 = ctx.arg(0);
+    if mapping_ptr == 0 {
+        return Ok(0);
+    }
+    let inode_ptr = read_kernel_u64(mapping_ptr, layout.address_space_host_offset)?;
+    if inode_ptr == 0 {
+        return Ok(0);
+    }
+    let superblock_ptr = read_kernel_u64(inode_ptr, layout.inode_superblock_offset)?;
+    if superblock_ptr == 0 {
+        return Ok(0);
+    }
+    let mut origin_flags = ORIGIN_WRITEBACK;
+    let inode_generation = if layout.inode_generation_offset == OFFSET_MISSING {
+        0
+    } else {
+        origin_flags |= ORIGIN_INODE_GENERATION_VALID;
+        read_kernel_u32(inode_ptr, layout.inode_generation_offset)?
+    };
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let origin = KernelFileOrigin {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        requested_bytes: 0,
+        inode: read_kernel_u64(inode_ptr, layout.inode_number_offset)?,
+        mount_id: 0,
+        fs_device: read_kernel_u32(superblock_ptr, layout.superblock_device_offset)?,
+        inode_generation,
+        pid: (pid_tgid >> 32) as u32,
+        tid: pid_tgid as u32,
+        origin_flags,
+        operation: OP_WRITE,
+        reserved: [0; 3],
+    };
+    ACTIVE_FILE_ORIGINS
+        .insert(&pid_tgid, &origin, 0)
+        .map_err(|_| 2_i32)?;
+    Ok(0)
+}
+
+fn bind_active_file_to_bio(ctx: FEntryContext) -> Result<u32, i32> {
+    if !exact_attribution_enabled() {
+        return Ok(0);
+    }
+    let bio_ptr: u64 = ctx.arg(0);
+    if bio_ptr == 0 {
+        return Ok(0);
+    }
+    // A bio pointer may be reused after completion. Observing a new submit is
+    // the lifecycle boundary that invalidates any stale association.
+    let _ = BIO_FILE_ORIGINS.remove(&bio_ptr);
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let Some(origin) = (unsafe { ACTIVE_FILE_ORIGINS.get(&pid_tgid) }) else {
+        return Ok(0);
+    };
+    BIO_FILE_ORIGINS
+        .insert(&bio_ptr, origin, 0)
+        .map_err(|_| 2_i32)?;
+    Ok(0)
+}
+
+fn link_bio_ptrs(request_ptr: u64, bio_ptr: u64, new_request: bool) -> Result<u32, i32> {
+    if !exact_attribution_enabled() {
+        return Ok(0);
+    }
+    if request_ptr == 0 || bio_ptr == 0 {
+        return Ok(0);
+    }
+    if new_request {
+        // blk_mq_bio_to_request initializes a fresh request from this bio, so
+        // it is also the safe boundary for request-pointer reuse.
+        let _ = REQUEST_ORIGIN_COUNTS.remove(&request_ptr);
+    }
+    let Some(origin) = (unsafe { BIO_FILE_ORIGINS.get(&bio_ptr) }) else {
+        return Ok(0);
+    };
+    let mut retained = *origin;
+    let count = unsafe { REQUEST_ORIGIN_COUNTS.get(&request_ptr) }
+        .copied()
+        .unwrap_or(0);
+    if count > MAX_REQUEST_ORIGINS {
+        let _ = BIO_FILE_ORIGINS.remove(&bio_ptr);
+        return Ok(0);
+    }
+    if count == MAX_REQUEST_ORIGINS {
+        retained.origin_flags |= ORIGIN_INCOMPLETE;
+    }
+    let next = count.saturating_add(1);
+    REQUEST_ORIGIN_COUNTS
+        .insert(&request_ptr, &next, 0)
+        .map_err(|_| 2_i32)?;
+    let event = KernelEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        request_id: request_ptr,
+        origin_id: bio_ptr,
+        inode: retained.inode,
+        mount_id: retained.mount_id,
+        fs_device: retained.fs_device,
+        bytes: retained.requested_bytes.min(u32::MAX as u64) as u32,
+        inode_generation: retained.inode_generation,
+        origin_flags: retained.origin_flags,
+        pid: retained.pid,
+        tid: retained.tid,
+        kind: KIND_REQUEST_ORIGIN,
+        operation: retained.operation,
+        correlation_exact: 1,
+        comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        ..KernelEvent::default()
+    };
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        ..RawFilterConfig::default()
+    });
+    submit_event(event, config.generation)?;
+    let _ = BIO_FILE_ORIGINS.remove(&bio_ptr);
+    Ok(0)
+}
+
+fn read_kernel_u64(base: u64, offset: u16) -> Result<u64, i32> {
+    let address = base.checked_add(u64::from(offset)).ok_or(1_i32)?;
+    unsafe { bpf_probe_read_kernel(address as *const u64) }
+}
+
+fn read_kernel_u32(base: u64, offset: u16) -> Result<u32, i32> {
+    let address = base.checked_add(u64::from(offset)).ok_or(1_i32)?;
+    unsafe { bpf_probe_read_kernel(address as *const u32) }
+}
+
+fn exact_attribution_enabled() -> bool {
+    EXACT_ATTRIBUTION_ENABLED.get(0).copied() == Some(1)
+}
+
 #[tracepoint]
 pub fn ufs_command(ctx: TracePointContext) -> u32 {
     // A task tag is controller-local and reusable. Until a controller identity
@@ -164,14 +471,7 @@ fn emit_context(_ctx: TracePointContext, layer: u8) -> Result<u32, i32> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
-    if !matches_filter(
-        pid,
-        tid,
-        bpf_get_current_uid_gid() as u32,
-        0,
-        0,
-        OP_OTHER,
-    ) {
+    if !matches_filter(pid, tid, bpf_get_current_uid_gid() as u32, 0, 0, OP_OTHER) {
         return Ok(0);
     }
     let event = KernelEvent {
@@ -198,6 +498,7 @@ fn emit_context(_ctx: TracePointContext, layer: u8) -> Result<u32, i32> {
         pipeline_phase: PHASE_INSTANT,
         reserved: 0,
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        ..KernelEvent::default()
     };
     submit_event(event, config.generation)?;
     Ok(0)
@@ -297,6 +598,7 @@ fn emit_pipeline(
         reserved: u8::from(layout.status_offset != OFFSET_MISSING)
             | (u8::from(layout.operation_offset != OFFSET_MISSING) << 1),
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        ..KernelEvent::default()
     };
     submit_event(event, config.generation)?;
     Ok(0)
@@ -360,6 +662,7 @@ fn handle_block(
         pipeline_phase: 0,
         reserved: 0,
         comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        ..KernelEvent::default()
     };
     let config = active_filter().unwrap_or(RawFilterConfig {
         mode: MODE_RAW_ALL,
@@ -429,6 +732,7 @@ fn handle_block(
             }
         }
         KIND_BLOCK_COMPLETE => {
+            let _ = REQUEST_ORIGIN_COUNTS.remove(&request_id);
             let Some(start) = unsafe { BLOCK_STARTS.get(&request_id) }.copied() else {
                 aggregate_expired(config.generation);
                 return Ok(0);
@@ -484,9 +788,15 @@ fn handle_block(
                 }
                 if config.mode == MODE_BALANCED {
                     if start.insert_ts_ns != 0 {
-                        submit_event(block_event_from_start(&start, KIND_BLOCK_INSERT), config.generation)?;
+                        submit_event(
+                            block_event_from_start(&start, KIND_BLOCK_INSERT),
+                            config.generation,
+                        )?;
                     }
-                    submit_event(block_event_from_start(&start, KIND_BLOCK_ISSUE), config.generation)?;
+                    submit_event(
+                        block_event_from_start(&start, KIND_BLOCK_ISSUE),
+                        config.generation,
+                    )?;
                 }
                 submit_event(event, config.generation)?;
             } else {
@@ -527,6 +837,7 @@ fn block_event_from_start(start: &BlockStart, kind: u8) -> KernelEvent {
         pipeline_phase: 0,
         reserved: 0,
         comm: start.comm,
+        ..KernelEvent::default()
     }
 }
 
@@ -685,21 +996,14 @@ fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
 }
 
 fn active_filter() -> Option<RawFilterConfig> {
-    let generation = unsafe { FILTER_ACTIVE.get(0) }.copied()?;
+    let generation = FILTER_ACTIVE.get(0).copied()?;
     if generation == 0 {
         return None;
     }
     unsafe { FILTER_CONFIGS.get(&generation) }.copied()
 }
 
-fn matches_filter(
-    pid: u32,
-    tid: u32,
-    uid: u32,
-    device: u32,
-    bytes: u32,
-    operation: u8,
-) -> bool {
+fn matches_filter(pid: u32, tid: u32, uid: u32, device: u32, bytes: u32, operation: u8) -> bool {
     let Some(config) = active_filter() else {
         return true;
     };
@@ -724,11 +1028,7 @@ fn matches_filter(
         return false;
     }
     if config.operation_count != 0
-        && !filter_contains(
-            &FILTER_OPERATIONS,
-            config.generation,
-            operation as u64,
-        )
+        && !filter_contains(&FILTER_OPERATIONS, config.generation, operation as u64)
     {
         return false;
     }
@@ -804,6 +1104,7 @@ fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
         pipeline_phase: 0,
         reserved: 0,
         comm: start.comm,
+        ..KernelEvent::default()
     };
     submit_event(event, config.generation)?;
     Ok(0)

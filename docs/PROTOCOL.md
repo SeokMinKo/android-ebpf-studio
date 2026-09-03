@@ -35,7 +35,9 @@ Reader는 알 수 없는 JSON field를 무시하지만, 알 수 없는 `record` 
 - `FileIdentity`는 filesystem device/inode와 선택적 generation/mount ID로 구성되며 경로와 분리됩니다.
 - `PathSnapshot`은 관측 시점의 이름이므로 rename/unlink 뒤에도 identity를 대체하지 않습니다.
 - `node`와 `edge` event는 `transaction_id`로 소속 request를 명시합니다. 이름 문자열이나 raw pointer를 export correlation key로 사용하지 않습니다.
+- `request_origin` event는 typed kernel hook이 직접 전달한 `request_id`, opaque `origin_id`, `FileIdentity`, origin 분류와 bounded-set `incomplete` 상태를 담습니다. 분석기는 이를 request로 향하는 `exact` edge로 materialize합니다.
 - 하나의 block request는 여러 file-origin edge를 가질 수 있습니다. ambiguous 후보는 임의 선택하지 않습니다.
+- exact origin이 하나라도 있으면 같은 request의 시간/task/size 기반 file 후보는 추가하지 않습니다. 동일 identity의 `FileIo`는 edge 후보가 아니라 path snapshot 보강에만 사용됩니다.
 - `correlation_id`는 block transaction 직접 연결 키이고, `stage_key`는 SCSI/UFS tag처럼 계층 내부 pairing에만 정확한 키입니다. tracepoint가 제공하는 경우 `opcode`와 completion `status`도 paired observation과 waterfall span에 보존됩니다.
 - agent는 kernel pointer와 command tag를 session salt로 pseudonymize한 뒤 내보냅니다. UFS controller identity가 없는 tag-only span은 재사용 검사를 통과해도 `probable`을 넘지 않습니다.
 

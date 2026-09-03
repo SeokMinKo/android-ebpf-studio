@@ -292,6 +292,31 @@ pub struct IoEdge {
     pub evidence: Vec<CorrelationEvidence>,
 }
 
+/// A directly observed file origin carried from an upper storage object into a
+/// block request. `origin_id` is an opaque, session-scoped correlation value;
+/// it must never contain a raw kernel pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestOrigin {
+    pub ts_ns: u64,
+    pub request_id: u64,
+    pub origin_id: u64,
+    pub file: FileIdentity,
+    #[serde(default)]
+    pub path: Option<PathSnapshot>,
+    pub origin: IoOrigin,
+    pub operation: IoOperation,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub tid: u32,
+    /// True when the kernel-side bounded origin set overflowed. Retained
+    /// origins are still exact, but the set is known to be incomplete.
+    #[serde(default)]
+    pub incomplete: bool,
+}
+
 impl IoEdge {
     pub fn exact(edge_id: u64, from_node_id: u64, to_node_id: u64, relation: IoRelation) -> Self {
         Self {
@@ -722,6 +747,7 @@ pub enum StorageEvent {
     BlockComplete(BlockComplete),
     FileIo(FileIo),
     Pipeline(PipelineObservation),
+    RequestOrigin(RequestOrigin),
     Node(IoNode),
     Edge(IoEdge),
 }
@@ -739,6 +765,8 @@ pub struct ProbeCapabilities {
     pub file_io: bool,
     #[serde(default)]
     pub exact_request_correlation: bool,
+    #[serde(default)]
+    pub exact_file_attribution: bool,
     #[serde(default)]
     pub ufs_events: Vec<String>,
     #[serde(default)]
@@ -1909,6 +1937,7 @@ fn request_cache_key(io: &CompletedIo) -> (u64, u64, u64) {
 struct AnalysisIndex {
     files_by_pid_time: HashMap<(u32, u64), Vec<usize>>,
     files_by_tid_time: HashMap<(u32, u64), Vec<usize>>,
+    files_by_identity: HashMap<(u32, u32, u64), Vec<usize>>,
     long_files: Vec<usize>,
     observations_by_request: HashMap<u64, Vec<usize>>,
     observations_by_pid_time: HashMap<(u32, u64), Vec<usize>>,
@@ -1923,6 +1952,13 @@ impl AnalysisIndex {
     fn build(engine: &AnalysisEngine) -> Self {
         let mut index = Self::default();
         for (position, file) in engine.file_ios.iter().enumerate() {
+            if let Some(identity) = &file.file_identity {
+                index
+                    .files_by_identity
+                    .entry(file_identity_base_key(identity))
+                    .or_default()
+                    .push(position);
+            }
             let seconds = time_buckets(file.start_ts_ns, file.end_ts_ns);
             if seconds.len() > 120 {
                 index.long_files.push(position);
@@ -2068,6 +2104,7 @@ impl AnalysisEngine {
             &event,
             StorageEvent::FileIo(_)
                 | StorageEvent::Pipeline(_)
+                | StorageEvent::RequestOrigin(_)
                 | StorageEvent::Node(_)
                 | StorageEvent::Edge(_)
         ) {
@@ -2215,6 +2252,56 @@ impl AnalysisEngine {
                 self.observe_ts(node.start_ts_ns);
                 self.observe_ts(node.end_or_start());
                 bounded_push(&mut self.graph_nodes, node);
+                None
+            }
+            StorageEvent::RequestOrigin(origin) => {
+                self.attribution_generation = self.attribution_generation.saturating_add(1);
+                self.observe_ts(origin.ts_ns);
+                let node_id = request_origin_node_id(origin.request_id, origin.origin_id);
+                let request_node_id = block_request_node_id(origin.request_id);
+                bounded_push(
+                    &mut self.graph_nodes,
+                    IoNode {
+                        node_id,
+                        transaction_id: Some(origin.request_id),
+                        kind: IoNodeKind::Bio,
+                        start_ts_ns: origin.ts_ns,
+                        end_ts_ns: Some(origin.ts_ns),
+                        origin: origin.origin,
+                        file: Some(origin.file),
+                        path: origin.path,
+                        operation: Some(origin.operation),
+                        bytes: origin.bytes,
+                        pid: origin.pid,
+                        tid: origin.tid,
+                        name: "direct bio file origin".into(),
+                    },
+                );
+                bounded_push(
+                    &mut self.graph_edges,
+                    IoEdge {
+                        edge_id: request_origin_edge_id(origin.request_id, origin.origin_id),
+                        transaction_id: Some(origin.request_id),
+                        from_node_id: node_id,
+                        to_node_id: request_node_id,
+                        relation: IoRelation::MergedInto,
+                        confidence: EdgeConfidence::Exact,
+                        evidence: vec![CorrelationEvidence {
+                            match_type: if origin.incomplete {
+                                "direct_bio_request_incomplete"
+                            } else {
+                                "direct_bio_request"
+                            }
+                            .into(),
+                            opaque_key: Some(origin.origin_id),
+                            delta_ns: None,
+                            candidate_count: 1,
+                            sector_match: false,
+                            bytes_match: origin.bytes.is_some(),
+                            task_match: origin.pid != 0,
+                        }],
+                    },
+                );
                 None
             }
             StorageEvent::Edge(edge) => {
@@ -2452,6 +2539,19 @@ impl AnalysisEngine {
                 file_positions.extend_from_slice(positions);
             }
         }
+        if let Some(node_positions) = index.nodes_by_transaction.get(&io.issue.request_id) {
+            for identity in node_positions
+                .iter()
+                .filter_map(|position| self.graph_nodes[*position].file.as_ref())
+            {
+                if let Some(positions) = index
+                    .files_by_identity
+                    .get(&file_identity_base_key(identity))
+                {
+                    file_positions.extend_from_slice(positions);
+                }
+            }
+        }
         file_positions.sort_unstable();
         file_positions.dedup();
         let files: Vec<_> = file_positions
@@ -2643,6 +2743,21 @@ fn synthetic_node_id(tag: u8, request_id: u64) -> u64 {
     request_id.rotate_left(17) ^ ((tag as u64) << 56) ^ 0x9e37_79b9_7f4a_7c15
 }
 
+/// Deterministic graph node ID for the block request represented by a wire
+/// request ID. This is public so direct origin producers and consumers share
+/// one endpoint without exporting kernel addresses.
+pub fn block_request_node_id(request_id: u64) -> u64 {
+    synthetic_node_id(9, request_id)
+}
+
+fn request_origin_node_id(request_id: u64, origin_id: u64) -> u64 {
+    synthetic_node_id(10, request_id ^ origin_id.rotate_left(7))
+}
+
+fn request_origin_edge_id(request_id: u64, origin_id: u64) -> u64 {
+    synthetic_node_id(20, request_id ^ origin_id.rotate_left(13))
+}
+
 fn pipeline_node_kind(layer: PipelineLayer) -> IoNodeKind {
     match layer {
         PipelineLayer::Syscall => IoNodeKind::Syscall,
@@ -2673,7 +2788,7 @@ pub fn build_transaction_graph(
     let block_start = io.insert.as_ref().map_or(io.issue.ts_ns, |item| item.ts_ns);
     let block_end = io.completion.ts_ns;
     let mut graph = IoTransactionGraph::new(request_id);
-    let request_node_id = synthetic_node_id(9, request_id);
+    let request_node_id = block_request_node_id(request_id);
     let mut queue_id = None;
     let _ = graph.add_node(IoNode {
         node_id: request_node_id,
@@ -2718,6 +2833,16 @@ pub fn build_transaction_graph(
 
     let probable_window_start = block_start.saturating_sub(10_000_000);
     let probable_window_end = block_end.saturating_add(10_000_000);
+    let has_exact_file_origin = raw_edges.iter().any(|edge| {
+        edge.transaction_id == Some(request_id)
+            && edge.to_node_id == request_node_id
+            && edge.confidence == EdgeConfidence::Exact
+            && raw_nodes.iter().any(|node| {
+                node.node_id == edge.from_node_id
+                    && node.transaction_id == Some(request_id)
+                    && node.file.is_some()
+            })
+    });
     let file_candidates: Vec<_> = files
         .iter()
         .filter(|file| file.operation == io.issue.operation)
@@ -2730,7 +2855,7 @@ pub fn build_transaction_graph(
         })
         .filter(|file| file.pid == io.issue.pid || (file.tid != 0 && file.tid == io.issue.tid))
         .collect();
-    if file_candidates.len() == 1 {
+    if !has_exact_file_origin && file_candidates.len() == 1 {
         let file = file_candidates[0];
         let file_node_id = file
             .node_id
@@ -2889,7 +3014,32 @@ pub fn build_transaction_graph(
 
     for node in raw_nodes {
         if node.transaction_id == Some(request_id) {
-            let _ = graph.add_node(node.clone());
+            let mut enriched = node.clone();
+            if enriched.path.is_none()
+                && let Some(identity) = &enriched.file
+                && let Some(file) = files
+                    .iter()
+                    .filter(|file| {
+                        file.file_identity.as_ref().is_some_and(|candidate| {
+                            file_identities_compatible(candidate, identity)
+                        })
+                    })
+                    .filter(|file| {
+                        file.start_ts_ns <= block_end.saturating_add(30_000_000_000)
+                            && file.end_ts_ns.saturating_add(30_000_000_000) >= block_start
+                    })
+                    .max_by_key(|file| file.end_ts_ns)
+            {
+                enriched.path = file.path_snapshot.clone().or_else(|| {
+                    file.path.clone().map(|path| PathSnapshot {
+                        deleted: path.ends_with(" (deleted)"),
+                        path: Some(path),
+                        source: PathSource::ProcFd,
+                        captured_ts_ns: file.end_ts_ns,
+                    })
+                });
+            }
+            let _ = graph.add_node(enriched);
         }
     }
     for edge in raw_edges {
@@ -2907,6 +3057,26 @@ pub fn build_transaction_graph(
         }
     }
     graph
+}
+
+fn file_identity_base_key(identity: &FileIdentity) -> (u32, u32, u64) {
+    (
+        identity.fs_device_major,
+        identity.fs_device_minor,
+        identity.inode,
+    )
+}
+
+fn file_identities_compatible(left: &FileIdentity, right: &FileIdentity) -> bool {
+    file_identity_base_key(left) == file_identity_base_key(right)
+        && match (left.inode_generation, right.inode_generation) {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
+        }
+        && match (left.mount_id, right.mount_id) {
+            (Some(left), Some(right)) => left == right,
+            _ => true,
+        }
 }
 
 /// Builds a bounded request view from measured observations. Nested spans are
