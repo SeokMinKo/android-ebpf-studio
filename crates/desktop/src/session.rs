@@ -318,6 +318,41 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                 String::new(),
                 serde_json::to_string(stage)?,
             ])?,
+            StorageEvent::RequestOrigin(origin) => writer.write_record([
+                "request_origin".to_owned(),
+                origin.ts_ns.to_string(),
+                String::new(),
+                origin.request_id.to_string(),
+                format!(
+                    "{}:{}:{}",
+                    origin.file.fs_device_major, origin.file.fs_device_minor, origin.file.inode
+                ),
+                String::new(),
+                origin
+                    .bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                format!("{:?}", origin.operation).to_lowercase(),
+                origin.pid.to_string(),
+                origin.tid.to_string(),
+                format!("{:?}", origin.origin).to_lowercase(),
+                String::new(),
+                origin
+                    .path
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.path.clone())
+                    .unwrap_or_default(),
+                if origin.incomplete {
+                    "exact_incomplete"
+                } else {
+                    "exact"
+                }
+                .into(),
+                String::new(),
+                String::new(),
+                String::new(),
+                serde_json::to_string(origin)?,
+            ])?,
             StorageEvent::Node(node) => writer.write_record([
                 format!("node_{:?}", node.kind).to_lowercase(),
                 node.end_or_start().to_string(),

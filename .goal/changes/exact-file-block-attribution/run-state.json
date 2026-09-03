@@ -1,0 +1,759 @@
+{
+  "schema_version": 2,
+  "change_id": "exact-file-block-attribution",
+  "level": "L3",
+  "execution_mode": "DURABLE",
+  "route": "DESIGN_FIRST",
+  "run_status": "ACTIVE",
+  "phase": "P11",
+  "max_active_streams": 1,
+  "evidence_order": [
+    "0001",
+    "0002",
+    "0003",
+    "0004",
+    "0005",
+    "0006",
+    "0007",
+    "0008",
+    "0009",
+    "0010",
+    "0011",
+    "0012",
+    "0013",
+    "0014",
+    "0015",
+    "0016",
+    "0017",
+    "0018",
+    "0019",
+    "0020",
+    "0021"
+  ],
+  "required_spec_ids": [
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-004",
+    "REQ-005",
+    "REQ-006",
+    "REQ-007",
+    "REQ-008",
+    "NFR-001",
+    "NFR-002",
+    "NFR-003",
+    "NFR-004",
+    "INV-001",
+    "INV-002",
+    "INV-003",
+    "INV-004",
+    "INV-005"
+  ],
+  "spec": {
+    "path": "spec.md",
+    "revision": 1,
+    "hash": "sha256:99cbb106a6ebdcbd100ab3caeb1aad533701ee226209412b8f8741612602b0e0",
+    "confirmation": "CONFIRMED-AUTO",
+    "lifecycle": "CONFIRMED"
+  },
+  "artifacts": [
+    {
+      "id": "research",
+      "role": "RESEARCH",
+      "path": "research.md",
+      "revision": 1,
+      "status": "CONFIRMED",
+      "current": true,
+      "derived_from": [
+        "spec@1"
+      ]
+    },
+    {
+      "id": "design",
+      "role": "DESIGN",
+      "path": "design.md",
+      "revision": 1,
+      "status": "CONFIRMED",
+      "current": true,
+      "derived_from": [
+        "spec@1",
+        "research@1"
+      ]
+    },
+    {
+      "id": "tasks",
+      "role": "TASKS",
+      "path": "tasks.md",
+      "revision": 2,
+      "status": "CONFIRMED",
+      "current": true,
+      "derived_from": [
+        "spec@1",
+        "design@1"
+      ]
+    },
+    {
+      "id": "test-plan",
+      "role": "TEST_PLAN",
+      "path": "test-plan.md",
+      "revision": 1,
+      "status": "CONFIRMED",
+      "current": true,
+      "derived_from": [
+        "spec@1",
+        "design@1",
+        "tasks@2"
+      ]
+    },
+    {
+      "id": "worklog",
+      "role": "WORKLOG",
+      "path": "WORKLOG.md",
+      "revision": 1,
+      "status": "DRAFT",
+      "current": true,
+      "derived_from": [
+        "spec@1",
+        "tasks@2"
+      ]
+    },
+    {
+      "id": "evidence",
+      "role": "EVIDENCE",
+      "path": "evidence/ledger.md",
+      "revision": 1,
+      "status": "DRAFT",
+      "current": true,
+      "derived_from": [
+        "spec@1",
+        "tasks@2"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "TSK-001",
+      "spec_ids": [
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "INV-001",
+        "INV-002",
+        "INV-003",
+        "INV-004"
+      ],
+      "depends_on": [],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": [
+        "crates/protocol/**"
+      ],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": true,
+      "tdd_cycles": [
+        {
+          "test_id": "TST-001",
+          "state": "DONE",
+          "kind": "NEW_BEHAVIOR",
+          "red": {
+            "command": "cargo test -p android-ebpf-protocol --test graph direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file",
+            "exit": 101,
+            "raw_summary": "RequestOrigin type and variant were missing.",
+            "sequence_or_time": "0001",
+            "spec_ids": [
+              "REQ-004",
+              "REQ-005",
+              "INV-002",
+              "INV-003"
+            ],
+            "task_id": "TSK-001",
+            "test_id": "TST-001",
+            "scope": "focused graph contract",
+            "artifact_revision": "spec@1"
+          },
+          "green": {
+            "command": "cargo test -p android-ebpf-protocol --test graph direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file",
+            "exit": 0,
+            "raw_summary": "Two direct origins were exact and the heuristic origin was suppressed.",
+            "sequence_or_time": "0002",
+            "spec_ids": [
+              "REQ-004",
+              "REQ-005",
+              "INV-002",
+              "INV-003"
+            ],
+            "task_id": "TSK-001",
+            "test_id": "TST-001",
+            "scope": "focused graph contract",
+            "artifact_revision": "spec@1"
+          },
+          "refactor": {
+            "command": "cargo test -p android-ebpf-protocol",
+            "exit": 0,
+            "raw_summary": "All protocol tests passed after integration.",
+            "sequence_or_time": "0003",
+            "spec_ids": [
+              "REQ-004",
+              "REQ-005",
+              "REQ-006",
+              "REQ-007",
+              "INV-001",
+              "INV-002",
+              "INV-003",
+              "INV-004"
+            ],
+            "task_id": "TSK-001",
+            "test_id": "TST-001",
+            "scope": "protocol regression suite",
+            "artifact_revision": "spec@1"
+          }
+        },
+        {
+          "test_id": "TST-005",
+          "state": "DONE",
+          "kind": "REGRESSION_FIX",
+          "red": {
+            "command": "cargo test -p android-ebpf-protocol --test graph direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file",
+            "exit": 101,
+            "raw_summary": "a prebuilt analysis index omitted later request-origin facts and returned one heuristic candidate instead of two exact origins",
+            "sequence_or_time": "0017",
+            "spec_ids": [
+              "REQ-004",
+              "REQ-005",
+              "INV-003"
+            ],
+            "task_id": "TSK-001",
+            "test_id": "TST-005",
+            "scope": "live analysis cache invalidation",
+            "artifact_revision": "spec@1"
+          },
+          "green": {
+            "command": "cargo test -p android-ebpf-protocol --test graph direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file",
+            "exit": 0,
+            "raw_summary": "request-origin ingest now invalidates graph caches and the analysis index",
+            "sequence_or_time": "0018",
+            "spec_ids": [
+              "REQ-004",
+              "REQ-005",
+              "INV-003"
+            ],
+            "task_id": "TSK-001",
+            "test_id": "TST-005",
+            "scope": "live analysis cache invalidation",
+            "artifact_revision": "spec@1"
+          },
+          "refactor": {
+            "command": "cargo test --workspace --locked",
+            "exit": 0,
+            "raw_summary": "workspace regressions passed with cache invalidation and partial identity matching",
+            "sequence_or_time": "0019",
+            "spec_ids": [
+              "REQ-004",
+              "REQ-005",
+              "REQ-006",
+              "REQ-007",
+              "INV-001",
+              "INV-002",
+              "INV-003",
+              "INV-004"
+            ],
+            "task_id": "TSK-001",
+            "test_id": "TST-005",
+            "scope": "workspace regression suite",
+            "artifact_revision": "spec@1"
+          }
+        }
+      ],
+      "evidence": [
+        {
+          "command": "cargo test -p android-ebpf-protocol",
+          "exit": 0,
+          "raw_summary": "Protocol suite passed with exact origin precedence and backward-compatible event schema.",
+          "scope": "TSK-001 completion",
+          "sequence_or_time": "0004",
+          "spec_ids": [
+            "REQ-004",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "INV-001",
+            "INV-002",
+            "INV-003",
+            "INV-004"
+          ],
+          "task_id": "TSK-001",
+          "test_ids": [
+            "TST-001"
+          ],
+          "artifact_revision": "spec@1"
+        },
+        {
+          "command": "cargo test --workspace --locked",
+          "exit": 0,
+          "raw_summary": "exact-origin cache invalidation and the workspace regression suite passed",
+          "scope": "TSK-001 regression completion",
+          "sequence_or_time": "0020",
+          "spec_ids": [
+            "REQ-004",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "INV-001",
+            "INV-002",
+            "INV-003",
+            "INV-004"
+          ],
+          "task_id": "TSK-001",
+          "test_ids": [
+            "TST-005"
+          ],
+          "artifact_revision": "spec@1"
+        }
+      ]
+    },
+    {
+      "id": "TSK-002",
+      "spec_ids": [
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-008",
+        "NFR-002",
+        "NFR-003"
+      ],
+      "depends_on": [
+        "TSK-001"
+      ],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": [
+        "crates/ebpf-types/**",
+        "crates/android-agent/**"
+      ],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": true,
+      "tdd_cycles": [
+        {
+          "test_id": "TST-002",
+          "state": "DONE",
+          "kind": "NEW_BEHAVIOR",
+          "red": {
+            "command": "cargo test -p android-ebpf-agent request_origin_decode_hashes_object_keys_and_preserves_file_identity",
+            "exit": 101,
+            "raw_summary": "request-origin ABI fields and constants were missing",
+            "sequence_or_time": "0005",
+            "spec_ids": [
+              "REQ-002",
+              "REQ-004",
+              "NFR-002"
+            ],
+            "task_id": "TSK-002",
+            "test_id": "TST-002",
+            "scope": "focused agent ABI decode",
+            "artifact_revision": "spec@1"
+          },
+          "green": {
+            "command": "cargo test -p android-ebpf-agent request_origin_decode_hashes_object_keys_and_preserves_file_identity",
+            "exit": 0,
+            "raw_summary": "decode preserved file identity and salted both object keys",
+            "sequence_or_time": "0006",
+            "spec_ids": [
+              "REQ-002",
+              "REQ-004",
+              "NFR-002"
+            ],
+            "task_id": "TSK-002",
+            "test_id": "TST-002",
+            "scope": "focused agent ABI decode",
+            "artifact_revision": "spec@1"
+          },
+          "refactor": {
+            "command": "cargo test -p android-ebpf-agent",
+            "exit": 0,
+            "raw_summary": "agent tests passed after ABI integration",
+            "sequence_or_time": "0007",
+            "spec_ids": [
+              "REQ-002",
+              "REQ-003",
+              "REQ-004",
+              "REQ-005",
+              "REQ-008",
+              "NFR-002"
+            ],
+            "task_id": "TSK-002",
+            "test_id": "TST-002",
+            "scope": "agent regression suite",
+            "artifact_revision": "spec@1"
+          }
+        },
+        {
+          "test_id": "TST-003",
+          "state": "DONE",
+          "kind": "NEW_BEHAVIOR",
+          "red": {
+            "command": "cargo check -p android-ebpf-agent",
+            "exit": 101,
+            "raw_summary": "declared btf_layout module was missing",
+            "sequence_or_time": "0008",
+            "spec_ids": [
+              "REQ-002",
+              "NFR-003"
+            ],
+            "task_id": "TSK-002",
+            "test_id": "TST-003",
+            "scope": "BTF layout resolver",
+            "artifact_revision": "spec@1"
+          },
+          "green": {
+            "command": "cargo test -p android-ebpf-agent btf_layout",
+            "exit": 0,
+            "raw_summary": "synthetic and exposed host vmlinux BTF offsets resolved",
+            "sequence_or_time": "0009",
+            "spec_ids": [
+              "REQ-002",
+              "NFR-003"
+            ],
+            "task_id": "TSK-002",
+            "test_id": "TST-003",
+            "scope": "BTF layout resolver",
+            "artifact_revision": "spec@1"
+          },
+          "refactor": {
+            "command": "cargo test -p android-ebpf-agent",
+            "exit": 0,
+            "raw_summary": "full agent suite passed with BTF parser",
+            "sequence_or_time": "0010",
+            "spec_ids": [
+              "REQ-002",
+              "REQ-003",
+              "REQ-004",
+              "REQ-005",
+              "REQ-008",
+              "NFR-002"
+            ],
+            "task_id": "TSK-002",
+            "test_id": "TST-003",
+            "scope": "agent regression suite",
+            "artifact_revision": "spec@1"
+          }
+        }
+      ],
+      "evidence": [
+        {
+          "command": "cargo test -p android-ebpf-agent",
+          "exit": 0,
+          "raw_summary": "agent ABI, BTF layout, pointer redaction, and supporting tests passed",
+          "scope": "TSK-002 completion",
+          "sequence_or_time": "0011",
+          "spec_ids": [
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-008",
+            "NFR-002",
+            "NFR-003"
+          ],
+          "task_id": "TSK-002",
+          "test_ids": [
+            "TST-002",
+            "TST-003"
+          ],
+          "artifact_revision": "spec@1"
+        }
+      ]
+    },
+    {
+      "id": "TSK-003",
+      "spec_ids": [
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-008",
+        "NFR-001",
+        "NFR-002",
+        "NFR-003",
+        "INV-005"
+      ],
+      "depends_on": [
+        "TSK-002"
+      ],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": [
+        "crates/android-ebpf/**"
+      ],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": false,
+      "tdd_cycles": [],
+      "evidence": [
+        {
+          "command": "PATH=/root/.cargo/bin:$PATH ./scripts/build-ebpf.sh; readelf -S --wide crates/android-ebpf/target/bpfel-unknown-none/release/android-storage-ebpf",
+          "exit": 0,
+          "raw_summary": "eBPF target built; fentry, fexit, and success-only tp_btf merge sections present",
+          "scope": "host build/static object verification; device verifier remains TSK-006",
+          "sequence_or_time": "0012",
+          "spec_ids": [
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-008",
+            "NFR-001",
+            "NFR-002",
+            "NFR-003",
+            "INV-005"
+          ],
+          "task_id": "TSK-003",
+          "test_ids": [],
+          "artifact_revision": "spec@1"
+        }
+      ]
+    },
+    {
+      "id": "TSK-004",
+      "spec_ids": [
+        "REQ-001",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "NFR-004"
+      ],
+      "depends_on": [
+        "TSK-002",
+        "TSK-003"
+      ],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": [
+        "crates/android-agent/**"
+      ],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": true,
+      "tdd_cycles": [
+        {
+          "test_id": "TST-004",
+          "state": "DONE",
+          "kind": "CHARACTERIZATION",
+          "baseline_passing_proof": {
+            "command": "cargo test -p android-ebpf-agent exact_adapter_failure_preserves_mandatory_block_fallback",
+            "exit": 0,
+            "raw_summary": "fallback behavior was captured after integrated implementation",
+            "sequence_or_time": "0013",
+            "spec_ids": [
+              "REQ-001",
+              "REQ-007",
+              "NFR-004"
+            ],
+            "task_id": "TSK-004",
+            "test_id": "TST-004",
+            "scope": "capability fallback",
+            "artifact_revision": "spec@1"
+          },
+          "intent_review": {
+            "sequence_or_time": "0014",
+            "spec_ids": [
+              "REQ-001",
+              "REQ-007",
+              "NFR-004"
+            ],
+            "task_id": "TSK-004",
+            "test_id": "TST-004",
+            "scope": "capability fallback contract",
+            "artifact_revision": "spec@1",
+            "decision": "accept characterization as the regression contract",
+            "rationale": "the test locks the requirement that optional exact attach failure cannot disable mandatory block probes"
+          }
+        }
+      ],
+      "evidence": [
+        {
+          "command": "cargo test -p android-ebpf-agent",
+          "exit": 0,
+          "raw_summary": "capability and fallback tests passed",
+          "scope": "TSK-004 completion",
+          "sequence_or_time": "0015",
+          "spec_ids": [
+            "REQ-001",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "REQ-008",
+            "NFR-004"
+          ],
+          "task_id": "TSK-004",
+          "test_ids": [
+            "TST-004"
+          ],
+          "artifact_revision": "spec@1"
+        }
+      ]
+    },
+    {
+      "id": "TSK-005",
+      "spec_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "NFR-001",
+        "NFR-002",
+        "NFR-003",
+        "NFR-004"
+      ],
+      "depends_on": [
+        "TSK-004"
+      ],
+      "status": "done",
+      "stream_id": "implementation",
+      "planned_paths": [
+        "README.md",
+        "docs/**",
+        ".goal/changes/exact-file-block-attribution/**"
+      ],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": false,
+      "tdd_cycles": [],
+      "evidence": [
+        {
+          "command": "cargo test --workspace; cargo clippy --workspace --all-targets -- -D warnings; cargo fmt --all -- --check; cargo check -p android-ebpf-agent --target aarch64-linux-android; ./scripts/build-ebpf.sh; git diff --check",
+          "exit": 0,
+          "raw_summary": "all host-verifiable gates passed",
+          "scope": "TSK-005 completion",
+          "sequence_or_time": "0016",
+          "spec_ids": [
+            "REQ-001",
+            "REQ-002",
+            "REQ-003",
+            "REQ-004",
+            "REQ-005",
+            "REQ-006",
+            "REQ-007",
+            "REQ-008",
+            "NFR-001",
+            "NFR-002",
+            "NFR-003",
+            "NFR-004"
+          ],
+          "task_id": "TSK-005",
+          "test_ids": [],
+          "artifact_revision": "spec@1"
+        }
+      ]
+    },
+    {
+      "id": "TSK-006",
+      "spec_ids": [
+        "REQ-001",
+        "REQ-002",
+        "REQ-003",
+        "REQ-004",
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "NFR-001",
+        "NFR-002",
+        "NFR-003",
+        "NFR-004"
+      ],
+      "depends_on": [
+        "TSK-005"
+      ],
+      "status": "pending",
+      "stream_id": "device",
+      "planned_paths": [],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": false,
+      "tdd_cycles": [],
+      "evidence": []
+    },
+    {
+      "id": "TSK-007",
+      "spec_ids": [
+        "REQ-001",
+        "REQ-007",
+        "NFR-004"
+      ],
+      "depends_on": [
+        "TSK-005"
+      ],
+      "status": "done",
+      "stream_id": "documentation",
+      "planned_paths": [
+        "README.md",
+        "docs/EXACT_FILE_ATTRIBUTION_HANDOFF.md",
+        ".goal/changes/exact-file-block-attribution/**"
+      ],
+      "leased_paths": [],
+      "forbidden_paths": [],
+      "tdd_required": false,
+      "tdd_cycles": [],
+      "evidence": [
+        {
+          "command": "test -s docs/EXACT_FILE_ATTRIBUTION_HANDOFF.md; required-section rg -q checks; git diff --check",
+          "exit": 0,
+          "raw_summary": "handoff covers branch/baseline, source-of-truth artifacts, build and device commands, exact/fallback criteria, unverified gates, and resume order",
+          "scope": "TSK-007 completion",
+          "sequence_or_time": "0021",
+          "spec_ids": [
+            "REQ-001",
+            "REQ-007",
+            "NFR-004"
+          ],
+          "task_id": "TSK-007",
+          "test_ids": [],
+          "artifact_revision": "spec@1"
+        }
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "id": "GAP-001",
+      "severity": "high",
+      "kind": "partial",
+      "status": "open",
+      "source": "TSK-006",
+      "action": "Run verifier, attach, direct I/O, buffered writeback, and multi-origin acceptance on the target rooted userdebug Android board."
+    },
+    {
+      "id": "GAP-002",
+      "severity": "medium",
+      "kind": "partial",
+      "status": "closed",
+      "source": "TSK-005",
+      "action": "Pinned Rust 1.98, nightly, bpf-linker, and Android target installed; host gates passed."
+    }
+  ],
+  "checkpoint": {
+    "seq": 4,
+    "spec_revision": 1,
+    "completed_tasks": [
+      "TSK-001",
+      "TSK-002",
+      "TSK-003",
+      "TSK-004",
+      "TSK-005",
+      "TSK-007"
+    ],
+    "next_tasks": [
+      "TSK-006"
+    ],
+    "blockers": [],
+    "evidence_cursor": "0021",
+    "resume": "Deploy the agent and eBPF object to the rooted userdebug board, then execute DEVICE_RUNBOOK exact-attribution acceptance."
+  }
+}

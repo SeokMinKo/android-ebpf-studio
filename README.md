@@ -123,7 +123,10 @@ cargo binstall bpf-linker
 - SCSI command pointer는 충돌·TTL 검사를 통과한 계층 내부 start/done pairing에만 Exact일 수 있습니다. UFS tag는 controller-local이므로 controller identity를 함께 관측하지 못한 adapter에서는 계층 내부 span도 Probable이며, block request edge 역시 직접 전파 ID가 없으면 Probable입니다.
 - kernel pointer/tag는 agent 밖으로 내보내기 전에 session별 opaque ID로 변환합니다.
 - Pipeline의 중첩 bar는 단순 합산하지 않습니다. 전체 measured coverage는 interval 합집합이고, 관측되지 않은 틈은 Unaccounted입니다.
-- 파일 경로는 syscall과 FD의 attribution입니다. buffered writeback, filesystem metadata, GC가 생성한 block I/O를 특정 파일과 exact하게 연결했다고 표시하지 않습니다.
+- Deep/RawAll에서 target BTF와 typed hook attach가 모두 성공하면 `vfs_read/write → submit_bio → blk_mq_bio_to_request`의 직접 object chain을 파일 identity의 `Exact` 근거로 사용합니다. 성공 후에만 발생하는 `tp_btf/block_bio_frontmerge|backmerge`가 merge origin을 추가하며 bounded origin set overflow를 명시합니다.
+- `write_cache_pages` 또는 F2FS writeback hook이 attach된 커널은 `address_space.host → inode → bio/request`를 exact file origin으로 기록합니다. 파일의 device I/O identity는 Exact여도 최초 write syscall과의 인과관계는 별도 token이 없으므로 Exact로 승격하지 않습니다.
+- 경로 문자열은 identity가 아닙니다. exact origin의 filesystem device/inode와 같은 `FileIo` snapshot이 있을 때만 경로를 결합하며, 없으면 `<inode dev:ino>`를 표시합니다. filesystem metadata, journal, GC를 임의 사용자 파일로 만들지 않습니다.
+- BTF field offset은 `/sys/kernel/btf/vmlinux`에서 실행 시 해석합니다. BTF parse 또는 essential fentry/fexit/tp_btf attach가 실패하면 `exact_file_attribution=false`로 기록하고 기존 tracepoint/휴리스틱 수집을 계속합니다.
 - `block_rq_insert` 또는 `raw_syscalls`가 없는 커널에서는 해당 queue latency 또는 file view가 unavailable이며 0으로 대체하지 않습니다.
 - event loss와 malformed record는 footer/health counter로 분리합니다. 값이 없는데 0으로 가장하지 않습니다.
 - Scheduler/GC/writeback/UIC marker와 stack fingerprint는 Deep capture의 원인 후보 문맥입니다. 직접 correlation edge가 없으면 `ContextOnly`이며 additive latency 또는 확정 원인으로 표시하지 않습니다.
@@ -138,7 +141,7 @@ cargo test --workspace
 cargo check -p android-ebpf-studio --features gui
 ```
 
-장비 실행 절차와 장애 분류는 [docs/DEVICE_RUNBOOK.md](docs/DEVICE_RUNBOOK.md), NDJSON 형식은 [docs/PROTOCOL.md](docs/PROTOCOL.md)를 참고하세요.
+장비 실행 절차와 장애 분류는 [docs/DEVICE_RUNBOOK.md](docs/DEVICE_RUNBOOK.md), NDJSON 형식은 [docs/PROTOCOL.md](docs/PROTOCOL.md)를 참고하세요. 다른 환경에서 exact file attribution 작업을 이어갈 때는 [docs/EXACT_FILE_ATTRIBUTION_HANDOFF.md](docs/EXACT_FILE_ATTRIBUTION_HANDOFF.md)를 시작점으로 사용하세요.
 
 ## 상태와 제한
 

@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
 use android_ebpf_protocol::{
-    AttributionConfidence, BlockIssue, FileIo, IoOperation, SCHEMA_VERSION, SessionReader,
-    StorageEvent, WireRecord,
+    AttributionConfidence, BlockIssue, FileIdentity, FileIo, IoOperation, IoOrigin, RequestOrigin,
+    SCHEMA_VERSION, SessionReader, StorageEvent, WireRecord,
 };
 
 #[test]
@@ -85,6 +85,45 @@ fn unknown_json_fields_are_forward_compatible() {
     let loaded = SessionReader::default().read(Cursor::new(input)).unwrap();
     assert_eq!(loaded.health.len(), 1);
     assert_eq!(loaded.rejected_lines, 0);
+}
+
+#[test]
+fn request_origin_event_round_trips_without_raw_pointer_fields() {
+    let record = WireRecord::Event {
+        schema_version: SCHEMA_VERSION,
+        sequence: 10,
+        event: StorageEvent::RequestOrigin(RequestOrigin {
+            ts_ns: 300,
+            request_id: 7001,
+            origin_id: 7002,
+            file: FileIdentity {
+                fs_device_major: 259,
+                fs_device_minor: 7,
+                inode: 123,
+                inode_generation: None,
+                mount_id: None,
+            },
+            path: None,
+            origin: IoOrigin::Writeback,
+            operation: IoOperation::Write,
+            bytes: None,
+            pid: 55,
+            tid: 56,
+            incomplete: true,
+        }),
+    };
+    let json = serde_json::to_string(&record).unwrap();
+    assert!(!json.contains("0x"));
+    let loaded = SessionReader::default()
+        .read(Cursor::new(format!("{json}\n")))
+        .unwrap();
+    assert_eq!(
+        loaded.events,
+        vec![match record {
+            WireRecord::Event { event, .. } => event,
+            _ => unreachable!(),
+        }]
+    );
 }
 
 #[test]
