@@ -144,6 +144,7 @@ mod diskstats_performance_tests {
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 struct AnalysisFilter {
+    latency_range: Option<LatencyRange>,
     request_keys: Option<std::collections::HashSet<IoSelectionKey>>,
     start_ms: f64,
     end_ms: f64,
@@ -195,6 +196,12 @@ impl AnalysisFilter {
         self != &Self::default()
     }
     fn matches(&self, engine: &AnalysisEngine, io: &CompletedIo, origin: u64) -> bool {
+        if self
+            .latency_range
+            .is_some_and(|range| !range.contains(io.total_latency_ns))
+        {
+            return false;
+        }
         if self
             .request_keys
             .as_ref()
@@ -414,6 +421,14 @@ impl StudioApp {
             return;
         }
         let previous = self.query.clone();
+        if let Some(range) = self.query.latency_range {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Total latency: {}", range.label()));
+                if ui.button("Clear latency range").clicked() {
+                    self.query.latency_range = None;
+                }
+            });
+        }
         ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Completion time (ms)");
@@ -521,9 +536,7 @@ impl StudioApp {
                 .x_axis_label("Seconds since session start")
                 .y_axis_label(title)
                 .show(ui, |plot| {
-                    for (index, label, color) in
-                        [(0, "Read / other", accent()), (1, "Write", green())]
-                    {
+                    for (index, label, color) in [(0, "Read", accent()), (1, "Write", green())] {
                         let points: PlotPoints = bins
                             .iter()
                             .map(|(second, v)| [*second as f64 + 0.5, v[offset + index]])
@@ -545,21 +558,9 @@ impl StudioApp {
             self.rebuild_filtered();
             self.page = Page::Explore;
         }
-        studio_plot("latency-distribution")
-            .height(160.0)
-            .x_axis_label("Total latency log2(ns), bin [2^x, 2^(x+1))")
-            .y_axis_label("Requests")
-            .show(ui, |plot| {
-                let bars = histogram
-                    .iter()
-                    .map(|(bucket, count)| {
-                        egui_plot::Bar::new(*bucket as f64, *count as f64).width(0.8)
-                    })
-                    .collect();
-                plot.bar_chart(
-                    egui_plot::BarChart::new("Retained total latency", bars).color(amber()),
-                );
-            });
+        if let Some(range) = self.latency_distribution_ui(ui, &histogram, total) {
+            self.explore_latency_range(range);
+        }
         ui.label("Total latency: insert→complete when insert exists, otherwise issue→complete. Queue: insert→issue (unavailable without insert). Device: issue→complete. Queue depth is observed block in-flight depth; missing/suppressed events can reduce it. Sequential: previous sector + sectors equals current sector, within the same device and direction, at the block issue layer.");
         ui.collapsing("Processes ranked by transferred bytes in selection", |ui| {
             let mut rows: Vec<_> = targets.into_iter().collect();
@@ -888,7 +889,7 @@ impl TrendData {
                 unplaced_time_count += 1;
             }
             if let Some(latency) = io.total_latency_ns {
-                let bucket = 63 - latency.max(1).leading_zeros();
+                let bucket = latency_bucket(latency);
                 *histogram.entry(bucket).or_default() += 1;
             }
             let origins = block_file_origins(&engine.transaction_for(io));

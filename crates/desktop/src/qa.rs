@@ -3,6 +3,13 @@
 // Other scenarios never start device capture; fixtures retain their source.
 #[derive(Default)]
 struct RenderQa {
+    latency_stable_rect: Option<egui::Rect>,
+    latency_stable_frames: u32,
+    latency_targets: Vec<(u32, egui::Pos2)>,
+    latency_table_target: Option<egui::Pos2>,
+    latency_expected: Option<LatencyRange>,
+    latency_action_at: Option<Instant>,
+    latency_elapsed_ms: Option<f64>,
     compare_ready_ms: Option<f64>,
     started: Option<Instant>,
     regions: BTreeMap<String, (egui::Rect, egui::Rect)>,
@@ -67,6 +74,10 @@ impl StudioApp {
         let Ok(gesture) = std::env::var("ANDROID_EBPF_QA_GESTURE") else {
             return;
         };
+        if gesture.starts_with("latency-") {
+            self.latency_qa_input(raw, &gesture);
+            return;
+        }
         if gesture == "stream-replay" {
             return;
         }
@@ -740,6 +751,12 @@ impl StudioApp {
             );
             let mut report = serde_json::json!({ "capture": path, "result": result.as_ref().map(|_| "saved").map_err(|e| e.to_string()), "phase": self.phase.label(), "page": format!("{:?}", self.page), "theme": format!("{:?}",self.theme), "completed_requests": self.analysis().completed_ios().len(), "received_events": self.received_events, "rejected": self.rejected_records, "frames": self.render_qa.frames, "reanalysis_before_first":self.render_qa.reanalysis_before_first,"reanalysis_window_first":self.render_qa.reanalysis_window_first,"source_completed_ios":self.reanalysis.source_count,"reanalysis_window_ns":self.reanalysis.window,"reanalysis_ms":self.reanalysis.elapsed_ms,"reanalysis_error":self.reanalysis.error,"reanalysis_actions":self.reanalysis.completed_actions,"file_evidence_count":self.file_evidence_positions.as_ref().map(|v|v.len()),"file_evidence_total":self.analysis().file_ios().len(),"filtered_read_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Read).count(),"filtered_write_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Write).count(),"explorer_available":self.explorer_view.as_ref().map(|v|v.available),"range_draft":self.selection.axis_range.values,"range_actions":self.render_qa.range_actions,"range_error":self.selection.axis_range.error,"range_initial":self.render_qa.range_initial.map(|b|[b.min(),b.max()]),"range_expected":self.render_qa.range_expected.map(|b|[b.min(),b.max()]),"range_applied":self.render_qa.range_applied.map(|b|[b.min(),b.max()]),"plot_bounds":self.selection.current_bounds.map(|b|[b.min(),b.max()]),"point_diameter":self.plot_style.point_diameter,"color_category":format!("{:?}",self.group_by),"rendered_colors":self.explorer_view.as_ref().map(|view|view.groups.iter().map(|(name,_)|(name,self.plot_style.color(self.group_by,name).to_array())).collect::<BTreeMap<_,_>>()), "stop_analysis_ms":self.render_qa.stop_analysis_ms,"session_path":self.session_path,"selected_files":self.selection.summary.as_ref().map(|s|s.files.len()),"selected_processes":self.selection.summary.as_ref().map(|s|s.processes.len()),"selection_count": self.selection.summary.as_ref().map(|s|s.keys.len()), "selection_ms": self.selection.summary.as_ref().map(|s|s.elapsed.as_secs_f64()*1000.0), "zoom_history_depth": self.selection.zoom_history.len(), "zoom_actions": self.render_qa.zoom_actions, "back_actions": self.render_qa.back_actions, "ui_performance": self.performance.snapshot() });
             report["comparison_explore"] = self.compare_qa_report();
+            report["latency_expected"] = serde_json::json!(self.render_qa.latency_expected);
+            report["latency_drilldown_ms"] = serde_json::json!(self.render_qa.latency_elapsed_ms);
+            if self.render_qa.latency_expected.is_some() {
+                report["latency_selected_keys"] =
+                    serde_json::json!(self.selection.summary.as_ref().map(|s| &s.keys));
+            }
             report["displayed_summary"] =
                 serde_json::json!(self.summary_view.as_ref().map(|(_, _, summary)| summary));
             report["trend_request_count"] = serde_json::json!(
