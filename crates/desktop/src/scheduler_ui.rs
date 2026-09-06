@@ -3,6 +3,22 @@
 #[cfg(test)]
 mod scheduler_tests {
     use super::*;
+    #[test]
+    fn scheduler_probe_metadata_preserves_loss_status_live_and_reloaded() {
+        let mut app=StudioApp{loss_status:"Kernel loss: 7".into(),..Default::default()};
+        let path=std::env::temp_dir().join(format!("scheduler-source-{}.ndjson",uuid::Uuid::new_v4()));
+        let mut lines=Vec::new();
+        for (source,stage,status) in [("native","recording","Kernel loss: 7"),("scheduler_iowait","recording","Task delay probe attached"),("scheduler_iowait","complete","Task delay capture finished")] {
+            let record=WireRecord::SourceInfo{schema_version:android_ebpf_protocol::SCHEMA_VERSION,source:source.into(),status:status.into(),metadata:serde_json::json!({"stage":stage})};
+            lines.push(serde_json::to_string(&record).unwrap());app.ingest_record(record);
+        }
+        assert_eq!(app.loss_status,"Kernel loss: 7");
+        std::fs::write(&path,lines.join("\n")+"\n").unwrap();
+        let loaded=crate::session::load_analysis(&path).unwrap();
+        assert_eq!(loaded.loss_status,"Kernel loss: 7");
+        assert_eq!(loaded.source_info.len(),3);
+        std::fs::remove_file(path).unwrap();
+    }
     fn waits()->Vec<android_ebpf_protocol::SchedulerIoWait> {
         (0..200).map(|i|android_ebpf_protocol::SchedulerIoWait{ts_ns:100_000_000+i*10_000_000,delay_ns:(i%20)*1000,tid:if i%2==0{42}else{43},pid:if i%2==0{None}else{Some(40)},comm:if i%2==0{"Worker-A"}else{"worker-B"}.into(),cpu:Some((i%4) as u32),source:"fixture".into()}).collect()
     }
@@ -165,6 +181,12 @@ impl StudioApp {
                 ui.heading(format!("{} wait events",view.rows.len()));
                 ui.label("Scheduler I/O wait · microseconds");
                 ui.small("Observed task delays from sched_stat_iowait. Exact nearest-rank percentiles of retained events, before display sampling.");
+                if let Some(WireRecord::SourceInfo{status,metadata,..})=self.source_info.iter().rev().find(|r|matches!(r,WireRecord::SourceInfo{source,metadata,..} if source=="scheduler_iowait"&&metadata["stage"]=="recording")) {
+                    ui.small(status);
+                    if let Some(error)=metadata["stats_error"].as_str(){ui.colored_label(amber(),format!("Scheduler accounting could not be enabled: {error}"));}
+                    if let Some(scope)=metadata["capture_filter_scope"].as_str(){ui.small(scope);}
+                }
+                if let Some(error)=self.source_info.iter().rev().find_map(|r|match r {WireRecord::SourceInfo{source,metadata,..} if source=="scheduler_iowait"=>metadata["stats_restore"]["Err"].as_str(),_=>None}) {ui.colored_label(amber(),format!("Scheduler accounting restoration failed: {error}"));}
                 if view.dropped>0 {ui.colored_label(amber(),format!("{} earlier wait events removed by detail retention. Distribution covers retained events only; narrow and reload the original interval.",view.dropped));}
                 if view.incompatible {ui.colored_label(amber(),"Block-only filters have no scheduler identity. Clear them to view wait events.");}
                 if view.source_count==0 {ui.label("No scheduler I/O wait samples were captured. This does not mean zero wait. Kernel schedstats, tracepoint availability and collector support are required.");}

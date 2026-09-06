@@ -92,6 +92,7 @@ name = "android-ebpf-studio"
 version = "0.8.1"
 dependencies = [
  "android-ebpf-protocol",
+ "android-ebpf-types",
  "anyhow",
  "chrono",
  "crossbeam-channel",

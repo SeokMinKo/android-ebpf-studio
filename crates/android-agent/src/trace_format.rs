@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use android_ebpf_types::{
     BioRemapLayout, F2fsFolioLayout, FileExtentLayout, OFFSET_MISSING, PipelineTraceLayout,
-    RawSyscallLayout, TraceLayout,
+    RawSyscallLayout, SchedulerWaitLayout, TraceLayout,
 };
 use anyhow::{Context, Result, bail};
 
@@ -53,6 +53,30 @@ pub fn parse_raw_syscall_layout(enter: &str, exit: &str) -> Result<RawSyscallLay
         enter_id_offset: required(&enter, "id")?,
         enter_args_offset: required(&enter, "args")?,
         exit_ret_offset: required(&exit, "ret")?,
+        reserved: 0,
+    })
+}
+
+pub fn parse_scheduler_wait_layout(input: &str) -> Result<SchedulerWaitLayout> {
+    let fields = parse_fields(input)?;
+    let field = |name: &str, size: u16| -> Result<u16> {
+        let (offset, actual_size) = fields
+            .get(name)
+            .copied()
+            .with_context(|| format!("sched_stat_iowait missing `{name}`"))?;
+        if actual_size != size || offset.checked_add(size).is_none() {
+            bail!(
+                "sched_stat_iowait `{name}` needs {size} bytes at a valid offset; got {actual_size}"
+            )
+        }
+        Ok(offset)
+    };
+    // Kernel sched_stat_template uses a fixed char comm[TASK_COMM_LEN].
+    // __data_loc/pointer formats have another size and are not guessed.
+    Ok(SchedulerWaitLayout {
+        pid_offset: field("pid", 4)?,
+        delay_offset: field("delay", 8)?,
+        comm_offset: field("comm", 16)?,
         reserved: 0,
     })
 }

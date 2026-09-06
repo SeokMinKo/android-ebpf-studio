@@ -27,6 +27,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+android-ebpf-types = { path = "../ebpf-types" }
+
 [[bin]]
 name = "android-ebpf-studio"
 path = "src/main.rs"

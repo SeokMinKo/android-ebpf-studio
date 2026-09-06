@@ -16,7 +16,7 @@ mod btf_layout;
 
 use android_ebpf_agent::trace_format::{
     parse_bio_remap_layout, parse_f2fs_extent_layout, parse_f2fs_folio_layout, parse_layout,
-    parse_pipeline_layout, parse_raw_syscall_layout, validate_pair,
+    parse_pipeline_layout, parse_raw_syscall_layout, parse_scheduler_wait_layout, validate_pair,
 };
 use android_ebpf_protocol::{
     AdaptiveController, AggregateCounters, AggregateSnapshot, AttributionConfidence, BlockComplete,
@@ -32,14 +32,14 @@ use android_ebpf_protocol::{
 use android_ebpf_types::{
     BioRemapLayout, F2fsFolioLayout, FileExtentLayout, FileIdentityLayout, FilterKey,
     HISTOGRAM_BUCKETS, KIND_BIO_REMAP, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE,
-    KIND_FILE_EXTENT, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN, KernelAggregate,
-    KernelEvent, LAYER_FILESYSTEM, LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS, MODE_BALANCED,
-    MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE,
-    ORIGIN_CHECKPOINT, ORIGIN_FILE, ORIGIN_FILESYSTEM_METADATA, ORIGIN_GARBAGE_COLLECTION,
-    ORIGIN_INCOMPLETE, ORIGIN_INODE_GENERATION_VALID, ORIGIN_JOURNAL, ORIGIN_KIND_MASK,
-    ORIGIN_MOUNT_ID_VALID, ORIGIN_READAHEAD, ORIGIN_SWAP, ORIGIN_WRITEBACK, PHASE_BEGIN, PHASE_END,
-    PHASE_INSTANT, PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE,
-    TraceLayout,
+    KIND_FILE_EXTENT, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN, KIND_SCHEDULER_IO_WAIT,
+    KernelAggregate, KernelEvent, LAYER_FILESYSTEM, LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS,
+    MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ,
+    OP_WRITE, ORIGIN_CHECKPOINT, ORIGIN_FILE, ORIGIN_FILESYSTEM_METADATA,
+    ORIGIN_GARBAGE_COLLECTION, ORIGIN_INCOMPLETE, ORIGIN_INODE_GENERATION_VALID, ORIGIN_JOURNAL,
+    ORIGIN_KIND_MASK, ORIGIN_MOUNT_ID_VALID, ORIGIN_READAHEAD, ORIGIN_SWAP, ORIGIN_WRITEBACK,
+    PHASE_BEGIN, PHASE_END, PHASE_INSTANT, PipelineTraceLayout, RawFilterConfig, RawSyscallLayout,
+    STACK_ID_UNAVAILABLE, SchedulerWaitLayout, TraceLayout,
 };
 use anyhow::{Context, Result, bail};
 use aya::{
@@ -98,6 +98,11 @@ unsafe impl Pod for LayoutValue {}
 struct RawSyscallLayoutValue(RawSyscallLayout);
 
 unsafe impl Pod for RawSyscallLayoutValue {}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct SchedulerWaitLayoutValue(SchedulerWaitLayout);
+unsafe impl Pod for SchedulerWaitLayoutValue {}
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -191,6 +196,7 @@ struct CollectorConfig {
     complete: TraceLayout,
     insert: Option<TraceLayout>,
     syscall: Option<RawSyscallLayout>,
+    scheduler_wait: Option<(SchedulerWaitLayout, String)>,
     file_identity_layout: Option<FileIdentityLayout>,
     f2fs_extent_probe: Option<F2fsExtentProbe>,
     f2fs_folio_probe: Option<F2fsFolioProbe>,
@@ -1194,6 +1200,30 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
             );
         }
     }
+    let mut scheduler_attached = false;
+    if let Some((layout, _)) = &config.scheduler_wait {
+        let result = configure_scheduler_wait_layout(&mut bpf, *layout)
+            .and_then(|_| attach(&mut bpf, "sched_stat_iowait", "sched", "sched_stat_iowait"));
+        scheduler_attached = emit_optional_probe_result(
+            session_id,
+            PipelineLayer::SchedulerContext,
+            "sched/sched_stat_iowait task delay",
+            result,
+        );
+        for plan in config
+            .capabilities
+            .attach_plan
+            .iter_mut()
+            .filter(|p| p.probe_kind == "tracepoint/task-delay")
+        {
+            plan.state = if scheduler_attached {
+                CapabilityState::Measured
+            } else {
+                CapabilityState::Unavailable
+            };
+            plan.reason=Some(if scheduler_attached{"Task delay attached; kernel schedstats must be enabled. Balanced/Deep/Raw capture without PID/UID/device/operation/size filters; task TID filter applies. No block payload or aggregate population."}else{"Task delay probe attachment failed; other scheduler context remains independent."}.into());
+        }
+    }
     let mut failed_optional = Vec::new();
     for probe in &config.pipeline_probes {
         let result =
@@ -1296,7 +1326,19 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
     let signal = running.clone();
     ctrlc::set_handler(move || signal.store(false, Ordering::Release))?;
 
+    let (mut scheduler_stats, scheduler_stats_error) = if scheduler_attached {
+        match android_ebpf_agent::scheduler_stats::SchedulerStatsGuard::enable(Path::new(
+            "/proc/sys/kernel/sched_schedstats",
+        )) {
+            Ok(guard) => (Some(guard), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        }
+    } else {
+        (None, None)
+    };
+
     let mut output = BufWriter::new(std::io::stdout().lock());
+
     write_record(
         &mut output,
         &WireRecord::Hello {
@@ -1304,6 +1346,20 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
             agent_version: env!("CARGO_PKG_VERSION").into(),
             boot_id: read_trimmed("/proc/sys/kernel/random/boot_id").unwrap_or_default(),
             kernel_release: read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default(),
+        },
+    )?;
+    write_record(
+        &mut output,
+        &WireRecord::SourceInfo {
+            schema_version: SCHEMA_VERSION,
+            source: "scheduler_iowait".into(),
+            status: if scheduler_attached {
+                "Task delay probe attached"
+            } else {
+                "Task delay probe unavailable"
+            }
+            .into(),
+            metadata: serde_json::json!({"stage":"recording","attached":scheduler_attached,"sched_schedstats":read_trimmed("/proc/sys/kernel/sched_schedstats"),"stats_enabled_by_capture":scheduler_stats.as_ref().is_some_and(|g|g.changed()),"stats_error":scheduler_stats_error,"population":"Independent waiting-task delay events; matching events emitted without block-detail sampling; absent events are not measured zero","capture_filter_scope":"Balanced/Deep/Raw modes; task TID supported; PID/UID/device/operation/size filters suppress scheduler delays because those identities are not exposed"}),
         },
     )?;
     write_record(
@@ -1667,6 +1723,18 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
             thread::sleep(Duration::from_millis(2));
         }
     }
+    let scheduler_restore = scheduler_stats
+        .as_mut()
+        .map(|guard| guard.restore().map_err(|error| error.to_string()));
+    write_record(
+        &mut output,
+        &WireRecord::SourceInfo {
+            schema_version: SCHEMA_VERSION,
+            source: "scheduler_iowait".into(),
+            status: "Task delay capture finished".into(),
+            metadata: serde_json::json!({"stage":"complete","stats_restore":scheduler_restore,"sched_schedstats":read_trimmed("/proc/sys/kernel/sched_schedstats")}),
+        },
+    )?;
     write_record(
         &mut output,
         &WireRecord::Footer {
@@ -2236,6 +2304,12 @@ fn capabilities() -> Result<CollectorConfig> {
         .ok()
         .zip(read_kernel_text(SYS_EXIT_FORMAT).ok())
         .and_then(|(enter, exit)| parse_raw_syscall_layout(&enter, &exit).ok());
+    let (scheduler_wait, scheduler_wait_reason) = match read_kernel_text("/sys/kernel/tracing/events/sched/sched_stat_iowait/format")
+        .map_err(anyhow::Error::from)
+        .and_then(|text| parse_scheduler_wait_layout(&text).map(|layout|(layout,format_hash(&text)))) {
+        Ok(value)=>(Some(value),"Task delay tracepoint layout validated; attachment and runtime schedstats still required".to_string()),
+        Err(error)=>(None,format!("Task delay tracepoint unavailable: {error:#}")),
+    };
     let ufs_events = discover_events("ufs");
     let scsi_events = discover_events("scsi");
     let sched_events = discover_events("sched");
@@ -2597,6 +2671,19 @@ fn capabilities() -> Result<CollectorConfig> {
                 .into(),
         ),
     }));
+    attach_plan.push(ProbePlan {
+        layer: PipelineLayer::SchedulerContext,
+        probe_kind: "tracepoint/task-delay".into(),
+        group: "sched".into(),
+        event_or_function: "sched_stat_iowait".into(),
+        state: if scheduler_wait.is_some() {
+            CapabilityState::Derived
+        } else {
+            CapabilityState::Unavailable
+        },
+        format_hash: scheduler_wait.as_ref().map(|(_, hash)| hash.clone()),
+        reason: Some(scheduler_wait_reason),
+    });
     attach_plan.extend(context_probes.iter().map(|probe| ProbePlan {
         layer: probe.layer,
         probe_kind: "tracepoint".into(),
@@ -2711,6 +2798,7 @@ fn capabilities() -> Result<CollectorConfig> {
         complete,
         insert,
         syscall,
+        scheduler_wait,
         file_identity_layout,
         f2fs_extent_probe,
         f2fs_folio_probe,
@@ -2840,6 +2928,15 @@ fn configure_layout(bpf: &mut Ebpf, name: &str, layout: TraceLayout) -> Result<(
         .with_context(|| format!("{name} map is missing"))?;
     let mut array = Array::<_, LayoutValue>::try_from(map)?;
     array.set(0, LayoutValue(layout), 0)?;
+    Ok(())
+}
+
+fn configure_scheduler_wait_layout(bpf: &mut Ebpf, layout: SchedulerWaitLayout) -> Result<()> {
+    let map = bpf
+        .map_mut("SCHED_IOWAIT_LAYOUT")
+        .context("SCHED_IOWAIT_LAYOUT map is missing; use the matching eBPF object")?;
+    let mut array = Array::<_, SchedulerWaitLayoutValue>::try_from(map)?;
+    array.set(0, SchedulerWaitLayoutValue(layout), 0)?;
     Ok(())
 }
 
@@ -2978,6 +3075,8 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
     let (device_major, device_minor) = decode_device(event.device);
     let request_id = opaque_key(event.request_id, correlation_salt);
     match event.kind {
+        KIND_SCHEDULER_IO_WAIT => android_ebpf_agent::scheduler_wait::from_kernel(&event)
+            .map(StorageEvent::SchedulerIoWait),
         KIND_BLOCK_INSERT => Some(StorageEvent::BlockInsert(BlockInsert {
             ts_ns: event.ts_ns,
             request_id,

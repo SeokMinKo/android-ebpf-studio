@@ -1,5 +1,7 @@
 # Active goal checkpoint — not overall completion
 
+Latest native collector continuation (2026-09-07): [UPAS_NATIVE_SCHEDULER_CHECKPOINT.md](UPAS_NATIVE_SCHEDULER_CHECKPOINT.md). Optional root I/O wait probe, runtime schedstats guard/restoration and acquisition metadata are implemented/build validated. 191 host tests passed; BPF/Android Release builds and native linked Summary fixture passed. No connected phone for physical acceptance. Full Goal remains active.
+
 Latest continuation (2026-09-07): see [UPAS_SCHEDULER_CHECKPOINT.md](UPAS_SCHEDULER_CHECKPOINT.md). Added schema8 scheduler I/O wait Perfetto decoding/projection/storage and Explore Trend with linked right Summary, cohort table/CSV, filtering, retention and original-window recovery. Native fixture/missing/large/filter tests and actual uPAS AST comparison passed. Root eBPF scheduler emission and physical acceptance remain pending. Previous CPU/Timeline checkpoints are retained. Goal remains active: remaining acquisition/features, full43 matrix/performance and Release installation/installed launch.
 
 Read the full objective at `C:/Users/AEBIZTRIP5.pub/.codex/attachments/700d9658-a88e-4c81-bb21-c455bd9eb2b2/goal-objective.md`. User subsequently clarified that Summary means the **existing Explore right-hand Summary inspector linked to the main graph**, not Overview or a separate histogram/pie catalogue. This supersedes the initial topology interpretation. Continue all remaining objective work autonomously. Goal remains active.

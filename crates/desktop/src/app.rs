@@ -1384,19 +1384,24 @@ impl StudioApp {
         match record {
             value @ WireRecord::SourceInfo { .. } => {
                 let WireRecord::SourceInfo {
-                    status, metadata, ..
+                    source,
+                    status,
+                    metadata,
+                    ..
                 } = &value
                 else {
                     unreachable!()
                 };
-                self.loss_status = status.clone();
+                if source != "scheduler_iowait" {
+                    self.loss_status = status.clone();
+                }
                 if metadata.get("stage").and_then(|s| s.as_str()) == Some("recording")
                     && self.phase == CapturePhase::Preparing
                 {
                     self.phase = CapturePhase::Recording;
                 }
                 if metadata.get("stage").and_then(|s| s.as_str()) == Some("complete") {
-                    self.push_diagnostic(format!("Perfetto source quality: {metadata}"));
+                    self.push_diagnostic(format!("{source} source quality: {metadata}"));
                 }
                 self.source_info.push(value);
             }

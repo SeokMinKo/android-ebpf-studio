@@ -294,7 +294,11 @@ pub fn load_analysis_window(
     let loss_status = loaded.health.last().map_or_else(|| "Loss counters not reported".into(), |record| match record { WireRecord::Health { kernel_drops, userspace_drops, correlation_ambiguous, correlation_expired, .. } => format!("Kernel loss: {} · userspace loss: {userspace_drops} · ambiguous: {correlation_ambiguous} · expired: {correlation_expired}", kernel_drops.map_or_else(|| "not reported".into(), |v| v.to_string())), _ => "Loss counters not reported".into() });
     let loss_status = loaded
         .source_info
-        .last()
+        .iter()
+        .rev()
+        .find(
+            |r| !matches!(r, WireRecord::SourceInfo { source, .. } if source == "scheduler_iowait"),
+        )
         .and_then(|r| {
             if let WireRecord::SourceInfo { status, .. } = r {
                 Some(status.clone())

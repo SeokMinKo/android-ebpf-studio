@@ -610,12 +610,12 @@
     "line": 8120,
     "source_tab": "RealTime",
     "fields": [],
-    "status": "partial: scheduler event Trend + linked Summary implemented and fixture/native validated; root collector and physical acquisition pending",
+    "status": "implemented scheduler Trend + linked Summary and Perfetto/root collection paths; host/native fixtures and collector builds validated; physical acquisition and full sweep/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
     "formula": "sched_stat_iowait task delay_ns / 1000 = us; accounting event time; independent scheduler population, never block I/O latency/Idle/CPU percentage",
     "target_ui": "Explore Scheduler I/O wait over time (preset27); existing Graph summary / Summary histogram, percentile, CDF/rank; same cohort details and CSV",
-    "capture_changes": "Schema8 SchedulerIoWait; Perfetto generic field327 decoder, sched/sched_stat_iowait config request, projection/NDJSON/CSV/window replay; no KernelEvent ABI change. Native/root eBPF delay emission and kernel schedstats/generic-ftrace physical acceptance pending.",
-    "verification": "UPAS_SCHEDULER_CHECKPOINT.md; actual uPAS AST 200-point comparison; independent native full/point/area/empty/incompatible/scheduler-only/Process/PID/100005-event retention matrix; malformed payload and source-window recovery regression tests",
+    "capture_changes": "Schema8 SchedulerIoWait; Perfetto generic field327 decoder/config/projection/storage/window replay; root validated tracepoint-layout emission, task TID-only capture filtering, schedstats enable/restore guard and persisted acquisition metadata. KernelEvent ABI size unchanged. Physical root verifier/attachment/runtime and generic-ftrace acceptance pending.",
+    "verification": "UPAS_SCHEDULER_CHECKPOINT.md and UPAS_NATIVE_SCHEDULER_CHECKPOINT.md; actual uPAS AST 200-point comparison; independent native full/point/area/empty/incompatible/scheduler-only/Process/PID/100005-event retention matrix; malformed payload/source-window tests; 191 host tests; Android Release/test cross-build and BPF 5165-instruction register check; metadata loss-status red-then-green regression",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

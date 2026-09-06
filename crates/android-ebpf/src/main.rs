@@ -5,11 +5,12 @@ use android_ebpf_types::{
     BioRemapLayout, BlockStart, F2fsFolioLayout, FileExtentLayout, FileIdentityLayout, FileStart,
     FilterKey, HISTOGRAM_BUCKETS, KIND_BIO_REMAP, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT,
     KIND_BLOCK_ISSUE, KIND_FILE_EXTENT, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN,
-    KernelAggregate, KernelEvent, KernelFileOrigin, LAYER_FILESYSTEM, LAYER_SCHEDULER, LAYER_SCSI,
-    LAYER_UFS, LAYER_UIC, MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OFFSET_MISSING,
-    OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, ORIGIN_FILE, ORIGIN_INCOMPLETE,
-    ORIGIN_INODE_GENERATION_VALID, ORIGIN_WRITEBACK, PHASE_BEGIN, PHASE_END, PHASE_INSTANT,
-    PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE, TraceLayout,
+    KIND_SCHEDULER_IO_WAIT, KernelAggregate, KernelEvent, KernelFileOrigin, LAYER_FILESYSTEM,
+    LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS, LAYER_UIC, MODE_BALANCED, MODE_BASIC, MODE_DEEP,
+    MODE_RAW_ALL, OFFSET_MISSING, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, ORIGIN_FILE,
+    ORIGIN_INCOMPLETE, ORIGIN_INODE_GENERATION_VALID, ORIGIN_WRITEBACK, PHASE_BEGIN, PHASE_END,
+    PHASE_INSTANT, PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE,
+    SchedulerWaitLayout, TraceLayout, scheduler_filter_supported,
 };
 use aya_ebpf::{
     helpers::{
@@ -35,6 +36,9 @@ static INSERT_LAYOUT: Array<TraceLayout> = Array::with_max_entries(1, 0);
 
 #[map]
 static RAW_SYSCALL_LAYOUT: Array<RawSyscallLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static SCHED_IOWAIT_LAYOUT: Array<SchedulerWaitLayout> = Array::with_max_entries(1, 0);
 
 #[map]
 static FILE_IDENTITY_LAYOUT: Array<FileIdentityLayout> = Array::with_max_entries(1, 0);
@@ -482,6 +486,47 @@ pub fn fs_context(ctx: TracePointContext) -> u32 {
 #[tracepoint]
 pub fn sched_context(ctx: TracePointContext) -> u32 {
     emit_context(ctx, LAYER_SCHEDULER).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn sched_stat_iowait(ctx: TracePointContext) -> u32 {
+    emit_scheduler_wait(ctx).unwrap_or(0)
+}
+
+fn emit_scheduler_wait(ctx: TracePointContext) -> Result<u32, i32> {
+    let Some(config) = active_filter() else {
+        return Ok(0);
+    };
+    if !scheduler_filter_supported(&config) {
+        return Ok(0);
+    }
+    let layout = SCHED_IOWAIT_LAYOUT.get(0).ok_or(1_i32)?;
+    let tid = unsafe { ctx.read_at::<i32>(layout.pid_offset as usize) }?;
+    if tid <= 0 {
+        return Err(1);
+    }
+    let tid = tid as u32;
+    if config.tid_count != 0 && !filter_contains(&FILTER_TIDS, config.generation, u64::from(tid)) {
+        return Ok(0);
+    }
+    let delay_ns = unsafe { ctx.read_at::<u64>(layout.delay_offset as usize) }?;
+    let comm = unsafe { ctx.read_at::<[u8; 16]>(layout.comm_offset as usize) }?;
+    let event = KernelEvent {
+        kind: KIND_SCHEDULER_IO_WAIT,
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        requested_bytes: delay_ns,
+        tid,
+        // pid stays zero/unknown: the current task can be the waker.
+        cpu: unsafe { bpf_get_smp_processor_id() },
+        comm,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
+        ..KernelEvent::default()
+    };
+    // All matching scheduler observations are emitted. Block detail sampling
+    // and aggregate I/O/latency counters do not describe this population.
+    submit_event(event, config.generation)?;
+    Ok(0)
 }
 
 fn emit_context(_ctx: TracePointContext, layer: u8) -> Result<u32, i32> {
