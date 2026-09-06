@@ -71,6 +71,11 @@ fn compare_filter(shared: &AnalysisFilter, local: &AnalysisFilter) -> AnalysisFi
         end_ms: shared.end_ms,
         operation: shared.operation,
         confidence: shared.confidence,
+        min_bytes:shared.min_bytes,
+        max_bytes:shared.max_bytes,
+        access:shared.access,
+        layer:shared.layer,
+        cpu:local.cpu,
         process: shared.process.clone(),
         file: local.file.clone(),
         device: local.device.clone(),
@@ -257,6 +262,7 @@ impl StudioApp {
 
     fn comparison_viewer(&self) -> StudioApp {
         let mut view = StudioApp {
+            activity:Arc::clone(&self.activity),
             analyzer: self.analyzer.select_completed(|_| true),
             session_path: self.session_path.clone(),
             capabilities: self.capabilities.clone(),

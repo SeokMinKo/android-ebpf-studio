@@ -137,6 +137,7 @@ impl SessionWriter {
 
 #[derive(Debug)]
 pub struct LoadedAnalysis {
+    pub activity: std::sync::Arc<crate::host_bw::ActivityTimeline>,
     pub source_start_ns: u64,
     pub source_end_ns: u64,
     pub source_completed_ios: u64,
@@ -190,6 +191,7 @@ pub fn load_analysis_window(
         .into());
     }
     let mut engine = AnalysisEngine::new();
+    let mut activity = crate::host_bw::ActivityTimeline::default();
     if let Some((start, end)) = window {
         engine.set_completion_window(start, end);
     }
@@ -197,9 +199,10 @@ pub fn load_analysis_window(
     let mut selected_count = 0usize;
     let loaded=SessionReader::default().read_events(BufReader::new(File::open(path)?),|event| {
         check_cancel()?;
-        if let Some((start,end))=event_interval(&event) {source_start_ns=source_start_ns.min(start);source_end_ns=source_end_ns.max(end);}
+        if let Some((start,end))=event_interval(&event) {source_start_ns=source_start_ns.min(start);source_end_ns=source_end_ns.max(end);activity.observe_range(start,end);}
         if (window.is_none() || matches!(&event,StorageEvent::BlockInsert(_)|StorageEvent::BlockIssue(_)|StorageEvent::BlockComplete(_)|StorageEvent::ObservedBlockCompletion(_))) && let Some(io)=engine.ingest(event) {
                 source_completed_ios+=1;
+                activity.observe(&io);
                 if window.is_some_and(|(start,end)|io.completion.ts_ns>=start&&io.completion.ts_ns<=end) {
                     selected_count+=1;
                     if selected_count>100_000 {return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"This interval contains more than 100,000 I/O. Narrow the time range; previous analysis preserved.").into());}
@@ -296,6 +299,7 @@ pub fn load_analysis_window(
         })
         .unwrap_or(loss_status);
     Ok(LoadedAnalysis {
+        activity: std::sync::Arc::new(activity),
         source_info: loaded.source_info,
         source_start_ns: if source_start_ns == u64::MAX {
             0
@@ -322,7 +326,7 @@ pub fn load_analysis_window(
     })
 }
 
-fn event_interval(event: &StorageEvent) -> Option<(u64, u64)> {
+pub(crate) fn event_interval(event: &StorageEvent) -> Option<(u64, u64)> {
     Some(match event {
         StorageEvent::ObservedBlockCompletion(io) => (io.start_timestamp(), io.completion.ts_ns),
         StorageEvent::BlockInsert(v) => (v.ts_ns, v.ts_ns),

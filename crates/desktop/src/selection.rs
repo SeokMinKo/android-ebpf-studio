@@ -217,6 +217,13 @@ impl DirectionSummary {
 
 #[derive(Debug, Default)]
 struct SelectionSummary {
+    host_bw:Option<crate::host_bw::HostBandwidth>,
+    source_rows: usize,
+    unplottable_rows: usize,
+    metric_axis: Option<AxisMetric>,
+    metric: crate::graph_summary::MetricDistribution,
+    address_distributions: BTreeMap<(u32,u32), crate::graph_summary::MetricDistribution>,
+    address_counts: Vec<crate::graph_summary::AddressCount>,
     files: BTreeMap<(String, String, String), SelectedTarget>,
     processes: BTreeMap<IssuerIdentity, SelectedTarget>,
     multiple_candidates: u64,
@@ -272,6 +279,9 @@ impl SelectionSummary {
 
 #[derive(Default)]
 struct SelectionState {
+    all_refresh: Option<Instant>,
+    all_summary: Option<(u64, AxisMetric, AxisMetric, SelectionSummary)>,
+    all_pending: Option<(u64, AxisMetric, AxisMetric, Receiver<SelectionSummary>)>,
     requested_at: Option<Instant>,
     wall_ms: Option<f64>,
     inspector_tab: InspectorTab,
@@ -296,7 +306,13 @@ fn compute_selection(
     origin: u64,
 ) -> SelectionSummary {
     let started = Instant::now();
-    let mut result = SelectionSummary::default();
+    let metric_axis = if y == AxisMetric::TimeMs { x } else { y };
+    let mut result = SelectionSummary {
+        source_rows: engine.completed_ios().len(),
+        metric_axis: Some(metric_axis),
+        ..Default::default()
+    };
+    let mut addresses = crate::graph_summary::AddressAccumulator::default();
     for io in engine.completed_ios() {
         if let SelectionRequest::Point(key) = request
             && selection_key(io) != key
@@ -308,9 +324,11 @@ fn compute_selection(
             x.value(io, origin, graph.as_ref()),
             y.value(io, origin, graph.as_ref()),
         ) else {
+            result.unplottable_rows += 1;
             continue;
         };
         if !px.is_finite() || !py.is_finite() {
+            result.unplottable_rows += 1;
             continue;
         }
         if let SelectionRequest::Rectangle { min, max } = request
@@ -319,11 +337,20 @@ fn compute_selection(
             continue;
         }
         result.observe(io, [px, py]);
+        result.metric.observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));
+        if matches!(metric_axis, AxisMetric::Sector | AxisMetric::AddressKiB) {
+            result.address_distributions.entry((io.issue.device_major, io.issue.device_minor)).or_default()
+                .observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));
+            addresses.observe(io);
+        }
         let graph = graph.unwrap_or_else(|| engine.transaction_for(io));
         result.observe_targets(io, &block_file_origins(&graph));
     }
     result.read.latency.sort_unstable();
     result.write.latency.sort_unstable();
+    result.metric.finish();
+    for dist in result.address_distributions.values_mut() { dist.finish(); }
+    result.address_counts = addresses.finish();
     result.elapsed = started.elapsed();
     result
 }
@@ -340,11 +367,14 @@ impl StudioApp {
         self.selection.discard_pending = false;
         self.selection.requested_at = Some(Instant::now());
         let engine = self.analysis().select_completed(|_| true);
+        let bw=self.bandwidth_context(Some(request));
         let (tx, rx) = bounded(1);
         self.selection.pending = Some(rx);
         let (x, y, origin) = (self.x_axis, self.y_axis, self.time_origin());
         std::thread::spawn(move || {
-            let _ = tx.send(compute_selection(&engine, request, x, y, origin));
+            let mut s=compute_selection(&engine, request, x, y, origin);
+            bw.attach(&mut s);
+            let _ = tx.send(s);
         });
     }
 
@@ -366,6 +396,8 @@ impl StudioApp {
 
     fn selection_panel(&mut self, ui: &mut egui::Ui) {
         self.poll_selection();
+        self.poll_graph_summary();
+        let live=self.is_running();
         let mut target_query = None;
         let mut panel = egui::Panel::right("selection-summary")
             .default_size(340.0)
@@ -375,7 +407,7 @@ impl StudioApp {
             panel = panel.exact_size(280.0);
         }
         panel.show(ui, |ui| {
-            ui.heading("Selection summary");
+            ui.heading("Graph summary");
             ui.horizontal_wrapped(|ui| {
                 let zoom_response = ui.add_enabled(self.selection.summary.as_ref().is_some_and(|s|!s.keys.is_empty()),egui::Button::new("Zoom selection"));
                 qa_region(&mut self.render_qa,"zoom",zoom_response.rect,ui.clip_rect());
@@ -409,14 +441,27 @@ impl StudioApp {
             if self.render_qa.output.is_some() && let Ok(offset)=std::env::var("ANDROID_EBPF_QA_PANEL_SCROLL") && let Ok(offset)=offset.parse::<f32>() {scroll=scroll.vertical_scroll_offset(offset);}
             let origin=self.time_origin();
             scroll.show(ui, |ui| {
-                let Some(s) = &self.selection.summary else { ui.label("Choose Select above the graph. Click one point or drag a rectangle. Area selection includes all plottable requests in the current filters, even when the plot is sampled."); return; };
+                let selected = self.selection.summary.is_some();
+                let Some(s) = self.selection.summary.as_ref().or_else(|| self.selection.all_summary.as_ref().map(|v| &v.3)) else { ui.spinner(); ui.label("Calculating current graph summary…"); return; };
+                ui.small(if selected { "Selected graph region · Clear restores full filtered graph" } else { "Full filtered graph · select an area to narrow the summary" });
+                ui.small(format!("{} filtered source I/O · {} cannot be plotted on these axes",s.source_rows,s.unplottable_rows));
+                if live && !selected {ui.small("Live snapshot · refreshed in background; incoming I/O may be newer");}
+                if selected && ui.button("Apply selection to analysis filters").clicked() {
+                    let mut query=self.query.clone();
+                    query.request_keys=Some(s.keys.clone());
+                    if let Some(b)=&s.host_bw {
+                        query.start_ms=b.start_ns.saturating_sub(origin) as f64/1e6;
+                        query.end_ms=b.end_ns.saturating_sub(origin) as f64/1e6;
+                    }
+                    target_query=Some(query);
+                }
                 if self.selection.inspector_tab != InspectorTab::Summary {
                     target_query=selected_targets_ui(ui,s,self.selection.inspector_tab,true);
                     return;
                 }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(s.keys.len().to_string()).size(24.0).strong().color(ink()));
-                    ui.label("selected I/O").on_hover_text("Data Count: completed block I/O requests in the selection");
+                    ui.label(if selected {"selected I/O"} else {"plottable I/O"}).on_hover_text("Full-resolution completed requests in this graph cohort; display sampling never changes this count");
                 });
                 ui.label(format!("End − Start: {}",format_latency(s.duration_ns())));
                 if let Some((start,end))=s.start_ns.zip(s.end_ns) {
@@ -427,11 +472,14 @@ impl StudioApp {
                     if ui.link(format!("{} process / thread entries",s.processes.len())).clicked() {self.selection.inspector_tab=InspectorTab::Processes;}
                 });
                 ui.add_space(6.0);ui.separator();
-                ui.label(RichText::new("Volume & throughput").strong().color(ink()));
+                graph_distribution_ui(ui, s);
+                ui.separator();
+                host_bw_ui(ui,s);
+                ui.separator();
+                ui.label(RichText::new("Transfer volume").strong().color(ink()));
                 summary_metric_row(ui,"", "Read".into(), "Write".into(),true);
                 summary_metric_row(ui,"I/O count",s.read.count.to_string(),s.write.count.to_string(),false);
                 summary_metric_row(ui,"Size",format_bytes(s.read.bytes),format_bytes(s.write.bytes),false);
-                summary_metric_row(ui,"MiB/s",s.throughput(s.read.bytes).map_or("—".into(),|v|format!("{v:.3}")),s.throughput(s.write.bytes).map_or("—".into(),|v|format!("{v:.3}")),false);
                 ui.add_space(6.0);ui.separator();
                 ui.label(RichText::new("Total latency").strong().color(ink()));
                 ui.small("Insert (or issue) to completion · valid timing samples only");
@@ -444,7 +492,7 @@ impl StudioApp {
                 ui.collapsing("Definitions & timestamps",|ui| {
                     ui.label(format!("Start: {} ns",s.start_ns.map_or("—".into(),|v|v.to_string())));
                     ui.label(format!("End: {} ns",s.end_ns.map_or("—".into(),|v|v.to_string())));
-                    ui.label("Span: earliest known insert/issue (completion when start is unknown) to latest completion. Throughput uses this observed span; it may omit unknown pre-completion time. — means unavailable. Percentiles use exact nearest rank over valid timing samples.");
+                    ui.label("I/O span: earliest known insert/issue (completion when start is unknown) to latest completion. Host BW uses the explicit analysis interval described above. — means unavailable. Percentiles use exact nearest rank over valid timing samples.");
                     ui.label(format!("Selection aggregation: {:.1} ms",s.elapsed.as_secs_f64()*1000.0));
                 });
                 ui.separator();
@@ -560,6 +608,57 @@ mod selection_tests {
             }));
         }
         engine
+    }
+
+    #[test]
+    fn graph_summary_follows_chunk_latency_qd_and_lba_instead_of_fixed_latency() {
+        let engine=fixture(10);
+        let all=SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]};
+        for (axis,p50) in [(AxisMetric::ChunkKiB,4.),(AxisMetric::TotalLatencyMs,0.5),(AxisMetric::QueueDepth,0.),(AxisMetric::Sector,40.)] {
+            let summary=compute_selection(&engine,all,AxisMetric::TimeMs,axis,0);
+            assert_eq!(summary.metric_axis,Some(axis));
+            assert_eq!(summary.metric.total.values.len(),10);
+            assert_eq!(summary.metric.total.percentile(50),Some(p50),"{axis:?}");
+            assert_eq!(summary.metric.total.histogram(16).iter().map(|b|b.count).sum::<usize>(),10);
+            assert_eq!(summary.metric.read.values.len(),5);
+            assert_eq!(summary.metric.write.values.len(),5);
+        }
+    }
+
+    #[test]
+    fn graph_summary_selection_filter_and_csv_share_the_same_values() {
+        let engine=fixture(10);
+        let filtered=engine.select_completed(|io|io.issue.operation==IoOperation::Write);
+        let s=compute_selection(&filtered,SelectionRequest::Rectangle{min:[3.,0.],max:[7.,f64::INFINITY]},AxisMetric::TimeMs,AxisMetric::Sector,0);
+        assert_eq!(s.keys.len(),2);
+        assert_eq!(s.metric.total.values,[32.,48.]);
+        assert_eq!(s.metric.read.values.len(),0);
+        assert_eq!(s.address_counts.len(),2);
+        let path=std::env::temp_dir().join(format!("graph-summary-{}.csv",uuid::Uuid::new_v4()));
+        write_graph_summary_csv(&path,&s).unwrap();
+        let mut reader=csv::Reader::from_path(&path).unwrap();
+        let records=reader.records().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(records.iter().any(|r| &r[0]=="percentile" && &r[2]=="8:0/Write" && &r[3]=="50" && &r[5]=="32"));
+        assert_eq!(records.iter().filter(|r| &r[0]=="histogram" && &r[2]=="8:0/Total").map(|r|r[5].parse::<usize>().unwrap()).sum::<usize>(),2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn graph_summary_invalidates_on_filter_reset_and_axis_change() {
+        let mut app=StudioApp {analyzer:fixture(4),..Default::default()};
+        let all=SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]};
+        let s=compute_selection(&app.analyzer,all,app.x_axis,app.y_axis,0);
+        app.selection.all_summary=Some((app.analysis_generation,app.x_axis,app.y_axis,s));
+        app.query.process="no-such-process".into();
+        app.invalidate_query();app.rebuild_filtered();
+        assert!(app.selection.all_summary.is_none());
+        assert!(app.analysis().completed_ios().is_empty());
+        app.query=AnalysisFilter::default();app.invalidate_query();app.rebuild_filtered();
+        assert_eq!(app.analysis().completed_ios().len(),4);
+        app.y_axis=AxisMetric::ChunkKiB;
+        app.poll_graph_summary();
+        assert!(app.selection.all_summary.is_none());
+        assert!(app.selection.all_pending.is_some());
     }
 
     #[test]

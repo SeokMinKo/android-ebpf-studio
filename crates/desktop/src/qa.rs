@@ -3,6 +3,8 @@
 // Other scenarios never start device capture; fixtures retain their source.
 #[derive(Default)]
 struct RenderQa {
+    filter_step:u32,
+    filter_states:Vec<serde_json::Value>,
     compare_ready_ms: Option<f64>,
     started: Option<Instant>,
     regions: BTreeMap<String, (egui::Rect, egui::Rect)>,
@@ -56,6 +58,29 @@ impl StudioApp {
         let Ok(gesture) = std::env::var("ANDROID_EBPF_QA_GESTURE") else {
             return;
         };
+        if gesture=="process-filter" {
+            if self.render_qa.frames<20 || self.render_qa.frames<self.render_qa.range_wait_frame+6 {return;}
+            let step=self.render_qa.filter_step;
+            let target=match step {0|1=>Some("analysis-filters"),2|3=>Some("process-filter"),8|9=>Some("clear-filters"),_=>None};
+            if let Some(target)=target {
+                if let Some((rect,_))=self.render_qa.regions.get(target) {
+                    let pos=rect.center();raw.events.push(egui::Event::PointerMoved(pos));
+                    raw.events.push(egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:step.is_multiple_of(2),modifiers:Default::default()});
+                }else{return;}
+            }else if step==4 || step==6 {
+                raw.events.push(egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}});
+                raw.events.push(egui::Event::Text(if step==4 {std::env::var("ANDROID_EBPF_QA_PROCESS").unwrap_or("F2FS".into())}else{"__no_such_process__".into()}));
+            }else if [5,7,10].contains(&step) {
+                let Some((g,x,y,s))=&self.selection.all_summary else{return;};
+                if *g!=self.analysis_generation || *x!=self.x_axis || *y!=self.y_axis || self.selection.all_pending.is_some() || self.footprint.pending.is_some(){return;}
+                let path=self.render_qa.output.as_ref().unwrap().with_extension(format!("filter-{step}.csv"));
+                let result=write_graph_summary_csv(&path,s).map_err(|e|e.to_string());
+                self.render_qa.filter_states.push(serde_json::json!({"step":step,"query":self.query,"filtered":self.analysis().completed_ios().len(),"summary":s.keys.len(),"lane_unique":self.footprint.view.as_ref().map(|v|v.unique),"host_bw":s.host_bw,"csv":path,"export":result}));
+                if step==10 {self.render_qa.input_step=7;self.render_qa.filter_step=11;return;}
+            }else {return;}
+            self.render_qa.filter_step+=1;self.render_qa.range_wait_frame=self.render_qa.frames;
+            return;
+        }
         if gesture == "device-start-stop" {
             let Ok(serial) = std::env::var("ANDROID_EBPF_QA_DEVICE_SERIAL") else {
                 return;
@@ -516,6 +541,15 @@ impl StudioApp {
     }
 
     fn apply_qa_preset(&mut self) {
+        if let Ok(mode) = std::env::var("ANDROID_EBPF_QA_FOOTPRINT") {
+            self.footprint.mode = match mode.as_str() {
+                "file" => FootprintMode::FilePath,
+                "process" => FootprintMode::Process,
+                "origin" => FootprintMode::FileProcess,
+                _ => FootprintMode::Combined,
+            };
+            self.footprint.fit = true;
+        }
         if let Ok(filter) = std::env::var("ANDROID_EBPF_QA_FILTER") {
             match filter.as_str() {
                 "read" => self.query.operation = Some(IoOperation::Read),
@@ -551,6 +585,12 @@ impl StudioApp {
             self.x_axis = x;
             self.y_axis = y;
             self.group_by = group;
+        }
+        if let Ok(axis) = std::env::var("ANDROID_EBPF_QA_Y_AXIS")
+            && let Ok(index) = axis.parse::<usize>()
+            && let Some(axis) = AxisMetric::ALL.get(index) {
+            self.x_axis = AxisMetric::TimeMs;
+            self.y_axis = *axis;
         }
     }
     fn render_qa_tick(&mut self, ctx: &egui::Context) {
@@ -639,6 +679,17 @@ impl StudioApp {
             );
             let mut report = serde_json::json!({ "capture": path, "result": result.as_ref().map(|_| "saved").map_err(|e| e.to_string()), "phase": self.phase.label(), "page": format!("{:?}", self.page), "theme": format!("{:?}",self.theme), "completed_requests": self.analysis().completed_ios().len(), "received_events": self.received_events, "rejected": self.rejected_records, "frames": self.render_qa.frames, "reanalysis_before_first":self.render_qa.reanalysis_before_first,"reanalysis_window_first":self.render_qa.reanalysis_window_first,"source_completed_ios":self.reanalysis.source_count,"reanalysis_window_ns":self.reanalysis.window,"reanalysis_ms":self.reanalysis.elapsed_ms,"reanalysis_error":self.reanalysis.error,"reanalysis_actions":self.reanalysis.completed_actions,"file_evidence_count":self.file_evidence_positions.as_ref().map(|v|v.len()),"file_evidence_total":self.analysis().file_ios().len(),"filtered_read_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Read).count(),"filtered_write_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Write).count(),"explorer_available":self.explorer_view.as_ref().map(|v|v.available),"range_draft":self.selection.axis_range.values,"range_actions":self.render_qa.range_actions,"range_error":self.selection.axis_range.error,"range_initial":self.render_qa.range_initial.map(|b|[b.min(),b.max()]),"range_expected":self.render_qa.range_expected.map(|b|[b.min(),b.max()]),"range_applied":self.render_qa.range_applied.map(|b|[b.min(),b.max()]),"plot_bounds":self.selection.current_bounds.map(|b|[b.min(),b.max()]),"point_diameter":self.plot_style.point_diameter,"color_category":format!("{:?}",self.group_by),"rendered_colors":self.explorer_view.as_ref().map(|view|view.groups.iter().map(|(name,_)|(name,self.plot_style.color(self.group_by,name).to_array())).collect::<BTreeMap<_,_>>()), "stop_analysis_ms":self.render_qa.stop_analysis_ms,"session_path":self.session_path,"selected_files":self.selection.summary.as_ref().map(|s|s.files.len()),"selected_processes":self.selection.summary.as_ref().map(|s|s.processes.len()),"selection_count": self.selection.summary.as_ref().map(|s|s.keys.len()), "selection_ms": self.selection.summary.as_ref().map(|s|s.elapsed.as_secs_f64()*1000.0), "zoom_history_depth": self.selection.zoom_history.len(), "zoom_actions": self.render_qa.zoom_actions, "back_actions": self.render_qa.back_actions, "ui_performance": self.performance.snapshot() });
             report["comparison_explore"] = self.compare_qa_report();
+            report["filter_states"]=serde_json::json!(self.render_qa.filter_states);
+            report["footprint"] = self.footprint.view.as_ref().map_or(serde_json::Value::Null, |v| serde_json::json!({"mode":v.mode.label(),"unique":v.unique,"memberships":v.memberships,"groups":v.lanes.iter().map(|(k,p)|(k,p.len())).collect::<BTreeMap<_,_>>() }));
+            report["graph_summary"] = self.selection.summary.as_ref()
+                .or_else(||self.selection.all_summary.as_ref().map(|v|&v.3))
+                .map_or(serde_json::Value::Null, |s| serde_json::json!({
+                    "metric":s.metric_axis.map(AxisMetric::label),
+                    "samples":s.metric.total.values.len(),"missing":s.metric.total.missing,
+                    "p50":s.metric.total.percentile(50),"p95":s.metric.total.percentile(95),
+                    "histogram":s.metric.total.histogram(16),"address_counts":s.address_counts,
+                    "cohort_count":s.keys.len(),"selected":self.selection.summary.is_some(),"host_bw":s.host_bw
+                }));
             report["recovery_original"] = serde_json::json!(self.render_qa.recovery_original);
             report["device_phases"] = serde_json::json!(self.render_qa.device_phases);
             report["preflight"] = serde_json::json!(self.preflight);
@@ -667,6 +718,8 @@ impl StudioApp {
             && (timed_out
                 || (self.render_qa.frames >= 40
                     && self.selection.pending.is_none()
+                    && self.selection.all_pending.is_none()
+                    && self.footprint.pending.is_none()
                     && self.compare_explore.pending.is_none()
                     && self
                         .comparison

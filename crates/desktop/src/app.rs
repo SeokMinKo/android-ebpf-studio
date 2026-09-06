@@ -40,6 +40,9 @@ const PERFORMANCE_WARNING_INTERVAL: Duration = Duration::from_secs(10);
 include!("analysis_ui.rs");
 include!("qa.rs");
 include!("selection.rs");
+include!("graph_summary_ui.rs");
+include!("footprint_ui.rs");
+include!("host_bw_ui.rs");
 include!("plot_style.rs");
 include!("axis_range.rs");
 include!("reanalysis.rs");
@@ -98,16 +101,20 @@ enum ExplorerPreset {
     LayerContribution,
     LbaDistribution,
     Custom,
+    ChunkTimeline,
+    QueueTimeline,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
         Self::LayerContribution,
         Self::LbaDistribution,
         Self::Custom,
+        Self::ChunkTimeline,
+        Self::QueueTimeline,
     ];
 
     fn label(self) -> &'static str {
@@ -118,6 +125,8 @@ impl ExplorerPreset {
             Self::LayerContribution => "Filesystem vs UFS",
             Self::LbaDistribution => "LBA distribution",
             Self::Custom => "Custom",
+            Self::ChunkTimeline => "Chunk size over time",
+            Self::QueueTimeline => "Queue depth over time",
         }
     }
 
@@ -147,6 +156,14 @@ impl ExplorerPreset {
                 Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
             }
             Self::Custom => None,
+            Self::ChunkTimeline => {
+                Some((AxisMetric::TimeMs, AxisMetric::ChunkKiB, GroupBy::Direction))
+            }
+            Self::QueueTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::QueueDepth,
+                GroupBy::Direction,
+            )),
         }
     }
 }
@@ -419,6 +436,8 @@ impl CapturePhase {
 }
 
 pub struct StudioApp {
+    activity: Arc<crate::host_bw::ActivityTimeline>,
+    footprint: FootprintState,
     reanalysis: ReanalysisState,
     file_evidence_positions: Option<Vec<usize>>,
     selection: SelectionState,
@@ -498,6 +517,8 @@ impl Default for StudioApp {
     fn default() -> Self {
         let (tx, rx) = bounded(20_000);
         Self {
+            activity: Arc::default(),
+            footprint: FootprintState::default(),
             reanalysis: ReanalysisState::default(),
             file_evidence_positions: None,
             selection: SelectionState {
@@ -852,6 +873,10 @@ impl StudioApp {
     }
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
+        self.activity = loaded.activity;
+        self.footprint.view = None;
+        self.footprint.pending = None;
+        self.footprint.fit = true;
         self.reanalysis.source_start_ns = Some(loaded.source_start_ns);
         self.reanalysis.source_end_ns = loaded.source_end_ns;
         self.reanalysis.source_count = loaded.source_completed_ios;
@@ -1167,7 +1192,11 @@ impl StudioApp {
                 }
                 self.last_sequence = Some(sequence);
                 self.received_events += 1;
+                if let Some((a, b)) = session::event_interval(&event) {
+                    Arc::make_mut(&mut self.activity).observe_range(a, b);
+                }
                 if let Some(completed) = self.analyzer.ingest(event) {
+                    Arc::make_mut(&mut self.activity).observe(&completed);
                     if self.recent.len() == MAX_RECENT {
                         self.recent.pop_front();
                     }
@@ -1259,6 +1288,8 @@ impl StudioApp {
     }
 
     fn reset_analysis(&mut self) {
+        self.activity = Arc::default();
+        self.footprint = FootprintState::default();
         self.reanalysis = ReanalysisState::default();
         self.file_evidence_positions = None;
         self.selection = SelectionState {
@@ -1682,7 +1713,16 @@ impl StudioApp {
                 ..Default::default()
             };
         }
-        self.explorer_plot_ui(ui, false);
+        self.footprint_controls(ui);
+        if self.footprint.mode != FootprintMode::Combined
+            && self.x_axis == AxisMetric::TimeMs
+            && matches!(self.y_axis, AxisMetric::Sector | AxisMetric::AddressKiB)
+        {
+            self.footprint_lanes_ui(ui);
+            self.table_ui(ui);
+        } else {
+            self.explorer_plot_ui(ui, false);
+        }
     }
 
     fn explorer_plot_ui(&mut self, ui: &mut egui::Ui, compact: bool) -> Option<SelectionRequest> {
@@ -3596,6 +3636,7 @@ impl eframe::App for StudioApp {
             });
 
         if self.page == Page::Explore {
+            self.rebuild_filtered();
             self.selection_panel(ui);
         }
         egui::CentralPanel::default()

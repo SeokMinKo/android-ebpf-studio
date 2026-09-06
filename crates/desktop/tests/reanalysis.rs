@@ -168,6 +168,11 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
     let fixture = Fixture::new(100_020);
     let full = load_analysis(&fixture.0).unwrap();
     assert_eq!(full.source_completed_ios, 100_020);
+    assert_eq!(full.activity.observed_requests, 100_020);
+    assert_eq!(
+        full.activity.devices[&(259, 0)].duration(0, u64::MAX),
+        100_020 * 100
+    );
     assert!(
         !full
             .engine
@@ -180,6 +185,18 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
         load_analysis_window(&fixture.0, Some((1_010_000_100, 1_020_000_100)), None).unwrap();
     assert_eq!(view.source_start_ns, 1_000_000_000);
     assert_eq!(view.engine.completed_ios().len(), 2);
+    assert_eq!(
+        view.activity.observed_requests, 100_020,
+        "window eviction cannot erase other device activity"
+    );
+    assert_eq!(
+        view.activity.devices[&(259, 0)].duration(1_005_000_000, 1_025_000_000),
+        200
+    );
+    assert!(
+        !view.activity.exact(),
+        "zero recorded loss does not prove exhaustive acquisition"
+    );
     let io = &view.engine.completed_ios()[0];
     assert_eq!(io.issue.request_id, 1);
     assert_eq!(io.access_pattern, AccessPattern::Sequential);

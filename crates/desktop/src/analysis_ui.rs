@@ -12,6 +12,11 @@ struct AnalysisFilter {
     device: String,
     operation: Option<IoOperation>,
     confidence: Option<PathConfidence>,
+    min_bytes:u32,
+    max_bytes:u32,
+    access:Option<AccessPattern>,
+    cpu:Option<u32>,
+    layer:Option<IoNodeKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -66,6 +71,10 @@ impl AnalysisFilter {
             || (self.pid != 0 && Some(self.pid) != io.issuer_pid())
             || (self.tid != 0 && Some(self.tid) != io.issuer_tid())
             || self.operation.is_some_and(|v| v != io.issue.operation)
+            || io.issue.bytes<self.min_bytes
+            || (self.max_bytes>0 && io.issue.bytes>self.max_bytes)
+            || self.access.is_some_and(|v|v!=io.access_pattern)
+            || self.cpu.is_some_and(|v|Some(v)!=io.issuer_cpu())
             || !io
                 .issue
                 .comm
@@ -76,10 +85,12 @@ impl AnalysisFilter {
         {
             return false;
         }
-        if self.file.is_empty() && self.confidence.is_none() {
+        if self.file.is_empty() && self.confidence.is_none() && self.layer.is_none() {
             return true;
         }
-        let origins = block_file_origins(&engine.transaction_for(io));
+        let graph=engine.transaction_for(io);
+        if self.layer.is_some_and(|kind|!graph.nodes.iter().any(|n|n.kind==kind)) {return false;}
+        let origins = block_file_origins(&graph);
         self.confidence
             .is_none_or(|v| path_confidence(&origins) == v)
             && (self.file.is_empty()
@@ -193,6 +204,9 @@ impl StudioApp {
     }
 
     fn invalidate_query(&mut self) {
+        self.footprint.view = None;
+        self.footprint.pending = None;
+        self.footprint.fit = true;
         self.trend_view = None;
         self.selection = SelectionState {
             enabled: true,
@@ -232,7 +246,7 @@ impl StudioApp {
             return;
         }
         let previous = self.query.clone();
-        ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
+        let header=ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Completion time (ms)");
                 ui.add(egui::DragValue::new(&mut self.query.start_ms).prefix("From ").range(0.0..=f64::MAX));
@@ -243,7 +257,7 @@ impl StudioApp {
                 ui.label("0 = all");
                 egui::ComboBox::from_id_salt("analysis-op").selected_text(self.query.operation.map_or("All operations", operation_label)).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.query.operation, None, "All operations");
-                    for op in [IoOperation::Read, IoOperation::Write] { ui.selectable_value(&mut self.query.operation, Some(op), operation_label(op)); }
+                    for op in [IoOperation::Read, IoOperation::Write,IoOperation::Flush,IoOperation::Discard,IoOperation::Other] { ui.selectable_value(&mut self.query.operation, Some(op), operation_label(op)); }
                 });
                 egui::ComboBox::from_id_salt("analysis-confidence").selected_text(self.query.confidence.map_or("All FilePath confidence".into(), |v| format!("{v:?}"))).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.query.confidence, None, "All FilePath confidence");
@@ -251,13 +265,34 @@ impl StudioApp {
                 });
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label("Process"); ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
+                ui.label("Process (issuer comm)"); let process=ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
+                qa_region(&mut self.render_qa,"process-filter",process.rect,ui.clip_rect());
                 ui.label("FilePath / inode"); ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
                 ui.label("Device major:minor"); ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
-                if ui.button("Clear filters").clicked() { self.query = AnalysisFilter::default(); }
+                let clear=ui.button("Clear filters");qa_region(&mut self.render_qa,"clear-filters",clear.rect,ui.clip_rect());
+                if clear.clicked() { self.query = AnalysisFilter::default(); }
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Size (bytes)");
+                ui.add(egui::DragValue::new(&mut self.query.min_bytes).prefix("Min "));
+                ui.add(egui::DragValue::new(&mut self.query.max_bytes).prefix("Max "));
+                ui.label("Max 0 = unlimited");
+                egui::ComboBox::from_id_salt("access-filter").selected_text(self.query.access.map_or("All access patterns".into(),|a|format!("{a:?}"))).show_ui(ui,|ui| {
+                    ui.selectable_value(&mut self.query.access,None,"All access patterns");
+                    for a in [AccessPattern::Random,AccessPattern::Sequential,AccessPattern::Unknown] {ui.selectable_value(&mut self.query.access,Some(a),format!("{a:?}"));}
+                });
+                let mut cpu=self.query.cpu.is_some();
+                if ui.checkbox(&mut cpu,"Issue CPU").changed(){self.query.cpu=cpu.then_some(0);}
+                if let Some(cpu)=&mut self.query.cpu {ui.add(egui::DragValue::new(cpu));}
+                egui::ComboBox::from_id_salt("layer-filter").selected_text(self.query.layer.map_or("All observed layers".into(),|a|format!("{a:?}"))).show_ui(ui,|ui| {
+                    ui.selectable_value(&mut self.query.layer,None,"All observed layers");
+                    for layer in [IoNodeKind::FileOperation,IoNodeKind::Syscall,IoNodeKind::Vfs,IoNodeKind::Filesystem,IoNodeKind::PageCache,IoNodeKind::Writeback,IoNodeKind::Bio,IoNodeKind::BlockQueue,IoNodeKind::BlockRequest,IoNodeKind::ScsiCommand,IoNodeKind::UfsCommand,IoNodeKind::SchedulerContext,IoNodeKind::UicContext] {ui.selectable_value(&mut self.query.layer,Some(layer),format!("{layer:?}"));}
+                });
+            });
+            ui.small("Process searches the observed block issuer's comm, case-insensitive substring; it is not an Android package or proven original file process. Issue CPU 0 is a valid CPU. Layer requires related graph evidence; absent observations never match. Capture PID filtering is separate.");
             ui.label("Selection uses the loaded completed-request window; file-operation evidence follows that cohort. Capture diagnostics and Compare baseline remain session-wide. File candidates are preserved together. Sequential/random classification remains from the original device/direction stream.");
         });
+        qa_region(&mut self.render_qa,"analysis-filters",header.header_response.rect,ui.clip_rect());
         if previous != self.query {
             self.invalidate_query();
         }
@@ -485,6 +520,18 @@ mod query_regressions {
                 .iter()
                 .all(|io| !wrong.matches(&engine, io, 1_100_000))
         );
+    }
+
+    #[test]
+    fn size_access_cpu_and_layer_filters_preserve_measurement_meaning() {
+        let engine=engine();
+        let io=&engine.completed_ios()[1];
+        let mut q=AnalysisFilter{min_bytes:4096,max_bytes:4096,cpu:io.issuer_cpu(),access:Some(io.access_pattern),layer:Some(IoNodeKind::BlockRequest),..Default::default()};
+        assert!(q.matches(&engine,io,0));
+        q.max_bytes=4095;assert!(!q.matches(&engine,io,0));q.max_bytes=4096;
+        q.layer=Some(IoNodeKind::UfsCommand);assert!(!q.matches(&engine,io,0));q.layer=None;
+        q.cpu=Some(u32::MAX);assert!(!q.matches(&engine,io,0));q.cpu=io.issuer_cpu();
+        q.access=Some(AccessPattern::Unknown);assert_ne!(io.access_pattern,AccessPattern::Unknown);assert!(!q.matches(&engine,io,0));
     }
 
     #[test]

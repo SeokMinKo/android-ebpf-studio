@@ -4,6 +4,8 @@ pub mod app;
 pub mod artifacts;
 pub mod capture;
 pub mod diagnostics;
+pub mod graph_summary;
+pub mod host_bw;
 pub mod perfetto;
 pub mod perfetto_capture;
 pub mod perfetto_projection;
