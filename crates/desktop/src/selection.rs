@@ -622,6 +622,7 @@ mod selection_tests {
         let engine = fixture(2);
         let io = &engine.completed_ios()[0];
         let file = FileOriginView {
+            incomplete: false,
             file: android_ebpf_protocol::FileIdentity {
                 fs_device_major: 254,
                 fs_device_minor: 1,

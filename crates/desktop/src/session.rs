@@ -7,9 +7,9 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AggregateSnapshot, AnalysisEngine, AnalysisSummary, HeavyHitterSnapshot, ProbeCapabilities,
-    SegmentRecord, SessionError, SessionReader, StackFingerprintRecord, StorageEvent,
-    TriggerRecord, WireRecord, write_record,
+    AggregateSnapshot, AnalysisEngine, AnalysisSummary, FilePathCoverage, FilePathCoverageEngine,
+    HeavyHitterSnapshot, ProbeCapabilities, SegmentRecord, SessionError, SessionReader,
+    StackFingerprintRecord, StorageEvent, TriggerRecord, WireRecord, write_record,
 };
 
 pub struct SessionWriter {
@@ -29,7 +29,7 @@ enum PersistCommand {
 
 pub struct AsyncSessionWriter {
     tx: mpsc::SyncSender<PersistCommand>,
-    worker: Option<thread::JoinHandle<Result<(), SessionError>>>,
+    worker: Option<thread::JoinHandle<Result<FilePathCoverage, SessionError>>>,
 }
 
 impl AsyncSessionWriter {
@@ -41,10 +41,14 @@ impl AsyncSessionWriter {
         let (tx, rx) = mpsc::sync_channel::<PersistCommand>(16_384);
         let worker = thread::spawn(move || {
             let mut writer = writer;
+            let mut coverage = FilePathCoverageEngine::default();
             while let Ok(command) = rx.recv() {
                 match command {
                     PersistCommand::Record(record) => {
                         writer.append(&record)?;
+                        if let WireRecord::Event { event, .. } = &*record {
+                            coverage.ingest(event);
+                        }
                     }
                     PersistCommand::Finish {
                         events_seen,
@@ -61,11 +65,14 @@ impl AsyncSessionWriter {
                             events_rejected: rejected,
                             graceful: Some(graceful),
                         };
-                        return writer.finish(&footer);
+                        writer.finish(&footer)?;
+                        return Ok(coverage.finish());
                     }
                 }
             }
-            Ok(())
+            Err(SessionError::Io(std::io::Error::other(
+                "session writer ended without finalization",
+            )))
         });
         Ok(Self {
             tx,
@@ -89,7 +96,7 @@ impl AsyncSessionWriter {
         events_seen: u64,
         events_rejected: u64,
         graceful: bool,
-    ) -> Result<(), SessionError> {
+    ) -> Result<FilePathCoverage, SessionError> {
         self.tx
             .send(PersistCommand::Finish {
                 events_seen,
@@ -137,6 +144,7 @@ impl SessionWriter {
 
 #[derive(Debug)]
 pub struct LoadedAnalysis {
+    pub file_path_coverage: FilePathCoverage,
     pub source_start_ns: Option<u64>,
     pub source_end_ns: Option<u64>,
     pub source_completed_ios: u64,
@@ -189,6 +197,7 @@ pub fn load_analysis_window(
         )
         .into());
     }
+    let mut coverage = FilePathCoverageEngine::default();
     let mut engine = AnalysisEngine::new();
     if let Some((start, end)) = window {
         engine.set_completion_window(start, end);
@@ -197,6 +206,7 @@ pub fn load_analysis_window(
     let mut selected_count = 0usize;
     let loaded=SessionReader::default().read_events(BufReader::new(File::open(path)?),|event| {
         check_cancel()?;
+        coverage.ingest(&event);
         if let Some((start,end))=event_interval(&event) {source_start_ns=source_start_ns.min(start);source_end_ns=source_end_ns.max(end);}
         if (window.is_none() || matches!(&event,StorageEvent::BlockInsert(_)|StorageEvent::BlockIssue(_)|StorageEvent::BlockComplete(_)|StorageEvent::ObservedBlockCompletion(_))) && let Some(io)=engine.ingest(event) {
                 source_completed_ios+=1;
@@ -260,6 +270,7 @@ pub fn load_analysis_window(
     if window.is_some() {
         engine = engine.select_completed(|_| true);
     }
+    let file_path_coverage = coverage.finish_with(check_cancel)?;
     let after = std::fs::metadata(path)?;
     if before.len() != after.len() || before.modified()? != after.modified()? {
         return Err(std::io::Error::other(
@@ -304,6 +315,7 @@ pub fn load_analysis_window(
         })
         .unwrap_or(loss_status);
     Ok(LoadedAnalysis {
+        file_path_coverage,
         source_info: loaded.source_info,
         source_start_ns: (source_start_ns != u64::MAX).then_some(source_start_ns),
         source_end_ns: (source_start_ns != u64::MAX).then_some(source_end_ns),
@@ -368,7 +380,7 @@ pub fn export_analysis_view(
         ));
         serde_json::to_writer(
             &mut writer,
-            &serde_json::json!({"record":"completed_io_analysis","io":io,"file_candidates":origins.iter().map(|v|serde_json::json!({"file":v.file,"path":v.path,"edge_confidence":v.confidence})).collect::<Vec<_>>(),"graph":graph}),
+            &serde_json::json!({"record":"completed_io_analysis","io":io,"file_candidates":origins.iter().map(|v|serde_json::json!({"file":v.file,"path":v.path,"edge_confidence":v.confidence,"incomplete_origin_set":v.incomplete})).collect::<Vec<_>>(),"graph":graph}),
         )?;
         writer.write_all(b"\n")?;
     }
@@ -380,6 +392,7 @@ pub fn export_analysis_view(
 pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<PathBuf> {
     ensure_distinct_export(session_path, events_path)?;
     let mut engine = AnalysisEngine::new();
+    let mut coverage = FilePathCoverageEngine::default();
     let mut writer = csv::Writer::from_path(events_path)?;
     writer.write_record([
         "kind",
@@ -415,6 +428,7 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
                     .map_err(|e| SessionError::Io(std::io::Error::other(e)))?;
             }
             WireRecord::Event { event, .. } => {
+                coverage.ingest(&event);
                 write_event_csv(&mut writer, &event)
                     .map_err(|e| SessionError::Io(std::io::Error::other(e)))?;
                 engine.ingest(event);
@@ -432,7 +446,7 @@ pub fn export_csv(session_path: &Path, events_path: &Path) -> anyhow::Result<Pat
             .and_then(|value| value.to_str())
             .unwrap_or("session")
     ));
-    write_summary(&summary_path, &engine.summary())?;
+    write_summary(&summary_path, &engine.summary(), &coverage.finish())?;
     Ok(summary_path)
 }
 
@@ -448,9 +462,47 @@ pub(crate) fn ensure_distinct_export(source: &Path, destination: &Path) -> anyho
     Ok(())
 }
 
-fn write_summary(path: &Path, summary: &AnalysisSummary) -> anyhow::Result<()> {
+fn write_summary(
+    path: &Path,
+    summary: &AnalysisSummary,
+    coverage: &FilePathCoverage,
+) -> anyhow::Result<()> {
     let mut writer = csv::Writer::from_path(path)?;
     writer.write_record(["metric", "value"])?;
+    writer.write_record(["filepath_scope", "whole source; observed block completion records; includes unmatched completions; excludes pending/lost/suppressed"])?;
+    writer.write_record([
+        "filepath_count_denominator",
+        &coverage.completion_records().to_string(),
+    ])?;
+    writer.write_record(["filepath_known_bytes", &coverage.known_bytes().to_string()])?;
+    writer.write_record([
+        "filepath_unmatched_completions_bytes_unavailable",
+        &coverage.unmatched_completions.to_string(),
+    ])?;
+    writer.write_record([
+        "filepath_issue_events_without_completion",
+        &coverage.issue_events_without_completion.to_string(),
+    ])?;
+    for (name, value) in [
+        ("exact", coverage.exact),
+        ("probable", coverage.probable),
+        ("unresolved", coverage.unresolved),
+        ("multi_origin_overlap", coverage.multi_origin),
+    ] {
+        writer.write_record([format!("filepath_{name}_count"), value.count.to_string()])?;
+        writer.write_record([
+            format!("filepath_{name}_known_bytes"),
+            value.known_bytes.to_string(),
+        ])?;
+    }
+    writer.write_record([
+        "filepath_full_report_json",
+        &serde_json::to_string(coverage)?,
+    ])?;
+    writer.write_record([
+        "block_attribution_scope",
+        "retained completed requests; identity edge confidence, not FilePath confidence",
+    ])?;
     for (metric, value) in [
         ("issued_ios", summary.issued_ios.to_string()),
         ("completed_ios", summary.completed_ios.to_string()),

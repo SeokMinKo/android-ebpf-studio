@@ -37,6 +37,26 @@ fn fixture() -> DecodedTrace {
 }
 
 #[test]
+fn whole_session_coverage_counts_perfetto_volume_without_joining_root_identifiers() {
+    let trace = fixture();
+    let projected = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    let mut coverage = FilePathCoverageEngine::default();
+    let mut expected = 0;
+    for _ in 0..50_001 {
+        for io in &projected {
+            expected += 1;
+            coverage.ingest(&StorageEvent::ObservedBlockCompletion(io.clone()));
+        }
+    }
+    let result = coverage.finish();
+    assert_eq!(result.completion_records(), expected);
+    assert_eq!(result.unresolved.count, expected);
+    assert_eq!(result.observation_without_file_identity, expected);
+    assert_eq!(result.exact.count + result.probable.count, 0);
+    assert_eq!(result.known_bytes(), expected * 4096);
+}
+
+#[test]
 fn unsupported_clock_keeps_volume_without_a_session_origin_or_time_buckets() {
     let mut trace = fixture();
     for event in &mut trace.events {

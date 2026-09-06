@@ -447,6 +447,7 @@ pub struct StudioApp {
     status: String,
     diagnostics: VecDeque<DiagnosticRecord>,
     analyzer: AnalysisEngine,
+    file_path_coverage: Option<android_ebpf_protocol::FilePathCoverage>,
     query: AnalysisFilter,
     disk_stats: Vec<WireRecord>,
     disk_stats_view: DiskStatsView,
@@ -531,6 +532,7 @@ impl Default for StudioApp {
             status: "Ready".into(),
             diagnostics: VecDeque::new(),
             analyzer: AnalysisEngine::new(),
+            file_path_coverage: None,
             disk_stats: Vec::new(),
             disk_stats_view: DiskStatsView::default(),
             query: AnalysisFilter::default(),
@@ -818,11 +820,12 @@ impl StudioApp {
             std::thread::spawn(move || {
                 let result = writer
                     .finish(seen, rejected, graceful)
+                    .map(Some)
                     .map_err(|e| e.to_string());
                 let _ = tx.send(HostMessage::Finalized(result));
             });
         } else {
-            let _ = self.tx.try_send(HostMessage::Finalized(Ok(())));
+            let _ = self.tx.try_send(HostMessage::Finalized(Ok(None)));
         }
     }
 
@@ -857,6 +860,7 @@ impl StudioApp {
     }
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
+        self.file_path_coverage = Some(loaded.file_path_coverage);
         self.reanalysis.source_start_ns = loaded.source_start_ns;
         self.reanalysis.source_end_ns = loaded.source_end_ns;
         self.reanalysis.source_count = loaded.source_completed_ios;
@@ -1095,8 +1099,9 @@ impl StudioApp {
                     self.host_diagnostic_writer = None;
                 }
                 HostMessage::Finalized(result) => {
-                    if let Err(error) = result {
-                        self.capture_error = Some(error);
+                    match result {
+                        Ok(coverage) => self.file_path_coverage = coverage,
+                        Err(error) => self.capture_error = Some(error),
                     }
                     self.page = Page::Overview;
                     self.phase = if self.capture_error.is_some() {
@@ -1295,6 +1300,7 @@ impl StudioApp {
         self.disk_stats.clear();
         self.disk_stats_view = DiskStatsView::default();
         self.analyzer = AnalysisEngine::new();
+        self.file_path_coverage = None;
         self.analysis_generation = self.analysis_generation.wrapping_add(1);
         self.explorer_view = None;
         self.pipeline_view = None;
@@ -4183,6 +4189,9 @@ fn file_origin_tooltip(origins: &[FileOriginView]) -> String {
     if origins.len() > 4 {
         lines.push(format!("  +{} more", origins.len() - 4));
     }
+    if origins.iter().any(|v| v.incomplete) {
+        lines.push("FilePath Unresolved: collector dropped additional origins; listed file evidence is incomplete".into());
+    }
     lines.join("\n")
 }
 
@@ -4341,6 +4350,7 @@ mod ui_tests {
     #[test]
     fn file_group_uses_path_and_preserves_multiple_origins() {
         let origin = FileOriginView {
+            incomplete: false,
             file: FileIdentity {
                 fs_device_major: 259,
                 fs_device_minor: 7,
@@ -4370,6 +4380,7 @@ mod ui_tests {
     #[test]
     fn lba_hover_tooltip_shows_path_confidence_and_identity_fallback() {
         let attributed = FileOriginView {
+            incomplete: false,
             file: FileIdentity {
                 fs_device_major: 254,
                 fs_device_minor: 11,
@@ -4391,6 +4402,7 @@ mod ui_tests {
         );
 
         let unresolved = FileOriginView {
+            incomplete: false,
             path: None,
             confidence: EdgeConfidence::Probable,
             ..attributed
