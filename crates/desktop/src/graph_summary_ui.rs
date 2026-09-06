@@ -298,9 +298,10 @@ fn summary_axis_tick(mark:egui_plot::GridMark,range:&std::ops::RangeInclusive<f6
 }
 
 fn compact_tick(value:f64)->String {
-    if value.abs()>=1e9 {format!("{:.1}G",value/1e9)}
-    else if value.abs()>=1e6 {format!("{:.1}M",value/1e6)}
-    else if value.abs()>=1e3 {format!("{:.1}k",value/1e3)}
+    let scaled=|divisor:f64,suffix:&str| {let n=value/divisor;if n.fract()==0. {format!("{n:.0}{suffix}")}else{format!("{n:.1}{suffix}")}};
+    if value.abs()>=1e9 {scaled(1e9,"G")}
+    else if value.abs()>=1e6 {scaled(1e6,"M")}
+    else if value.abs()>=1e3 {scaled(1e3,"k")}
     else if value.fract()==0. {format!("{value:.0}")}
     else {format!("{value:.2}")}
 }

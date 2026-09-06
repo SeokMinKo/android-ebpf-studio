@@ -119,10 +119,11 @@ enum ExplorerPreset {
     BusyIntervals,
     IdleIntervals,
     BurstPayload,
+    ConnectedFootprint,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -146,6 +147,7 @@ impl ExplorerPreset {
         Self::BusyIntervals,
         Self::IdleIntervals,
         Self::BurstPayload,
+        Self::ConnectedFootprint,
     ];
 
     fn label(self) -> &'static str {
@@ -173,6 +175,7 @@ impl ExplorerPreset {
             Self::BusyIntervals => "Continuous busy intervals",
             Self::IdleIntervals => "Continuous idle intervals",
             Self::BurstPayload => "Cumulative data within bursts",
+            Self::ConnectedFootprint => "Connected LBA footprint",
         }
     }
 
@@ -199,7 +202,7 @@ impl ExplorerPreset {
                 AxisMetric::UfsLatencyMs,
                 GroupBy::File,
             )),
-            Self::LbaDistribution => {
+            Self::LbaDistribution | Self::ConnectedFootprint => {
                 Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
             }
             Self::Custom => None,
@@ -1855,6 +1858,7 @@ impl StudioApp {
                 if previous != self.explorer_preset
                     && let Some((x, y, group)) = self.explorer_preset.query()
                 {
+                    self.footprint.connected=self.explorer_preset==ExplorerPreset::ConnectedFootprint;
                     self.x_axis = x;
                     self.y_axis = y;
                     self.group_by = group;
@@ -1864,6 +1868,7 @@ impl StudioApp {
                 ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
             });
             if !matches!(self.y_axis,AxisMetric::Window(_)) {
+            if !self.connected_footprint() {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color Category");
                 let previous_category = self.group_by;
@@ -1884,6 +1889,7 @@ impl StudioApp {
                         .step_by(0.5),
                 );
             });
+            }
             ui.collapsing("Advanced axes", |ui| {
                 let before = (self.x_axis, self.y_axis, self.group_by);
                 ui.horizontal_wrapped(|ui| {
@@ -1908,7 +1914,7 @@ impl StudioApp {
             };
         }
         self.footprint_controls(ui);
-        if self.footprint.mode != FootprintMode::Combined
+        if (self.footprint.mode != FootprintMode::Combined || self.connected_footprint())
             && self.x_axis == AxisMetric::TimeMs
             && matches!(self.y_axis, AxisMetric::Sector | AxisMetric::AddressKiB)
         {

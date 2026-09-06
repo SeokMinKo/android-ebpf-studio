@@ -20,6 +20,26 @@ mod footprint_tests {
         engine
     }
     #[test]
+    fn connected_coordinates_preserve_measured_lifetime_and_never_fabricate_missing_start() {
+        let source=fixture();let mut engine=AnalysisEngine::new();
+        for (index,original) in source.completed_ios().iter().enumerate() {
+            let mut io=original.clone();
+            if index==1 {io.evidence=Some(Box::new(android_ebpf_protocol::CompletionEvidence {
+                source:"fixture".into(),record_id:2,issue_record_candidates:vec![],issue_timestamp_ns:None,issuer_pid:None,issuer_tid:None,issuer_cpu:None,completion_status:None,process_name:None,timing_confidence:android_ebpf_protocol::CorrelationConfidence::ContextOnly,reason:"no issue event".into(),clock:0,
+            }));}
+            engine.ingest(StorageEvent::ObservedBlockCompletion(io));
+        }
+        let view=build_footprint(&engine,0,FootprintMode::Combined,0);
+        assert_eq!(view.lanes.len(),2);assert_eq!(view.unique,3);
+        let points:Vec<_>=view.lanes.values().flatten().collect();
+        assert_eq!(points.iter().filter(|p|p.issue_ms.is_some()).count(),2);
+        assert!(points.iter().any(|p|p.issue_ms==Some(1.)&&p.point.coordinates==[1.5,100.]&&p.end_sector==108.));
+        assert!(points.iter().any(|p|p.issue_ms.is_none()&&p.point.coordinates==[2.5,100.]));
+        assert!(view.min[0]<1.&&view.max[0]>3.5);
+        let s=compute_selection(&engine,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::Sector,0);
+        assert_eq!(s.keys.len(),3);assert_eq!(s.metric.total.values,[100.;3]);assert_eq!(s.read.bytes,3*4096);
+    }
+    #[test]
     fn process_lanes_keep_same_name_pids_and_devices_separate_and_reset_caches() {
         let engine=fixture();
         let view=build_footprint(&engine,0,FootprintMode::Process,0);
@@ -69,6 +89,7 @@ impl FootprintMode {
 #[derive(Default)]
 struct FootprintState {
     mode:FootprintMode,
+    connected:bool,
     view:Option<FootprintView>,
     pending:Option<Receiver<FootprintView>>,
     fit:bool,
@@ -85,6 +106,7 @@ struct FootprintView {
 }
 struct FootprintPoint {
     point:ExplorerPoint,
+    issue_ms:Option<f64>,
     end_sector:f64,
     operation:IoOperation,
 }
@@ -117,6 +139,7 @@ fn build_footprint(engine:&AnalysisEngine,generation:u64,mode:FootprintMode,orig
     let mut view=FootprintView{generation,mode,lanes:BTreeMap::new(),min:[f64::INFINITY;2],max:[f64::NEG_INFINITY;2],unique:0,memberships:0,built:Instant::now()};
     for io in engine.completed_ios() {
         let time=io.completion.ts_ns.saturating_sub(origin) as f64/1e6;
+        let issue_ms=io.issue_timestamp().filter(|ts|*ts<=io.completion.ts_ns).map(|ts|ts.saturating_sub(origin) as f64/1e6);
         let sector=io.issue.sector as f64;
         let end=io.issue.sector.saturating_add(io.issue.sectors as u64) as f64;
         let graph=engine.transaction_for(io);
@@ -126,11 +149,11 @@ fn build_footprint(engine:&AnalysisEngine,generation:u64,mode:FootprintMode,orig
             io.issue.sector,io.issue.sector.saturating_add(io.issue.sectors as u64),io.issue.bytes,io.issue_timestamp(),io.completion.ts_ns,
             file_origin_tooltip(&block_file_origins(&graph)),if names.len()>1{"Repeated display across candidate lanes; counted once in global Summary."}else{"Block issuer and original file process are distinct roles."});
         for name in names {
-            view.lanes.entry(name).or_default().push(FootprintPoint{point:ExplorerPoint{coordinates:[time,sector],file_tooltip:Some(tooltip.clone()),request:selection_key(io)},end_sector:end,operation:io.issue.operation});
+            view.lanes.entry(name).or_default().push(FootprintPoint{point:ExplorerPoint{coordinates:[time,sector],file_tooltip:Some(tooltip.clone()),request:selection_key(io)},issue_ms,end_sector:end,operation:io.issue.operation});
             view.memberships+=1;
         }
         view.unique+=1;
-        view.min[0]=view.min[0].min(time);view.max[0]=view.max[0].max(time);
+        view.min[0]=view.min[0].min(issue_ms.unwrap_or(time));view.max[0]=view.max[0].max(time);
         view.min[1]=view.min[1].min(sector);view.max[1]=view.max[1].max(end);
     }
     if view.unique==0 {view.min=[0.;2];view.max=[1.;2];}
@@ -139,10 +162,16 @@ fn build_footprint(engine:&AnalysisEngine,generation:u64,mode:FootprintMode,orig
 }
 
 impl StudioApp {
+    fn connected_footprint(&self)->bool {(self.footprint.connected||self.explorer_preset==ExplorerPreset::ConnectedFootprint) && self.x_axis==AxisMetric::TimeMs && matches!(self.y_axis,AxisMetric::Sector|AxisMetric::AddressKiB)}
     fn footprint_controls(&mut self,ui:&mut egui::Ui) {
         if self.x_axis!=AxisMetric::TimeMs || !matches!(self.y_axis,AxisMetric::Sector|AxisMetric::AddressKiB) {return;}
         let before=self.footprint.mode;
         ui.horizontal_wrapped(|ui| {
+            let mut connected=self.connected_footprint();
+            if ui.checkbox(&mut connected,"Connect issue to completion").changed() {
+                self.explorer_preset=if connected {ExplorerPreset::ConnectedFootprint}else{ExplorerPreset::LbaDistribution};self.footprint.fit=true;
+            }
+            self.footprint.connected=connected;
             ui.label("Footprint layout");
             egui::ComboBox::from_id_salt("footprint-layout").selected_text(self.footprint.mode.label()).show_ui(ui,|ui| {
                 for mode in [FootprintMode::Combined,FootprintMode::FilePath,FootprintMode::Process,FootprintMode::FileProcess] {ui.selectable_value(&mut self.footprint.mode,mode,mode.label());}
@@ -153,6 +182,7 @@ impl StudioApp {
     }
 
     fn footprint_lanes_ui(&mut self,ui:&mut egui::Ui) {
+        let connected=self.connected_footprint();
         if let Some(rx)=&self.footprint.pending && let Ok(view)=rx.try_recv() {
             if view.mode==self.footprint.mode {self.footprint.view=Some(view);}
             self.footprint.pending=None;
@@ -167,6 +197,7 @@ impl StudioApp {
         let Some(view)=&self.footprint.view else {ui.spinner();ui.label("Building full-resolution footprint groups…");return;};
         ui.label(format!("{} unique I/O · {} lane memberships · {} groups",view.unique,view.memberships,view.lanes.len()));
         ui.small("Each lane includes its device identity. File candidates and async writeback are not proven original-process attribution. Repeated memberships never increase the global Summary count/bytes. All groups are accessible with the page control.");
+        if connected {ui.small("Hollow start = measured issue; filled end = completion. Horizontal line = observed lifetime at starting LBA; vertical line = address extent. Missing issue keeps only completion/extent. Click a segment or endpoint to inspect one I/O. Rectangle selects completion endpoints, preserving completion-counted Summary/BW.");}
         let page_id=ui.id().with("footprint-page");
         let mut page=ui.data_mut(|d|d.get_temp::<usize>(page_id).unwrap_or(0));
         let pages=view.lanes.len().div_ceil(4).max(1);page=page.min(pages-1);
@@ -199,11 +230,12 @@ impl StudioApp {
                 let step=points.len().div_ceil(3000).max(1);
                 let drag_id=ui.id().with("lane-drag");
                 let mut drag=ui.data_mut(|d|d.get_temp::<[f64;2]>(drag_id));
-                studio_plot(ui.id().with("lane")).height(175.).link_axis("footprint-shared-axes",[true,true])
+                studio_plot(ui.id().with("lane")).height(if view.mode==FootprintMode::Combined {330.}else{175.}).link_axis("footprint-shared-axes",[true,true])
                     .allow_drag(!selecting)
                     .allow_boxed_zoom(!selecting)
                     .y_axis_formatter(|m,_|compact_tick(m.value))
-                    .link_cursor("footprint-shared-cursor",[true,true]).x_axis_label("Completion time (ms)").y_axis_label(self.y_axis.label()).legend(Legend::default())
+                    .y_grid_spacer(summary_grid)
+                    .link_cursor("footprint-shared-cursor",[true,true]).x_axis_label(if connected {"Issue to completion time (ms)"}else{"Completion time (ms)"}).y_axis_label(self.y_axis.label()).legend(Legend::default())
                     .label_formatter(|hover|match hover {
                         HoverPosition::NearDataPoint{plot_name,index,..}=>points.iter().filter(|p|operation_label(p.operation)==*plot_name).step_by(step).nth(*index).and_then(|p|p.point.file_tooltip.clone()),
                         _=>None,
@@ -214,6 +246,12 @@ impl StudioApp {
                         if page==0 && name==view.lanes.first_key_value().unwrap().0 {
                             self.render_qa.plot_rect=Some(*plot.transform().frame());
                             self.render_qa.point_target=points.first().map(|p|plot.screen_from_plot(egui_plot::PlotPoint::new(p.point.coordinates[0],p.point.coordinates[1]/divisor)));
+                            if connected && std::env::var("ANDROID_EBPF_QA_SEGMENT_POINT").is_ok() {
+                                self.render_qa.point_target=points.iter().step_by(step).filter_map(|p|p.issue_ms.map(|start|(start,p))).find_map(|(start,p)| {
+                                    let a=plot.screen_from_plot(egui_plot::PlotPoint::new(start,p.point.coordinates[1]/divisor));let b=plot.screen_from_plot(egui_plot::PlotPoint::new(p.point.coordinates[0],p.point.coordinates[1]/divisor));
+                                    (a.distance(b)>40.).then_some(a.lerp(b,0.5))
+                                });
+                            }
                         }
                         if selecting && plot.response().drag_started() && let Some(pos)=plot.response().interact_pointer_pos() {
                             let p=plot.plot_from_screen(pos-plot.response().drag_delta()); drag=Some([p.x,p.y]);
@@ -233,6 +271,11 @@ impl StudioApp {
                         }
                         for op in [IoOperation::Read,IoOperation::Write,IoOperation::Flush,IoOperation::Discard,IoOperation::Other] {
                           for p in points.iter().filter(|p|p.operation==op).step_by(step) {
+                            if connected && let Some(start)=p.issue_ms {
+                                let color=match p.operation {IoOperation::Read=>accent(),IoOperation::Write=>green(),IoOperation::Discard=>red(),IoOperation::Flush=>amber(),IoOperation::Other=>muted()};
+                                plot.line(Line::new("",vec![[start,p.point.coordinates[1]/divisor],[p.point.coordinates[0],p.point.coordinates[1]/divisor]]).allow_hover(false).color(color));
+                                plot.points(Points::new("",vec![[start,p.point.coordinates[1]/divisor]]).allow_hover(false).filled(false).radius(3.5).color(color));
+                            }
                             plot.line(Line::new("",vec![[p.point.coordinates[0],p.point.coordinates[1]/divisor],[p.point.coordinates[0],p.end_sector/divisor]]).allow_hover(false).color(if p.operation==IoOperation::Write{green()}else{accent()}));
                           }
                         }
@@ -242,7 +285,8 @@ impl StudioApp {
                         if selecting && plot.response().clicked() && let Some(pos)=plot.pointer_coordinate() {
                             let screen=plot.screen_from_plot(pos);
                             select=points.iter().filter_map(|p|{
-                                let distance=plot.screen_from_plot(egui_plot::PlotPoint::new(p.point.coordinates[0],p.point.coordinates[1]/divisor)).distance(screen);
+                                let end=plot.screen_from_plot(egui_plot::PlotPoint::new(p.point.coordinates[0],p.point.coordinates[1]/divisor));
+                                let distance=if connected && let Some(start)=p.issue_ms {let start=plot.screen_from_plot(egui_plot::PlotPoint::new(start,p.point.coordinates[1]/divisor));egui::pos2(screen.x.clamp(start.x.min(end.x),start.x.max(end.x)),end.y).distance(screen)}else{end.distance(screen)};
                                 (distance<16.).then_some((distance,p.point.request))
                             }).min_by(|a,b|a.0.total_cmp(&b.0)).map(|v|v.1);
                         }

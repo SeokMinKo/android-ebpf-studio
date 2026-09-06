@@ -810,6 +810,9 @@ impl StudioApp {
             report["filter_states"]=serde_json::json!(self.render_qa.filter_states);
             report["lane_page_states"]=serde_json::json!(self.render_qa.lane_page_states);
             report["footprint"] = self.footprint.view.as_ref().map_or(serde_json::Value::Null, |v| serde_json::json!({"mode":v.mode.label(),"unique":v.unique,"memberships":v.memberships,"groups":v.lanes.iter().map(|(k,p)|(k,p.len())).collect::<BTreeMap<_,_>>() }));
+            if self.connected_footprint() && let Some(view)=&self.footprint.view {
+                report["connected_footprint"]=serde_json::json!({"completion_selected_rectangles":true,"points":view.lanes.iter().flat_map(|(lane,points)|points.iter().map(move|p|serde_json::json!({"lane":lane,"key":p.point.request,"issue_ms":p.issue_ms,"completion_ms":p.point.coordinates[0],"sector":p.point.coordinates[1],"end_sector":p.end_sector,"operation":p.operation}))).collect::<Vec<_>>()});
+            }
             report["graph_summary"] = self.selection.summary.as_ref()
                 .or_else(||self.selection.all_summary.as_ref().map(|v|&v.3))
                 .map_or(serde_json::Value::Null, |s| serde_json::json!({

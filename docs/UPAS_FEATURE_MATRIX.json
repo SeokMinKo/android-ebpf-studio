@@ -159,12 +159,12 @@
       "lba",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified connected lifetime slice; exhaustive sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "connected send/complete footprint",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Horizontal segment at starting LBA from measured issue to completion; hollow issue marker and filled completion marker. Missing/invalid issue has no fabricated segment. Vertical marker retains [LBA,LBA+sectors) extent. Rectangles use completion endpoints; segment/endpoint click chooses one I/O. Summary remains the exact current LBA cohort.",
+    "target_ui": "Explore Connected LBA footprint (preset23); device/FilePath/Process/File-I/O-candidate lanes; existing linked LBA Summary histogram/violin/repeated R/W counts",
+    "capture_changes": "Existing measured CompletedIo.issue_timestamp with provenance; observed volume-only requests remain unconnected. No new probe needed.",
+    "verification": "uPAS5306-5366 uses matching send/complete horizontal segment. Native actual8247 requests/139 Process groups;184 requests/12 FilePath groups; Read7415, point1, area554. Raw event coordinate/extent oracle plus LBA histogram/percentile and I/O CSV. Native synthetic line-midpoint click selects correct request. Missing-issue/device regression. See UPAS_CONNECTED_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
