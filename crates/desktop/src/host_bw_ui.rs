@@ -46,6 +46,10 @@ fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
     ui.strong("Host BW · MiB/s");
     if b.estimated {ui.colored_label(amber(),"Reconstructed estimate · block trace, Probable request matching");}
     ui.small("Completion-counted Read + Write payload from this graph cohort. Detail-based BW is not the unsampled kernel throughput.");
+    if let Some(series)=&s.window_series {
+        if series.metric.intervals() {ui.small("Full graph: all filtered I/O in the analysis range. Selected intervals: completions in (start, end], so a closing completion belongs to Busy, not the following Idle gap.");}
+        ui.small("BW clock spans the first through last selected interval/window, including intervening time; a Y-range selection only narrows the payload cohort.");
+    }
     if s.keys.is_empty() && s.unplottable_rows>0 {ui.colored_label(amber(),"Graph metric unavailable for these filtered requests. The graph's payload and bandwidth are unavailable, not measured zero.");}
     egui::Grid::new("host-bw-rates").num_columns(3).striped(true).show(ui,|ui| {
         ui.label("");ui.strong("with Idle");ui.strong("w/o Idle");ui.end_row();

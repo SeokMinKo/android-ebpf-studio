@@ -75,7 +75,7 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
     constrain_summary_width(ui);
     let Some(axis)=summary.metric_axis else {return;};
     ui.strong(format!("{} · distribution",axis.label()));
-    ui.small("Retained graph cohort, before display sampling. Exact nearest-rank percentiles; unmeasured values are excluded.");
+    ui.small(if summary.window_series.as_ref().is_some_and(|s|s.metric.device_activity()) {"Full-source device activity, before display sampling. Exact nearest-rank percentiles of available activity samples."}else{"Retained graph cohort, before display sampling. Exact nearest-rank percentiles; unmeasured values are excluded."});
     match axis {
         AxisMetric::IssueQueueDepth=> {ui.small("Observed per-device requests in flight immediately after issue, before analysis filters. Perfetto reconstructs uniquely paired intervals; unpaired/sampled requests are absent. This is not hardware or unsampled device QD.");}
         AxisMetric::QueueDepth=> {ui.small("Legacy observed depth after completion across all devices. Use QD at issue for send-Q comparisons.");}
@@ -165,8 +165,11 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
             }
         });
     } else if let Some(series)=&summary.window_series {
-        ui.small(format!("{} time windows; each window contributes one sample. Empty windows are included, partial windows use their actual duration. Payload excludes non-R/W extents.",series.samples.len()));
-        metric_distribution_named_ui(ui,&summary.metric,axis.label(),"Time windows");
+        if series.metric.intervals() {
+            ui.small("Each positive continuous interval contributes one duration sample, independent of I/O count. Analysis boundaries clip intervals. Read/Write durations are not defined separately for shared device activity.");
+            if !series.activity_known {ui.colored_label(amber(),"Interval distribution unavailable: full device activity coverage is not proven. No zero-duration samples are invented.");}
+        } else {ui.small(format!("{} time windows; each window contributes one sample. Empty windows are included, partial windows use their actual duration. Payload excludes non-R/W extents.",series.samples.len()));}
+        metric_distribution_named_ui(ui,&summary.metric,axis.label(),series.metric.population());
     } else {
         metric_distribution_ui(ui,&summary.metric,axis.label());
     }
@@ -337,10 +340,11 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
         }
     }
     if let Some(series)=&s.window_series {
-        writer.write_record(["window_definition",metric,"all",&series.width_ns.to_string(),"","one sample per window; [start,end), final end inclusive; partial-window rates use actual duration; cumulative payload starts at analysis interval start","ns"])?;
+        writer.write_record(["window_definition",metric,"all",&series.width_ns.to_string(),"",if series.metric.intervals(){"One positive continuous interval per sample; device-wide union or complement clipped to analysis boundaries; completion cohort (start,end]. Full graph uses all analysis-range I/O; selected intervals use their completion cohort. BW clock is the first-to-last selected interval envelope."}else{"one sample per window; [start,end), final end inclusive; partial-window rates use actual duration; cumulative payload starts at analysis interval start"},"ns"])?;
+        writer.write_record(["activity_known",metric,"all","","",&series.activity_known.to_string(),"coverage gate for activity metrics"])?;
         for sample in &series.samples {
             for (i,direction) in ["Total","Read","Write"].iter().enumerate() {
-                writer.write_record(["time_window",metric,direction,&sample.start_ns.to_string(),&sample.end_ns.to_string(),&sample.values[i].map_or("unavailable".into(),|v|v.to_string()),metric])?;
+                writer.write_record([if series.metric.intervals(){"activity_interval"}else{"time_window"},metric,direction,&sample.start_ns.to_string(),&sample.end_ns.to_string(),&sample.values[i].map_or("unavailable".into(),|v|v.to_string()),metric])?;
                 writer.write_record(["window_payload",metric,direction,&sample.start_ns.to_string(),&sample.end_ns.to_string(),&sample.payload[i].to_string(),"Read+Write bytes"])?;
                 writer.write_record(["window_requests",metric,direction,&sample.start_ns.to_string(),&sample.end_ns.to_string(),&sample.requests[i].to_string(),"requests; Total includes all commands"])?;
             }
@@ -354,9 +358,9 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
                 writer.write_record(["percentile",metric,&group,&p.to_string(),"",&d.percentile(p).map_or("unavailable".into(),|v|v.to_string()),metric])?;
             }
             for b in d.histogram(16) {
-                writer.write_record(["histogram",metric,&group,&b.lower.to_string(),&b.upper.to_string(),&b.count.to_string(),if s.window_series.is_some(){"time windows"}else{"requests"}])?;
+                writer.write_record(["histogram",metric,&group,&b.lower.to_string(),&b.upper.to_string(),&b.count.to_string(),s.window_series.as_ref().map_or("requests",|s|s.metric.population())])?;
             }
-            writer.write_record(["missing",metric,&group,"","",&d.missing.to_string(),if s.window_series.is_some(){"time windows"}else{"requests"}])?;
+            writer.write_record(["missing",metric,&group,"","",&d.missing.to_string(),s.window_series.as_ref().map_or("requests",|s|s.metric.population())])?;
             for (i,value) in d.values.iter().enumerate() {
                 writer.write_record(["sorted_rank",metric,&group,&(i+1).to_string(),"",&value.to_string(),metric])?;
                 if i+1==d.values.len() || d.values[i+1]!=*value {

@@ -783,12 +783,12 @@
       "lba",
       "send_db"
     ],
-    "status": "partial: window activity implemented; continuous busy-run duration pending",
+    "status": "implemented and independently verified continuous-interval slice; full sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Clipped full-source selected-device issue-completion interval union / actual window duration *100, or active ns/1e6. Exact/proven reconstructed coverage required.",
-    "target_ui": "Explore Device busy % / Active time by window + linked Summary",
-    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
-    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
+    "formula": "One positive continuous interval per sample. Busy = full-source selected-device issue/completion union, merging overlap and adjacency; Idle = complement within analysis bounds. Clipped endpoints, duration ns/1e6, exact nearest-rank histogram/CDF. Request filters never erase other-process activity. uPAS uses zero-filled per-request inter-completion values with a configurable QD gate; deliberate population/formula difference documented.",
+    "target_ui": "Explore Continuous busy / idle intervals (presets20/21) and linked Summary distribution/CSV; fixed elapsed-window activity remains separately available",
+    "capture_changes": "Reuses full-source ActivityTimeline and existing coverage provenance. Unknown/sampled source cannot produce fabricated Idle intervals; no new kernel probe in this slice.",
+    "verification": "Deterministic overlap/adjacency/device/edge/unknown tests; native real8247-I/O trace with2758 Busy/2757 Idle intervals, Read filter, Busy/Idle point and285-interval area selection; independent original-event/CSV oracle. Actual uPAS parser plus analyzer assignment AST compared. See UPAS_INTERVAL_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -801,12 +801,12 @@
       "busy",
       "filename"
     ],
-    "status": "partial: window distribution implemented; continuous busy-run distribution pending",
+    "status": "implemented and independently verified continuous-interval slice; full sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Exact active milliseconds per elapsed window; distinct from maximal continuous busy-interval durations.",
-    "target_ui": "Linked Active time Summary",
-    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
-    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
+    "formula": "One positive continuous interval per sample. Busy = full-source selected-device issue/completion union, merging overlap and adjacency; Idle = complement within analysis bounds. Clipped endpoints, duration ns/1e6, exact nearest-rank histogram/CDF. Request filters never erase other-process activity. uPAS uses zero-filled per-request inter-completion values with a configurable QD gate; deliberate population/formula difference documented.",
+    "target_ui": "Explore Continuous busy / idle intervals (presets20/21) and linked Summary distribution/CSV; fixed elapsed-window activity remains separately available",
+    "capture_changes": "Reuses full-source ActivityTimeline and existing coverage provenance. Unknown/sampled source cannot produce fabricated Idle intervals; no new kernel probe in this slice.",
+    "verification": "Deterministic overlap/adjacency/device/edge/unknown tests; native real8247-I/O trace with2758 Busy/2757 Idle intervals, Read filter, Busy/Idle point and285-interval area selection; independent original-event/CSV oracle. Actual uPAS parser plus analyzer assignment AST compared. See UPAS_INTERVAL_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -824,12 +824,12 @@
       "send_db",
       "send_time"
     ],
-    "status": "partial: window idle time implemented; continuous idle-gap trend pending",
+    "status": "implemented and independently verified continuous-interval slice; full sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Actual elapsed window ns minus full-source clipped busy union, divided by1e6. Unknown coverage remains unavailable.",
-    "target_ui": "Explore Idle time by window + linked Summary",
-    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
-    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
+    "formula": "One positive continuous interval per sample. Busy = full-source selected-device issue/completion union, merging overlap and adjacency; Idle = complement within analysis bounds. Clipped endpoints, duration ns/1e6, exact nearest-rank histogram/CDF. Request filters never erase other-process activity. uPAS uses zero-filled per-request inter-completion values with a configurable QD gate; deliberate population/formula difference documented.",
+    "target_ui": "Explore Continuous busy / idle intervals (presets20/21) and linked Summary distribution/CSV; fixed elapsed-window activity remains separately available",
+    "capture_changes": "Reuses full-source ActivityTimeline and existing coverage provenance. Unknown/sampled source cannot produce fabricated Idle intervals; no new kernel probe in this slice.",
+    "verification": "Deterministic overlap/adjacency/device/edge/unknown tests; native real8247-I/O trace with2758 Busy/2757 Idle intervals, Read filter, Busy/Idle point and285-interval area selection; independent original-event/CSV oracle. Actual uPAS parser plus analyzer assignment AST compared. See UPAS_INTERVAL_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -861,12 +861,12 @@
       "filename",
       "idle"
     ],
-    "status": "partial: window distribution implemented; continuous idle-gap distribution pending",
+    "status": "implemented and independently verified continuous-interval slice; full sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Exact idle milliseconds per elapsed window, including zero for fully busy windows; not maximal idle-gap durations.",
-    "target_ui": "Linked Idle time Summary",
-    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
-    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
+    "formula": "One positive continuous interval per sample. Busy = full-source selected-device issue/completion union, merging overlap and adjacency; Idle = complement within analysis bounds. Clipped endpoints, duration ns/1e6, exact nearest-rank histogram/CDF. Request filters never erase other-process activity. uPAS uses zero-filled per-request inter-completion values with a configurable QD gate; deliberate population/formula difference documented.",
+    "target_ui": "Explore Continuous busy / idle intervals (presets20/21) and linked Summary distribution/CSV; fixed elapsed-window activity remains separately available",
+    "capture_changes": "Reuses full-source ActivityTimeline and existing coverage provenance. Unknown/sampled source cannot produce fabricated Idle intervals; no new kernel probe in this slice.",
+    "verification": "Deterministic overlap/adjacency/device/edge/unknown tests; native real8247-I/O trace with2758 Busy/2757 Idle intervals, Read filter, Busy/Idle point and285-interval area selection; independent original-event/CSV oracle. Actual uPAS parser plus analyzer assignment AST compared. See UPAS_INTERVAL_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

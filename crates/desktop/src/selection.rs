@@ -467,7 +467,7 @@ impl StudioApp {
                 let selected = self.selection.summary.is_some();
                 let Some(s) = self.selection.summary.as_ref().or_else(|| self.selection.all_summary.as_ref().map(|v| &v.3)) else { ui.spinner(); ui.label("Calculating current graph summary…"); return; };
                 ui.small(if selected { "Selected graph region · Clear restores full filtered graph" } else { "Full filtered graph · select an area to narrow the summary" });
-                if let Some(series)=&s.window_series {ui.small(format!("{} filtered source I/O · {} time-window samples",s.source_rows,series.samples.len()));}
+                if let Some(series)=&s.window_series {ui.small(format!("{} filtered source I/O · {} {}",s.source_rows,series.samples.len(),series.metric.population()));}
                 else {ui.small(format!("{} filtered source I/O · {} cannot be plotted on these axes",s.source_rows,s.unplottable_rows));}
                 if live && !selected {ui.small("Live snapshot · refreshed in background; incoming I/O may be newer");}
                 if selected && ui.button("Apply selection to analysis filters").clicked() {

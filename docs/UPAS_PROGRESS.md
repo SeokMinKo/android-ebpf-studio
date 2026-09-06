@@ -1,6 +1,6 @@
 # Active goal checkpoint — not overall completion
 
-Latest continuation (2026-09-07): see [UPAS_ROLLING_CHECKPOINT.md](UPAS_ROLLING_CHECKPOINT.md). Rolling C2C/D2D trends and linked distributions are verified against original events and actual uPAS formulas. Missing graph metrics no longer display fabricated zero BW. Previous window/PID/lane/CSV work remains in [UPAS_WINDOW_CHECKPOINT.md](UPAS_WINDOW_CHECKPOINT.md). Goal remains active; installation and the full remaining scope are pending.
+Latest continuation (2026-09-07): see [UPAS_INTERVAL_CHECKPOINT.md](UPAS_INTERVAL_CHECKPOINT.md). Continuous Busy/Idle trends and linked distributions are verified against original events and actual uPAS parsing/calculation. Rolling BW work was committed as92ef1dc; see [UPAS_ROLLING_CHECKPOINT.md](UPAS_ROLLING_CHECKPOINT.md). Goal remains active; full remaining scope and installation are pending.
 
 Read the full objective at `C:/Users/AEBIZTRIP5.pub/.codex/attachments/700d9658-a88e-4c81-bb21-c455bd9eb2b2/goal-objective.md`. User subsequently clarified that Summary means the **existing Explore right-hand Summary inspector linked to the main graph**, not Overview or a separate histogram/pie catalogue. This supersedes the initial topology interpretation. Continue all remaining objective work autonomously. Goal remains active.
 

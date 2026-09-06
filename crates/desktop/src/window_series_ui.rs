@@ -3,6 +3,7 @@ fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:Axi
         let mut summary=compute_selection(engine,request,x,y,origin);bw.attach(&mut summary);return summary;
     };
     let started=Instant::now();
+    let full_graph=matches!(request,SelectionRequest::Rectangle{min,max} if min==[f64::NEG_INFINITY;2] && max==[f64::INFINITY;2]);
     let series=crate::window_series::build(engine.completed_ios(),&bw.activity,&bw.devices,bw.range,width_ms.saturating_mul(1_000_000),metric);
     let point_index=if let SelectionRequest::Point(key)=request {engine.completed_ios().iter().find(|io|selection_key(io)==key).and_then(|io|series.index_at(io.completion.ts_ns))}else{None};
     let selected:Vec<bool>=series.samples.iter().enumerate().map(|(index,sample)| {
@@ -13,12 +14,14 @@ fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:Axi
             SelectionRequest::Point(_)=>point_index==Some(index),
         }
     }).collect();
-    let cohort=engine.select_completed(|io|series.index_at(io.completion.ts_ns).is_some_and(|i|selected[i]));
+    let cohort=engine.select_completed(|io|if metric.intervals() && full_graph {io.completion.ts_ns>=bw.range.0 && io.completion.ts_ns<=bw.range.1}else{series.index_at(io.completion.ts_ns).is_some_and(|i|selected[i])});
     let mut summary=compute_selection(&cohort,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,origin);
     summary.source_rows=engine.completed_ios().len();summary.metric_axis=Some(y);summary.metric=Default::default();summary.bounds=None;
     let mut chosen=series.clone();chosen.samples=series.samples.into_iter().zip(selected).filter_map(|(s,yes)|yes.then_some(s)).collect();
-    if let (Some(first),Some(last))=(chosen.samples.first(),chosen.samples.last()) {bw.range=(first.start_ns,last.end_ns);}
-    else {bw.range.1=bw.range.0;}
+    if !(metric.intervals() && full_graph) {
+        if let (Some(first),Some(last))=(chosen.samples.first(),chosen.samples.last()) {bw.range=(first.start_ns,last.end_ns);}
+        else {bw.range.1=bw.range.0;}
+    }
     for sample in &chosen.samples {
         summary.metric.total.observe(sample.values[0]);
         summary.metric.read.observe(sample.values[1]);summary.metric.write.observe(sample.values[2]);
@@ -34,20 +37,26 @@ fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:Axi
 
 impl StudioApp {
     fn window_series_ui(&mut self,ui:&mut egui::Ui) {
+        let intervals=matches!(self.y_axis,AxisMetric::Window(m) if m.intervals());
         let mut width=self.window_width_ms;
-        ui.horizontal_wrapped(|ui| {ui.label("Time window (ms)");ui.add(egui::DragValue::new(&mut width).range(1..=60_000).speed(10.));});
+        if !intervals {ui.horizontal_wrapped(|ui| {ui.label("Time window (ms)");ui.add(egui::DragValue::new(&mut width).range(1..=60_000).speed(10.));});}
         if width!=self.window_width_ms {self.window_width_ms=width;self.invalidate_query();self.rebuild_filtered();return;}
         self.axis_ranges_ui(ui);
         let origin=self.time_origin();let metric=self.y_axis;
         let Some(series)=self.selection.all_summary.as_ref().filter(|s|s.2==metric).and_then(|s|s.3.window_series.as_ref()) else {ui.spinner();ui.label("Building full-resolution time windows…");return;};
-        ui.small(format!("{} windows · effective width {:.3} ms · final partial window uses its measured duration",series.samples.len(),series.width_ns as f64/1e6));
-        ui.small("One statistical sample per window, including empty windows. Data is retained completion detail; zeros are not proof of unsampled inactivity. Click a window or drag across window centers to summarize whole windows.");
+        if intervals {
+            ui.small(format!("{} continuous intervals · one duration sample per interval · clipped at analysis boundaries",series.samples.len()));
+            ui.small("Overlapping or touching activity is merged across selected devices. Idle is its complement. Click an interval or drag across centers to summarize whole intervals.");
+        } else {
+            ui.small(format!("{} windows · effective width {:.3} ms · final partial window uses its measured duration",series.samples.len(),series.width_ns as f64/1e6));
+            ui.small("One statistical sample per window, including empty windows. Data is retained completion detail; zeros are not proof of unsampled inactivity. Click a window or drag across window centers to summarize whole windows.");
+        }
         if series.metric.device_activity() {ui.colored_label(amber(),"Device-wide activity includes other processes and operations. Unknown coverage stays unavailable; eligible Perfetto activity is a reconstructed estimate.");}
-        if series.samples.iter().all(|s|s.values[0].is_none()) {ui.label("No measured windows: coverage is unknown or analysis duration is zero.");}
+        if series.samples.iter().all(|s|s.values[0].is_none()) {ui.label(if intervals && series.activity_known {"No positive-duration intervals of this kind in the analysis range."}else{"No measured samples: coverage is unknown or analysis duration is zero."});}
         let bounds_command=self.selection.bounds_command.take();let auto=std::mem::take(&mut self.selection.auto_bounds);
         let selecting=self.selection.enabled;let mut drag=self.selection.drag_start;let mut selected=None;
         let visible_clip=ui.clip_rect();
-        let response=studio_plot("window-series").height(330.).x_axis_label("Time-window center (ms)").y_axis_label(metric.label())
+        let response=studio_plot("window-series").height(330.).x_axis_label(if intervals {"Interval center (ms)"}else{"Time-window center (ms)"}).y_axis_label(metric.label())
             .legend(Legend::default()).allow_drag(!selecting).allow_boxed_zoom(!selecting)
             .x_axis_formatter(|m,_|compact_tick(m.value)).y_axis_formatter(|m,_|compact_tick(m.value))
             .show(ui,|plot| {
@@ -57,11 +66,11 @@ impl StudioApp {
                 for (direction,label,color) in [(0,"Total",muted()),(1,"Read",accent()),(2,"Write",green())] {
                     let points:Vec<_>=series.samples.iter().filter_map(|s|s.values[direction].map(|v|[(s.start_ns-origin) as f64/1e6+(s.end_ns-s.start_ns) as f64/2e6,v])).collect();
                     if direction==0 {self.render_qa.point_target=points.iter().map(|p|plot.screen_from_plot(egui_plot::PlotPoint::new(p[0],p[1]))).find(|pos|visible_clip.shrink(4.).contains(*pos));}
-                    if !points.is_empty() {plot.line(Line::new(label,points.clone()).color(color));plot.points(Points::new(label,points).radius(3.).color(color));}
+                    if !points.is_empty() {if !intervals {plot.line(Line::new(label,points.clone()).color(color));}plot.points(Points::new(label,points).radius(3.).color(color));}
                 }
                 if let Some(selected)=self.selection.summary.as_ref().and_then(|s|s.window_series.as_ref()) {
                     let points:Vec<_>=selected.samples.iter().filter_map(|s|s.values[0].map(|v|[(s.start_ns-origin) as f64/1e6+(s.end_ns-s.start_ns) as f64/2e6,v])).collect();
-                    plot.points(Points::new("Selected windows",points).radius(6.).filled(false).color(amber()));
+                    plot.points(Points::new(if intervals {"Selected intervals"}else{"Selected windows"},points).radius(6.).filled(false).color(amber()));
                 }
                 if selecting && plot.response().drag_started() && let Some(pos)=plot.response().interact_pointer_pos() {let p=plot.plot_from_screen(pos-plot.response().drag_delta());drag=Some([p.x,p.y]);}
                 if selecting && let Some(start)=drag && let Some(pos)=plot.response().interact_pointer_pos() {
@@ -86,6 +95,31 @@ mod window_summary_tests {
     use super::*;
     use android_ebpf_protocol::{BlockIssue,BlockComplete,StorageEvent};
     use crate::window_series::WindowMetric;
+    #[test]
+    fn interval_summary_weights_runs_once_and_keeps_other_process_activity_and_empty_idle_selection() {
+        let mut engine=AnalysisEngine::new();let mut activity=crate::host_bw::ActivityTimeline::default();
+        for (id,pid,a,b) in [(1,1,0,2),(2,2,1,5),(3,1,7,8),(4,1,7,8)] {
+            engine.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:a*1_000_000,request_id:id,device_major:8,device_minor:0,sector:id*8,sectors:2,bytes:1024,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"same".into()}));
+            if let Some(io)=engine.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:b*1_000_000,request_id:id,device_major:8,device_minor:0,status:0})) {activity.observe(&io);}
+        }
+        activity.verified_complete=true;
+        let context=||BandwidthContext{activity:Arc::new(activity.clone()),range:(0,10_000_000),devices:vec![(8,0)]};
+        let all_request=SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]};
+        let axis=AxisMetric::Window(WindowMetric::BusyRunMs);
+        let all=compute_graph_selection(&engine,all_request,AxisMetric::TimeMs,axis,0,context(),100);
+        assert_eq!(all.metric.total.values,[1.,5.]);assert_eq!(all.keys.len(),4);assert_eq!(all.host_bw.as_ref().unwrap().duration_ns,10_000_000);
+        let filtered=engine.select_completed(|io|io.issue.pid==1);
+        let f=compute_graph_selection(&filtered,all_request,AxisMetric::TimeMs,axis,0,context(),100);
+        assert_eq!(f.metric.total.values,[1.,5.]);assert_eq!(f.keys.len(),3);assert_eq!(f.host_bw.as_ref().unwrap().busy_ns,Some(6_000_000));
+        let selected=compute_graph_selection(&engine,SelectionRequest::Rectangle{min:[2.5,0.],max:[2.5,10.]},AxisMetric::TimeMs,axis,0,context(),100);
+        assert_eq!(selected.metric.total.values,[5.]);assert_eq!(selected.keys.len(),2);assert_eq!(selected.host_bw.as_ref().unwrap().duration_ns,5_000_000);
+        let idle=compute_graph_selection(&engine,SelectionRequest::Rectangle{min:[6.,0.],max:[6.,10.]},AxisMetric::TimeMs,AxisMetric::Window(WindowMetric::IdleGapMs),0,context(),100);
+        assert_eq!(idle.metric.total.values,[2.]);assert!(idle.keys.is_empty());assert_eq!(idle.host_bw.as_ref().unwrap().idle_ns,Some(2_000_000));assert!(idle.bounds.is_some());
+        let path=std::env::temp_dir().join(format!("interval-{}.csv",uuid::Uuid::new_v4()));write_graph_summary_csv(&path,&idle).unwrap();
+        let records=csv::Reader::from_path(&path).unwrap().records().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(records.iter().any(|r|&r[0]=="activity_interval"&&&r[2]=="Total"&&&r[3]=="5000000"&&&r[4]=="7000000"&&&r[5]=="2"));
+        assert!(records.iter().any(|r|&r[0]=="histogram"&&&r[6]=="continuous intervals"));std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn window_summary_counts_windows_once_and_selection_snaps_to_the_drawn_window() {
         let mut engine=AnalysisEngine::new();let mut activity=crate::host_bw::ActivityTimeline::default();
