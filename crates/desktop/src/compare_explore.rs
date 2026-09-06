@@ -613,13 +613,15 @@ fn compare_summary_ui(
                 .insert(format!("Compare {name}"), r.rect.center());
             if qa.output.is_some()
                 && qa.input_step == 0
+                && qa.frames >= 28
+                && !ui.clip_rect().contains(r.rect.center())
                 && std::env::var("ANDROID_EBPF_QA_GESTURE").is_ok_and(|s| {
                     matches!(
-                        s.as_str(),
-                        "compare-files"
-                            | "compare-processes"
-                            | "compare-distributions"
-                            | "compare-details"
+                        (s.as_str(), name),
+                        ("compare-files", "Files")
+                            | ("compare-processes", "Processes")
+                            | ("compare-distributions", "Distributions")
+                            | ("compare-details", "I/O details")
                     )
                 })
             {
@@ -1025,6 +1027,19 @@ fn compare_pane(
         }
         if let Some(point) = v.render_qa.point_target {
             qa.inspector_buttons.insert(format!("{label} point"), point);
+            // The native QA click must target visible content. At high scale the
+            // narrow layout scrolls; an off-screen point cannot receive a click.
+            if qa.output.is_some()
+                && qa.input_step == 0
+                && label == "Baseline"
+                && !ui.clip_rect().contains(point)
+                && std::env::var("ANDROID_EBPF_QA_GESTURE").is_ok_and(|s| s == "compare-point")
+            {
+                ui.scroll_to_rect(
+                    egui::Rect::from_center_size(point, egui::vec2(12.0, 12.0)),
+                    None,
+                );
+            }
         }
         if v.selection.pending.is_some() {
             ui.label("Selection calculating…");
