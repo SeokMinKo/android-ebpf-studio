@@ -446,6 +446,7 @@ pub struct StudioApp {
     analyzer: AnalysisEngine,
     query: AnalysisFilter,
     disk_stats: Vec<WireRecord>,
+    disk_stats_view: DiskStatsView,
     filtered: Option<AnalysisEngine>,
     filtered_generation: u64,
     trend_view: Option<(u64, TrendData)>,
@@ -528,6 +529,7 @@ impl Default for StudioApp {
             diagnostics: VecDeque::new(),
             analyzer: AnalysisEngine::new(),
             disk_stats: Vec::new(),
+            disk_stats_view: DiskStatsView::default(),
             query: AnalysisFilter::default(),
             filtered: None,
             filtered_generation: u64::MAX,
@@ -890,6 +892,7 @@ impl StudioApp {
         self.loss_status = loaded.loss_status;
         self.source_info = loaded.source_info;
         self.disk_stats = loaded.disk_stats;
+        self.disk_stats_view = DiskStatsView::default();
         self.analyzer = loaded.engine;
         self.analysis_generation = self.analysis_generation.wrapping_add(1);
         self.explorer_view = None;
@@ -1273,6 +1276,7 @@ impl StudioApp {
         self.loss_status = "Loss counters not reported".into();
         self.source_info.clear();
         self.disk_stats.clear();
+        self.disk_stats_view = DiskStatsView::default();
         self.analyzer = AnalysisEngine::new();
         self.analysis_generation = self.analysis_generation.wrapping_add(1);
         self.explorer_view = None;
@@ -3274,7 +3278,9 @@ impl eframe::App for StudioApp {
         if self.close_after_capture && !self.is_running() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if self.is_running() || !self.rx.is_empty() {
+        if !self.rx.is_empty() {
+            ui.ctx().request_repaint();
+        } else if self.is_running() {
             ui.ctx().request_repaint_after(Duration::from_millis(33));
         }
         if !self.is_running()
@@ -3595,7 +3601,9 @@ impl eframe::App for StudioApp {
                 });
             });
 
-        if self.page == Page::Explore {
+        if self.page == Page::Explore
+            && !matches!(self.phase, CapturePhase::Stopping | CapturePhase::Analyzing)
+        {
             self.selection_panel(ui);
         }
         egui::CentralPanel::default()
@@ -3605,38 +3613,19 @@ impl eframe::App for StudioApp {
                     .inner_margin(egui::Margin::same(14)),
             )
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().id_salt(format!("analysis-page-{:?}-{:?}",self.page,if self.page == Page::Investigate {self.selected_pipeline_request} else {None})).show(ui, |ui| {
-                    if matches!(self.page,Page::Overview|Page::Explore|Page::Investigate){self.reanalysis_ui(ui);}
-                    if self.session_path.is_none() && self.analyzer.completed_ios().is_empty() && self.disk_stats.is_empty() && self.page == Page::Overview {
-                        section_header(ui, "Connect. Start. Stop. Analyze.", "Automatic storage tracing for your Android phone");
-                        ui.add_space(18.0);
-                        ui.label("1. Connect the phone with USB debugging enabled and approve the phone's authorization prompt.");
-                        ui.label("2. Select a target if more than one phone is connected, then choose Start analysis.");
-                        ui.label("3. Run the workload on your phone. Stop & analyze saves the session and opens the results.");
-                        ui.add_space(18.0);
-                        info_banner(ui, "Root and kernel capabilities are checked at every Start. The app prepares tracing automatically and explains FilePath confidence or unsupported metrics. No mapping file or kernel offset is required.");
-                        if self.is_running() { ui.spinner(); ui.label(&self.status); }
-                        return;
-                    }
-                    if matches!(self.page,Page::Overview|Page::Explore|Page::Investigate){self.filter_ui(ui);}
-                    if self.phase==CapturePhase::Error && !self.is_running() {self.perfetto_recovery_ui(ui);}
-                    if !self.is_running() && self.source_info.iter().any(|r| matches!(r,WireRecord::SourceInfo{source,..} if source=="perfetto")) {
-                        ui.small("Perfetto block layer · timing matches are Probable; PID/name metadata are snapshot candidates. Missing timing stays unmeasured. FilePath is Unresolved. Device layers may count the same physical I/O more than once.");
-                    }
-                    self.rebuild_filtered();
-
-                    match self.page {
-                        Page::Overview => { if !self.analyzer.completed_ios().is_empty() {self.summary_ui(ui);} else if self.perfetto_pending() { info_banner(ui,"Perfetto is recording. Individual I/O counts, latency and loss statistics will be available after Stop. Device counters below are a separate live source."); if !self.disk_stats.is_empty(){self.diskstats_ui(ui);} } else if self.disk_stats.is_empty() { self.summary_ui(ui); } else { self.diskstats_ui(ui); } },
-                        Page::Investigate => self.investigate_ui(ui),
-                        Page::Explore => self.explorer_ui(ui),
-                        Page::Compare => self.compare_ui(ui),
-                        Page::Diagnostics => {self.diagnostics_ui(ui); ui.collapsing("Capture source & quality evidence",|ui| {for record in &self.source_info {ui.label(serde_json::to_string_pretty(record).unwrap_or_default());}});},
-                    }
-                    if self.page==Page::Diagnostics && let Some(report) = &self.preflight {
-                        ui.add_space(14.0);
-                        capability_panel(ui, report);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .id_salt(format!(
+                        "analysis-page-{:?}-{:?}",
+                        self.page,
+                        if self.page == Page::Investigate {
+                            self.selected_pipeline_request
+                        } else {
+                            None
+                        }
+                    ))
+                    .show(ui, |ui| {
+                        self.analysis_page_ui(ui);
+                    });
             });
         self.render_qa_tick(ui.ctx());
         self.performance.observe_ui_update(ui_started.elapsed());

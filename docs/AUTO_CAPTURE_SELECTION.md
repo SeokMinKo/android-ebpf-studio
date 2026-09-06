@@ -1,10 +1,13 @@
 # Automatic capture and graph selection — local build, 2026-09-06
 
-This extends the existing v0.8.1 attribution implementation. It is not an upstream release. The working checkout is `main` at `bb1bb66`, with previously uncommitted attribution changes preserved. Historical branch names in earlier handoff documents are not the current branch.
+This extends the existing v0.8.1 attribution implementation. Adaptive capture,
+Compare selection and non-root Perfetto support were merged in PR #9. The
+distribution build manifest identifies its source commit and file hashes;
+historical branch names below are not checkout instructions.
 
 ## User flow
 
-Connect a rooted Android phone and approve USB debugging. With one authorized device the target is selected automatically; with multiple devices choose one. Start analysis performs root/capability discovery, prepares the collector and starts logging. Stop & analyze drains output, flushes the session and opens Overview. No file picker or mapping configuration is part of capture. Open session and Export CSV are secondary operations.
+Connect an Android phone and approve USB debugging. With one authorized device the target is selected automatically; with multiple devices choose one. Start analysis performs root/capability discovery, prepares the collector and starts logging. Root-capable environments use supported eBPF adapters; non-root environments can use supported Perfetto block events. Unsupported tracing falls back to explicitly labelled device counters. Stop & analyze drains output, flushes the session and opens Overview. No file picker or mapping configuration is part of capture. Open session and Export CSV are secondary operations.
 
 Preparing, Recording, Stopping, Analyzing, Complete and Error are distinct. A recording cannot restart until the writer finishes. Closing the window during capture asks the collector to stop and waits for finalization. ADB operations have timeouts; a silent collector is terminated after a readiness deadline. Disk write/backlog failures stop capture with partial-data diagnostics. Real device disconnect, disk-full and shutdown recovery still require target acceptance.
 
@@ -24,18 +27,18 @@ Request identity in UI selection/detail is `(opaque request ID, issue timestamp,
 
 ## Definitions and performance boundaries
 
-- Common filters apply to request-oriented Overview, Explore and Investigate: completion time, PID/TID, process name, file/inode, device, R/W and FilePath confidence. Compare and capture diagnostics remain session-wide. Legacy file/syscall evidence tables retain session context; they are not a per-block attributed-byte ledger.
+- Common filters apply to request-oriented Overview, Explore and Investigate: completion time, PID/TID, process name, file/inode, device, R/W and FilePath confidence. Compare has separate shared and per-session filters; capture diagnostics retain session-wide context. Legacy file/syscall evidence tables retain session context; they are not a per-block attributed-byte ledger.
 - FilePath coverage is by retained **completed block-request count**, not bytes, syscall count or all physical I/O. Exact requires direct association plus a path; Probable preserves uncertainty; missing paths remain Unresolved even if inode identity is exact.
 - Total latency is completion minus insert, or issue when insert is absent. Queue latency requires an insert observation; device latency is issue to completion. Missing components remain unavailable.
 - Throughput in the selection panel is selected directional bytes divided by the same earliest-start/latest-completion interval, in MiB/s. Zero duration is unavailable. Percentiles use nearest rank over selected request latencies.
 - Random/sequential classification uses the original block issue stream, separately per device and operation. A next sector equal to the previous request's end sector is sequential; first observations are Unknown. Filtering does not reclassify neighbors.
 - Overview trend bins are fixed one-second completion-time bins; partial terminal bins are not extrapolated. The log2 latency distribution and its units are shown. No aggregation across stacked diskstats devices is performed.
-- The existing engine retains at most 100,000 completed detail records, evicting the oldest 10% at a time. Raw NDJSON remains on disk. This is not arbitrary-size full-session interactive analysis. Loading a large session also materializes raw events before analysis. Time-range replay/paging for earlier evicted requests remains future work.
+- The engine retains at most 100,000 completed detail records, evicting the oldest 10% at a time. Raw NDJSON remains on disk. Streaming time-range replay can restore older detail within that bound (see below). This is not arbitrary-size full-session interactive analysis; coverage shown for retained detail is not whole-session attribution coverage after eviction.
 - Explorer samples at most 12,000 ordinary points or 2,000 graph-dependent points and labels the displayed/retained count. File/graph correlation costs depend on actual evidence density. A 5-second target was measured for the documented fixtures, not guaranteed for every session, machine or kernel.
 
 ## Verification boundaries
 
-Host tests, fake-ADB transport tests, native-rendered screenshots and archival physical-session replay are separate evidence classes. No physical phone was available for this build. Fresh Start/Stop capture, two-device adaptation, reboot/reconnect, verifier attach and known read/write workload correctness are unverified. The old physical session demonstrates replay/attribution compatibility, not new collector correctness. Renderer-injected pointer input is not Windows accessibility or human keyboard acceptance. System-theme persistence and all tooltip/axis/filter combinations still need broader interactive acceptance.
+Host tests, fake-ADB transport tests, native-rendered screenshots and archival physical-session replay are separate evidence classes. Native GUI Start/Stop on one non-root phone passed, including verified write/fsync/direct-read workloads; see [PERFETTO_BLOCK_IO.md](PERFETTO_BLOCK_IO.md). Fresh root verifier/attach and FilePath workload acceptance, two-device adaptation and physical reconnect remain unverified. The old rooted physical session demonstrates replay/attribution compatibility, not new collector correctness. Renderer-injected pointer input is not Windows accessibility or human keyboard acceptance. System-theme persistence and all tooltip/axis/filter combinations still need broader interactive acceptance.
 
 ## Manual Explorer axis ranges
 
