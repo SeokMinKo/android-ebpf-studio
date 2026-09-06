@@ -1,0 +1,19 @@
+# Completion CPU checkpoint — Goal remains active
+
+Commitcb71a36 already contains verified Timeline/Gantt. This continuation retains completion CPU from native KernelEvent and Perfetto raw bundle through schema7 BlockComplete.cpu, stored sessions, graph/table I/O CSV and linked Summary categories. Missing old fields deserialize asNone; CPU0 remains a measured value. Native kernel layout is unchanged: the existing completion event already contains the actual completion probe CPU. Android agent decoding now preserves it.
+
+Explore preset26 renders issue and completion at their own device/CPU and timestamp, including explicitly unmeasured CPU lanes. Issue-CPU analysis filtering remains unchanged. Right Summary counts unique requests, displays latency distributions and separate Issue CPU/Completion CPU category pies. Per-phase CPU/time CSV rows preserve both endpoints. Cross-page CPU membership retains a request when either endpoint belongs to the visible page.
+
+Validation:
+
+- Protocol regression: legacy absent CPU, measured CPU0 serialization, issueCPU2/completionCPU7 correlation.
+- Projection regression: paired and unpaired completions retain their own CPU; absent completion CPU never borrows issue CPU.
+- Timeline regression: phase CPU lanes, unknown/device separation, cross-page endpoint visibility and completion-endpoint rectangle selection.
+- Actual saved Samsung raw trace reanalyzed through the native GUI and saved as a new session:8294 I/O, device8:0=8247. `work/verify_cpu.py` independently reads protobuf fields directly from the original.pftrace and verifies every phase CPU/time, full-resolution lane coordinate, category count/payload, percentile/histogram and I/O CSV. Six native cases pass: all8247, Read7415, completion-point1, issue-point1, area556 and old serialized session8247 unmeasured completion CPUs. In the real trace, completionCPU2=2099,CPU3=1966,CPU4=2153,CPU7=2029. CPU Summary pie and main graph actual renderer images were visually reviewed.
+- `work/compare_timeline_upas.py` executes actual uPAS Core Timeline preparation1813-1826 on known issue/completion CPU pairs. Output `cpu-upas-comparison.json` agrees on separate phase time/CPU; no issue-CPU substitution.
+- Desktop/protocol/types all-target tests passed (desktop lib85 passed,2 environment-dependent ignored), Windows-compatible Clippy-D warnings passed. Android aarch64 agent all-target check/Clippy, test executable cross-build and Release build passed using NDKr29/API35. `cpu-agent-build.json` records the isolated artifact SHA256. Android test binaries were built but not executed.
+- A new physical capture attempt remained Ready and timed out; `adb devices -l` returned an empty list. Evidence `outputs/device-validation/completion-cpu-capture.*`. No fresh CPU-enabled physical capture or Android test execution is claimed. Earlier physical Perfetto capture→stop→save→reload evidence remains valid for the earlier build; root eBPF probe acceptance was already unverified because the earlier Samsung phone lacked root/su.
+
+Helpers: `work/build_android.py`, `render_cpu.py`, `verify_cpu.py`, `cpu_summary_render.py`. Native/raw evidence lives under `outputs/graph-summary-validation/cpu-*`. Most other Rust file changes in this continuation only initialize the newly optional field toNone in existing fixtures; simulator likewise makes no fabricated completion CPU claim.
+
+Remaining full Goal work: remaining feature/acquisition audit (hardware queue identity, I/O wait, Overall/custom/raw-log gaps), complete43-feature real/synthetic/empty/single/missing/large matrix and remaining equivalent-input comparisons, baseline/new performance and memory, original source/install manifest recheck, compatible desktop Release/agent/object backup/install and actual installed launch. Continue autonomously; current device absence does not block offline implementation. No overall completion or feature-installation claim.

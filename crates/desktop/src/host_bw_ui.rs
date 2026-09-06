@@ -103,7 +103,7 @@ mod bandwidth_ui_tests {
     fn filter_area_reset_and_csv_share_explicit_clock_and_device_wide_activity() {
         let mut app=StudioApp::default();
         for (id,pid,a,b) in [(1,10,0,2),(2,11,2,8),(3,10,9,10)] {
-            for event in [StorageEvent::BlockIssue(BlockIssue{ts_ns:a*1_000_000_000,request_id:id,device_major:8,device_minor:0,sector:id*8,sectors:2048,bytes:1_048_576,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"shared-name".into()}),StorageEvent::BlockComplete(BlockComplete{ts_ns:b*1_000_000_000,request_id:id,device_major:8,device_minor:0,status:0})] {
+            for event in [StorageEvent::BlockIssue(BlockIssue{ts_ns:a*1_000_000_000,request_id:id,device_major:8,device_minor:0,sector:id*8,sectors:2048,bytes:1_048_576,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"shared-name".into()}),StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:b*1_000_000_000,request_id:id,device_major:8,device_minor:0,status:0})] {
                 if let Some(io)=app.analyzer.ingest(event) {Arc::make_mut(&mut app.activity).observe(&io);}
             }
         }

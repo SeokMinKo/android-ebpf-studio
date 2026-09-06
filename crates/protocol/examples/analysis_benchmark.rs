@@ -36,6 +36,7 @@ fn main() {
             comm: format!("bench-{}", request_id % 64),
         }));
         engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
             ts_ns: issue_ts.saturating_add(latency),
             request_id,
             device_major: 8,

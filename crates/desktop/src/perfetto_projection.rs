@@ -202,6 +202,7 @@ impl<'a> Projection<'a> {
             insert,
             issue,
             completion: BlockComplete {
+                cpu: raw.cpu,
                 ts_ns: o.timestamp_ns,
                 request_id: o.completion_record,
                 device_major: major,

@@ -15,7 +15,7 @@ mod footprint_tests {
         let mut engine=AnalysisEngine::new();
         for (id,pid,minor) in [(1,10,0),(2,11,0),(3,10,1)] {
             engine.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:id*1_000_000,request_id:id,device_major:8,device_minor:minor,sector:100,sectors:8,bytes:4096,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"same-name".into()}));
-            engine.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:id*1_000_000+500_000,request_id:id,device_major:8,device_minor:minor,status:0}));
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:id*1_000_000+500_000,request_id:id,device_major:8,device_minor:minor,status:0}));
         }
         engine
     }

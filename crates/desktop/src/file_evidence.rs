@@ -134,7 +134,7 @@ mod file_scope_tests {
                 comm: format!("p{pid}"),
             }));
             app.analyzer
-                .ingest(StorageEvent::BlockComplete(BlockComplete {
+                .ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                     ts_ns: 200,
                     request_id: pid as u64,
                     device_major: 8,

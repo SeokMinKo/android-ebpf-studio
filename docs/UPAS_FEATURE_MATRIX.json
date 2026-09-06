@@ -48,7 +48,7 @@
     ],
     "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Command, size class, access, device, issue CPU, device+comm+PID, file candidate and layer memberships; count or Read+Write payload share; top4+remainder pie, complete pageable table and CSV",
+    "formula": "Command, size class, access, device, issue CPU, completion CPU, device+comm+PID, file candidate and layer memberships; count or Read+Write payload share; top4+remainder pie, complete pageable table and CSV",
     "target_ui": "Cohort categories in linked Summary",
     "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
     "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
@@ -92,12 +92,12 @@
       "process",
       "send_time"
     ],
-    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
+    "status": "implemented and independently verified issue/completion CPU acquisition and Timeline; physical new-capture acceptance and full sweep/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Measured issue CPU only, missing CPU excluded; filter requires measured issuer CPU. Completion CPU is not substituted",
-    "target_ui": "Explore Issue CPU preset + Summary CPU categories",
-    "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
-    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
+    "formula": "Each measured issue and completion timestamp has its independently measured CPU. Device/CPU lanes preserve unknown CPU separately. Analysis CPU filter remains issue CPU. Linked Summary uses request latency and separate Issue CPU/Completion CPU category counts/payload shares. Rectangle selects completion endpoints; either phase click selects one request.",
+    "target_ui": "Explore Issue / completion CPU timeline preset26; existing Issue CPU scatter remains preset11/axis16; right Summary categories and graph/table CSV",
+    "capture_changes": "Protocol schema7 adds serde-default optional BlockComplete.cpu. Native KernelEvent.cpu already records completion probe CPU; agent now retains it. Perfetto projection retains raw completion bundle CPU independent of issue correlation. Old serialized sessions remain None; explicit saved-raw reanalysis recovers original CPU. KernelEvent ABI/probe format unchanged.",
+    "verification": "Native saved Samsung raw reanalysis8294 I/O; device8:0=8247; independent Python protobuf parser verifies all completion/issue CPU, timestamp/lane and CSV. Native read7415, point1, issue-point1, area556, old-session unmeasured8247 and Summary CPU pie passed. uPAS1813-1826 actual AST matches separate phase CPU/time semantics. Android agent check/clippy/release/test-binary cross-build passed; ADB currently empty, physical execution pending. See UPAS_CPU_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

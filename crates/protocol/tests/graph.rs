@@ -186,6 +186,7 @@ fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
     }));
     let warmup = engine
         .ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
             ts_ns: 113,
             request_id: 70,
             device_major: 259,
@@ -227,6 +228,7 @@ fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
     }));
     let completed = engine
         .ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
             ts_ns: 500,
             request_id: 77,
             device_major: 259,
@@ -294,6 +296,7 @@ fn extent_origin_keeps_exact_file_evidence_but_probable_request_lifetime() {
     }));
     let completed = engine
         .ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
             ts_ns: 200,
             request_id: 91,
             device_major: 259,

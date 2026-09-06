@@ -31,7 +31,7 @@ mod page_purpose_tests {
                 comm: format!("process-{pid}"),
                 cpu: 0,
             }));
-            e.ingest(StorageEvent::BlockComplete(BlockComplete {
+            e.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                 ts_ns: start + latency,
                 request_id: id,
                 device_major: 8,

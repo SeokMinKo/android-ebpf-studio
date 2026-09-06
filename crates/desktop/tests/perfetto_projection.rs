@@ -36,6 +36,21 @@ fn fixture() -> DecodedTrace {
     }
 }
 #[test]
+fn completion_cpu_is_independent_of_issue_correlation_and_never_falls_back_to_issue_cpu() {
+    let mut trace = fixture();
+    let projected = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    assert_eq!(projected[0].issuer_cpu(), Some(2));
+    assert_eq!(projected[0].completion.cpu, Some(7));
+    assert_eq!(projected[1].issuer_cpu(), None);
+    assert_eq!(projected[1].completion.cpu, Some(7));
+    trace.events[1].cpu = None;
+    let missing = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    assert_eq!(missing[0].completion.cpu, None);
+    trace.events[1].cpu = Some(0);
+    let zero = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    assert_eq!(zero[0].completion.cpu, Some(0));
+}
+#[test]
 fn projected_issue_depth_uses_intervals_and_gaps_use_raw_device_event_order() {
     let mut trace = fixture();
     trace.events = vec![

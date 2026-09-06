@@ -251,6 +251,7 @@ impl SelectionSummary {
             ("Size class",format!("{:?}",io.size_class)),
             ("Device",format!("{}:{}",io.issue.device_major,io.issue.device_minor)),
             ("Issue CPU",identity_number(io.issuer_cpu())),
+            ("Completion CPU",identity_number(io.completion.cpu)),
             ("Process",format!("{}:{} / {} · PID {}",io.issue.device_major,io.issue.device_minor,io.issue.comm,identity_number(io.issuer_pid()))),
         ] {self.observe_category(dimension,label,io);}
         let start = io.start_timestamp();
@@ -631,7 +632,7 @@ mod selection_tests {
                 cpu: 0,
                 comm: "selection-fixture".into(),
             }));
-            engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                 ts_ns: id * 1_000_000 + 500_000,
                 request_id: id,
                 device_major: 8,

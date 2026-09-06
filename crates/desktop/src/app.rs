@@ -123,10 +123,11 @@ enum ExplorerPreset {
     ConnectedFootprint,
     CommandTimeline,
     RequestGantt,
+    CpuEvents,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 26] = [
+    const ALL: [Self; 27] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -153,6 +154,7 @@ impl ExplorerPreset {
         Self::ConnectedFootprint,
         Self::CommandTimeline,
         Self::RequestGantt,
+        Self::CpuEvents,
     ];
 
     fn label(self) -> &'static str {
@@ -183,6 +185,7 @@ impl ExplorerPreset {
             Self::ConnectedFootprint => "Connected LBA footprint",
             Self::CommandTimeline => "Block command timeline",
             Self::RequestGantt => "Request Gantt",
+            Self::CpuEvents => "Issue / completion CPU timeline",
         }
     }
 
@@ -216,6 +219,11 @@ impl ExplorerPreset {
             Self::CommandTimeline => Some((
                 AxisMetric::TimeMs,
                 AxisMetric::Timeline(TimelineMode::Commands),
+                GroupBy::Direction,
+            )),
+            Self::CpuEvents => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Timeline(TimelineMode::Cpus),
                 GroupBy::Direction,
             )),
             Self::RequestGantt => Some((

@@ -1,6 +1,6 @@
 # Active goal checkpoint — not overall completion
 
-Latest continuation (2026-09-07): see [UPAS_TIMELINE_CHECKPOINT.md](UPAS_TIMELINE_CHECKPOINT.md). Block command Timeline and paginated request Gantt now link to the existing latency Summary. Native real-trace selection/zoom, all207 pages, missing timing, raw CSV/statistics and equivalent uPAS preparation are verified. Previous connected Footprint commit61319e0 is retained. Goal remains active: remaining feature/acquisition audit, full43 matrix/performance and Release backup/install/installed launch are pending.
+Latest continuation (2026-09-07): see [UPAS_CPU_CHECKPOINT.md](UPAS_CPU_CHECKPOINT.md). Completion CPU now survives native/Perfetto capture and schema7 storage, with separate issue/completion CPU Timeline, linked Summary categories and CSV. Raw protobuf/native6-case oracle and Android cross-build/lint passed. Timeline/Gantt commitcb71a36 is retained. ADB currently lists no devices; fresh physical acceptance is pending. Goal remains active: remaining feature/acquisition audit, full43 matrix/performance and Release installation/installed launch.
 
 Read the full objective at `C:/Users/AEBIZTRIP5.pub/.codex/attachments/700d9658-a88e-4c81-bb21-c455bd9eb2b2/goal-objective.md`. User subsequently clarified that Summary means the **existing Explore right-hand Summary inspector linked to the main graph**, not Overview or a separate histogram/pie catalogue. This supersedes the initial topology interpretation. Continue all remaining objective work autonomously. Goal remains active.
 

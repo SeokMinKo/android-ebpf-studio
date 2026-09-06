@@ -22,7 +22,7 @@ mod filter_input_tests {
         let mut app=StudioApp::default();
         for pid in [10,20] {
             app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:pid as u64*1000,request_id:pid as u64,device_major:8,device_minor:0,sector:0,sectors:8,bytes:4096,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"same".into()}));
-            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:pid as u64*1000+100,request_id:pid as u64,device_major:8,device_minor:0,status:0}));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:pid as u64*1000+100,request_id:pid as u64,device_major:8,device_minor:0,status:0}));
         }
         app.render_qa.output=Some(PathBuf::from("unused-test-region-marker"));
         let ctx=egui::Context::default();let mut time=0.;
@@ -692,7 +692,7 @@ mod query_regressions {
                 cpu: 0,
                 comm: format!("worker{id}"),
             }));
-            engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                 ts_ns: id * 1_000_000 + 100_000,
                 request_id: id,
                 device_major: 8,

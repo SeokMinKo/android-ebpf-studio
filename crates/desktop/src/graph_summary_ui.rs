@@ -329,6 +329,10 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
     if let Some(t)=&s.timeline {
         writer.write_record(["timeline_definition",t.mode.label(),"all","","","Issue/complete events, request lifetime only when issue measured. Rectangle selects completion endpoints and shown rows. Latency histogram excludes missing duration; request/byte totals retain unpaired completions.","timestamps ns; one unique request per row export"])?;
         for p in &t.points {writer.write_record(["timeline_request",t.mode.label(),&format!("{} / {:?}",t.lanes[p.row-1],p.key),&p.start_ns.map_or("unavailable".into(),|v|v.to_string()),&p.end_ns.to_string(),operation_label(p.operation),"issue/complete ns"])?;}
+        if t.mode==TimelineMode::Cpus {for p in &t.points {
+            if let (Some(row),Some(ts))=(p.issue_row,p.start_ns) {writer.write_record(["timeline_cpu_event","Issue",&format!("{} / {:?}",t.lanes[row-1],p.key),&ts.to_string(),"",operation_label(p.operation),"timestamp ns; measured CPU lane or explicitly unmeasured"])?;}
+            writer.write_record(["timeline_cpu_event","Complete",&format!("{} / {:?}",t.lanes[p.row-1],p.key),&p.end_ns.to_string(),"",operation_label(p.operation),"timestamp ns; measured CPU lane or explicitly unmeasured"])?;
+        }}
     }
     if let Some(b)=&s.host_bw {
         writer.write_record(["definition","Host BW","all",&b.start_ns.to_string(),&b.end_ns.to_string(),"Inclusive completion-counted full Read + Write payload; Discard/Flush/Other extents excluded; issue-to-completion activity union includes all operations and processes, clipped to range; multiple devices use any-device-active wall time","ns"])?;

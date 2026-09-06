@@ -1,12 +1,13 @@
 #[derive(Debug,Clone,Copy,PartialEq,Eq,serde::Serialize)]
-enum TimelineMode { Commands, Requests }
+enum TimelineMode { Commands, Requests, Cpus }
 impl TimelineMode {
-    fn label(self)->&'static str {match self {Self::Commands=>"Device / block command",Self::Requests=>"Request row"}}
+    fn label(self)->&'static str {match self {Self::Commands=>"Device / block command",Self::Requests=>"Request row",Self::Cpus=>"Device / observed CPU"}}
 }
 #[derive(Debug,Clone,serde::Serialize)]
 struct TimelinePoint {
     key:IoSelectionKey,
     row:usize,
+    issue_row:Option<usize>,
     start_ns:Option<u64>,
     end_ns:u64,
     operation:IoOperation,
@@ -19,7 +20,11 @@ struct TimelineView {
     lanes:Vec<String>,
     points:Vec<TimelinePoint>,
 }
-impl TimelinePoint {fn y(&self,mode:TimelineMode)->f64 {if mode==TimelineMode::Requests {-(self.row as f64)}else{self.row as f64}}}
+impl TimelinePoint {
+    fn y(&self,mode:TimelineMode)->f64 {if mode==TimelineMode::Requests {-(self.row as f64)}else{self.row as f64}}
+    fn issue_y(&self,mode:TimelineMode)->f64 {self.issue_row.map_or_else(||self.y(mode),|r|r as f64)}
+    fn on_page(&self,first:usize,last:usize)->bool {(first..=last).contains(&self.row)||self.issue_row.is_some_and(|r|(first..=last).contains(&r))}
+}
 #[cfg(test)]
 mod timeline_tests {
     use super::*;
@@ -28,7 +33,7 @@ mod timeline_tests {
         let mut source=AnalysisEngine::new();
         for (id,minor,a,b,op) in [(1,0,1,5,IoOperation::Read),(2,1,2,4,IoOperation::Read),(3,0,3,6,IoOperation::Write)] {
             source.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:a*1_000_000,request_id:id,device_major:8,device_minor:minor,sector:100,sectors:8,bytes:4096,operation:op,pid:1,tid:1,cpu:0,comm:"same".into()}));
-            source.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:b*1_000_000,request_id:id,device_major:8,device_minor:minor,status:0}));
+            source.ingest(StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:b*1_000_000,request_id:id,device_major:8,device_minor:minor,status:0}));
         }
         let mut engine=AnalysisEngine::new();
         for original in source.completed_ios() {
@@ -39,6 +44,19 @@ mod timeline_tests {
         engine
     }
     fn context()->BandwidthContext {BandwidthContext{activity:Arc::new(crate::host_bw::ActivityTimeline::default()),range:(0,7_000_000),devices:vec![(8,0),(8,1)]}}
+    #[test]
+    fn cpu_timeline_keeps_phase_cpus_and_unknown_lane_distinct_including_across_pages() {
+        let source=fixture();let mut engine=AnalysisEngine::new();
+        for original in source.completed_ios() {let mut io=original.clone();io.completion.cpu=match io.issue.request_id {1=>Some(7),2=>Some(0),_=>None};engine.ingest(StorageEvent::ObservedBlockCompletion(io));}
+        let view=build_timeline(&engine,TimelineMode::Cpus,0);
+        assert_eq!(view.lanes,["Device 8:0 / CPU 0","Device 8:0 / CPU 7","Device 8:0 / CPU unmeasured","Device 8:1 / CPU 0"]);
+        let p=&view.points[0];assert_eq!((p.issue_y(view.mode),p.y(view.mode)),(1.,2.));
+        assert_eq!(view.points[2].issue_row,None);assert_eq!(view.points[2].row,3);
+        let mut across=p.clone();across.issue_row=Some(1);across.row=41;
+        assert!(across.on_page(1,40));assert!(across.on_page(41,80));assert!(!across.on_page(81,120));
+        let s=compute_timeline_selection(&engine,SelectionRequest::Rectangle{min:[4.9,1.9],max:[5.1,2.1]},TimelineMode::Cpus,0,context());
+        assert_eq!(s.keys.len(),1);assert!(s.keys.contains(&p.key));assert_eq!(s.metric.total.values,[4.]);
+    }
     #[test]
     fn qa_preset_discards_old_axis_geometry_while_new_summary_is_loading() {
         let mut app=StudioApp::default();let point=egui::pos2(842_009.,-46_478_000_000.);
@@ -78,14 +96,19 @@ fn build_timeline(engine:&AnalysisEngine,mode:TimelineMode,origin:u64)->Timeline
     let mut ordered:Vec<_>=engine.completed_ios().iter().collect();
     ordered.sort_by_key(|io|(io.issue_timestamp().unwrap_or(io.completion.ts_ns),io.completion.ts_ns,selection_key(io)));
     let command_label=|io:&CompletedIo|format!("Device {}:{} / {}",io.issue.device_major,io.issue.device_minor,operation_label(io.issue.operation));
-    let lanes:Vec<String>=if mode==TimelineMode::Commands {ordered.iter().map(|io|command_label(io)).collect::<std::collections::BTreeSet<_>>().into_iter().collect()}else{(1..=ordered.len()).map(|i|format!("{i}")).collect()};
+    let cpu_label=|io:&CompletedIo,cpu:Option<u32>|format!("Device {}:{} / CPU {}",io.issue.device_major,io.issue.device_minor,cpu.map_or("unmeasured".into(),|n|n.to_string()));
+    let lanes:Vec<String>=match mode {
+        TimelineMode::Commands=>ordered.iter().map(|io|command_label(io)).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
+        TimelineMode::Requests=>(1..=ordered.len()).map(|i|format!("{i}")).collect(),
+        TimelineMode::Cpus=>ordered.iter().flat_map(|io|std::iter::once(cpu_label(io,io.completion.cpu)).chain(io.issue_timestamp().filter(|a|*a<=io.completion.ts_ns).map(|_|cpu_label(io,io.issuer_cpu())))).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
+    };
     let positions:BTreeMap<_,_>=lanes.iter().enumerate().map(|(i,s)|(s.clone(),i+1)).collect();
     let points=ordered.into_iter().enumerate().map(|(index,io)| {
         let start_ns=io.issue_timestamp().filter(|ts|*ts<=io.completion.ts_ns);
-        let tooltip=format!("{} · device {}:{}\n{}\nLBA [{}, {}) · {} bytes\nIssue: {} ns · Complete: {} ns\nTiming: {:?}\nSelect for Files / Processes / Investigate and I/O CSV",
+        let tooltip=format!("{} · device {}:{}\n{}\nLBA [{}, {}) · {} bytes\nIssue: {} ns · Complete: {} ns\nTiming: {:?}\nIssue CPU: {} · Completion CPU: {}\nSelect for Files / Processes / Investigate and I/O CSV",
             operation_label(io.issue.operation),io.issue.device_major,io.issue.device_minor,issuer_label(io.issuer_pid(),io.issuer_tid(),&io.issue.comm),
-            io.issue.sector,io.issue.sector.saturating_add(io.issue.sectors as u64),io.issue.bytes,start_ns.map_or("unmeasured".into(),|v|v.to_string()),io.completion.ts_ns,io.timing_confidence());
-        TimelinePoint {key:selection_key(io),row:if mode==TimelineMode::Commands {positions[&command_label(io)]}else{index+1},start_ns,end_ns:io.completion.ts_ns,operation:io.issue.operation,tooltip}
+            io.issue.sector,io.issue.sector.saturating_add(io.issue.sectors as u64),io.issue.bytes,start_ns.map_or("unmeasured".into(),|v|v.to_string()),io.completion.ts_ns,io.timing_confidence(),identity_number(io.issuer_cpu()),identity_number(io.completion.cpu));
+        TimelinePoint {key:selection_key(io),row:match mode {TimelineMode::Commands=>positions[&command_label(io)],TimelineMode::Requests=>index+1,TimelineMode::Cpus=>positions[&cpu_label(io,io.completion.cpu)]},issue_row:if mode==TimelineMode::Cpus {start_ns.map(|_|positions[&cpu_label(io,io.issuer_cpu())])}else{None},start_ns,end_ns:io.completion.ts_ns,operation:io.issue.operation,tooltip}
     }).collect();
     TimelineView {mode,origin,lanes,points}
 }
@@ -103,7 +126,7 @@ fn compute_timeline_selection(engine:&AnalysisEngine,request:SelectionRequest,mo
     for io in cohort.completed_ios() {result.metric.observe(io.issue.operation,io.device_latency_ns.map(|n|n as f64/1e6));}
     result.metric.finish();
     for p in &timeline.points {
-        let a=[p.start_ns.unwrap_or(p.end_ns).saturating_sub(origin) as f64/1e6,p.y(mode)];
+        let a=[p.start_ns.unwrap_or(p.end_ns).saturating_sub(origin) as f64/1e6,p.issue_y(mode)];
         let b=[p.end_ns.saturating_sub(origin) as f64/1e6,p.y(mode)];
         let bounds=result.bounds.get_or_insert_with(||egui_plot::PlotBounds::from_min_max(a,b));
         bounds.extend_with(&egui_plot::PlotPoint::new(a[0],a[1]));bounds.extend_with(&egui_plot::PlotPoint::new(b[0],b[1]));
@@ -115,6 +138,7 @@ impl StudioApp {
         self.axis_ranges_ui(ui);
         let Some(view)=self.selection.all_summary.as_ref().filter(|v|v.2==self.y_axis).and_then(|v|v.3.timeline.as_ref()) else {ui.spinner();ui.label("Building full-resolution timeline…");return;};
         let mode=view.mode;
+        if mode==TimelineMode::Cpus {ui.small("CPU is measured independently at issue and completion. Unmeasured CPU has its own lane. Analysis CPU filtering uses issue CPU, matching the block issuer filter.");}
         ui.small(format!("{} I/O · {} rows · {} issue timestamps unmeasured",view.points.len(),view.lanes.len(),view.points.iter().filter(|p|p.start_ns.is_none()).count()));
         ui.small("Hollow marker = measured issue; filled marker = completion. Gantt lines show observed request lifetime. Missing issue has only a completion marker. Rectangle selects completion endpoints; click a segment or endpoint for one I/O.");
         ui.small("Summary covers the full filtered timeline, independent of page/display stride. Its histogram/percentiles summarize measured device latency; missing latency is counted separately. Other observed layers remain available in Investigate.");
@@ -134,7 +158,7 @@ impl StudioApp {
         let page_changed=ui.data_mut(|d|d.get_temp::<usize>(id))!=Some(page);ui.data_mut(|d|d.insert_temp(id,page));
         let first=page*40+1;let last=((page+1)*40).min(view.lanes.len()).max(first);
         self.render_qa.lane_page=page;self.render_qa.lane_pages=pages;self.render_qa.lane_visible=view.lanes.iter().skip(page*40).take(40).cloned().collect();
-        let visible:Vec<_>=view.points.iter().filter(|p|p.row>=first&&p.row<=last).collect();
+        let visible:Vec<_>=view.points.iter().filter(|p|p.on_page(first,last)).collect();
         let operations=[IoOperation::Read,IoOperation::Write,IoOperation::Discard,IoOperation::Flush,IoOperation::Other];
         let mut drawn=Vec::new();
         for op in operations {let group:Vec<_>=visible.iter().copied().filter(|p|p.operation==op).collect();let stride=group.len().div_ceil(1500).max(1);drawn.extend(group.into_iter().step_by(stride));}
@@ -164,9 +188,12 @@ impl StudioApp {
                 }
                 self.render_qa.plot_rect=Some(*plot.transform().frame());self.selection.current_bounds=Some(plot.plot_bounds());
                 self.render_qa.point_target=drawn.iter().map(|p|plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(p.end_ns),p.y(mode)))).find(|p|visible_clip.shrink(4.).contains(*p));
+                if std::env::var_os("ANDROID_EBPF_QA_ISSUE_POINT").is_some() {
+                    self.render_qa.point_target=drawn.iter().filter_map(|p|p.start_ns.map(|a|plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(a),p.issue_y(mode))))).find(|p|plot.transform().frame().shrink(3.).contains(*p)&&visible_clip.contains(*p));
+                }
                 if std::env::var("ANDROID_EBPF_QA_SEGMENT_POINT").is_ok() {
                     self.render_qa.point_target=drawn.iter().find_map(|p|p.start_ns.and_then(|a|{
-                        let a=plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(a),p.y(mode)));let b=plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(p.end_ns),p.y(mode)));
+                        let a=plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(a),p.issue_y(mode)));let b=plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(p.end_ns),p.y(mode)));
                         (a.distance(b)>40.).then_some(a.lerp(b,0.5))
                     }));
                 }
@@ -175,7 +202,7 @@ impl StudioApp {
                     if view.mode==TimelineMode::Requests {for p in &group {if let Some(a)=p.start_ns {
                         plot.line(Line::new("",vec![[absolute(a),p.y(mode)],[absolute(p.end_ns),p.y(mode)]]).allow_hover(false).color(color).width(3.));
                     }}}
-                    plot.points(Points::new(format!("{} issue",operation_label(op)),group.iter().filter_map(|p|p.start_ns.map(|a|[absolute(a),p.y(mode)])).collect::<Vec<_>>()).filled(false).radius(3.5).color(color));
+                    plot.points(Points::new(format!("{} issue",operation_label(op)),group.iter().filter_map(|p|p.start_ns.map(|a|[absolute(a),p.issue_y(mode)])).collect::<Vec<_>>()).filled(false).radius(3.5).color(color));
                     plot.points(Points::new(format!("{} complete",operation_label(op)),group.iter().map(|p|[absolute(p.end_ns),p.y(mode)]).collect::<Vec<_>>()).radius(2.5).color(color));
                 }
                 if let Some(s)=&self.selection.summary {plot.points(Points::new("Selected",visible.iter().filter(|p|s.keys.contains(&p.key)).map(|p|[absolute(p.end_ns),p.y(mode)]).collect::<Vec<_>>()).allow_hover(false).filled(false).radius(6.).color(amber()));}
@@ -184,7 +211,7 @@ impl StudioApp {
                     selected=visible.iter().filter_map(|p|{
                         let b=plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(p.end_ns),p.y(mode)));
                         let distance=if let Some(a)=p.start_ns {
-                            let a=plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(a),p.y(mode)));
+                            let a=plot.screen_from_plot(egui_plot::PlotPoint::new(absolute(a),p.issue_y(mode)));
                             if view.mode==TimelineMode::Requests {egui::pos2(screen.x.clamp(a.x.min(b.x),a.x.max(b.x)),b.y).distance(screen)}else{a.distance(screen).min(b.distance(screen))}
                         }else{b.distance(screen)};
                         (distance<12.).then_some((distance,p.key))

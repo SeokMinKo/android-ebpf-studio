@@ -26,6 +26,7 @@ fn reused_request_pointer_cannot_inherit_an_old_exact_file() {
             comm: "reuse".into(),
         }));
         engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
             ts_ns: ts + 100,
             request_id: 1,
             device_major: 259,
@@ -107,6 +108,7 @@ impl Fixture {
                 comm: "known-reader".into(),
             }));
             emit(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
                 ts_ns: ts + 100,
                 request_id: i,
                 device_major: 259,

@@ -1318,7 +1318,7 @@ mod compare_explore_tests {
                 comm: name.into(),
             }));
             app.analyzer
-                .ingest(StorageEvent::BlockComplete(BlockComplete {
+                .ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                     ts_ns: origin + id * 1_000_000 + 500_000,
                     request_id: id,
                     device_major: 8,

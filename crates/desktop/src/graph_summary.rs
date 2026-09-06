@@ -376,6 +376,7 @@ mod tests {
                 comm: "same".into(),
             }));
             engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
                 ts_ns: id * 10 + 1,
                 request_id: id,
                 device_major: 8,

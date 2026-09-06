@@ -95,7 +95,7 @@ mod sampling_regression {
                 comm: "alternating".into(),
             }));
             app.analyzer
-                .ingest(StorageEvent::BlockComplete(BlockComplete {
+                .ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                     ts_ns: id * 1000 + 10,
                     request_id: id,
                     device_major: 8,

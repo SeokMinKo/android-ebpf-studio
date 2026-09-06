@@ -24,6 +24,7 @@ fn completion_computes_latency_and_removes_pending_request() {
 
     let completed = correlator
         .on_complete(BlockComplete {
+            cpu: None,
             ts_ns: 3_500_000,
             request_id: 0xabc,
             device_major: 8,
@@ -43,6 +44,7 @@ fn mismatched_device_does_not_create_false_latency() {
     correlator.on_issue(issue(1_000));
 
     let result = correlator.on_complete(BlockComplete {
+        cpu: None,
         ts_ns: 2_000,
         request_id: 0xabc,
         device_major: 8,
@@ -61,6 +63,7 @@ fn duplicate_pending_key_is_rejected_instead_of_false_matched() {
     correlator.on_issue(issue(1_100));
 
     let result = correlator.on_complete(BlockComplete {
+        cpu: None,
         ts_ns: 2_000,
         request_id: 0xabc,
         device_major: 8,
@@ -85,6 +88,7 @@ fn issue_depth_and_event_gaps_are_device_scoped_and_survive_filtering() {
     }
     for (id, device, ts) in [(2, 0, 30), (1, 0, 40), (3, 1, 50)] {
         engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
             request_id: id,
             device_major: 8,
             device_minor: device,
@@ -123,6 +127,7 @@ fn expired_and_duplicate_requests_do_not_leak_into_later_device_depth() {
     c.on_issue(next);
     let io = c
         .on_complete(BlockComplete {
+            cpu: None,
             ts_ns: 3,
             request_id: 2,
             device_major: 8,
@@ -137,6 +142,7 @@ fn expired_and_duplicate_requests_do_not_leak_into_later_device_depth() {
     c.on_issue(next); // TTL removes old pending
     let io = c
         .on_complete(BlockComplete {
+            cpu: None,
             ts_ns: 302,
             request_id: 3,
             device_major: 8,
@@ -160,6 +166,7 @@ fn rolling_rates_use_original_device_event_windows_and_survive_filtering_and_old
             row.pid = if i % 2 == 0 { 42 } else { 43 };
             engine.ingest(StorageEvent::BlockIssue(row));
             engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
                 ts_ns: i * 1_000_000 + 100,
                 request_id: i,
                 device_major: 8,

@@ -313,6 +313,7 @@ mod tests {
                 comm: "fixture".into(),
             }));
             if let Some(io) = engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
                 ts_ns: b,
                 request_id: id,
                 device_major: 8,
@@ -467,6 +468,7 @@ mod tests {
                 comm: "x".into(),
             }));
             e.ingest(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
                 ts_ns: ts,
                 request_id: id,
                 device_major: 8,

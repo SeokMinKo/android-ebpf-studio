@@ -487,6 +487,8 @@ pub fn export_completed_io_csv(path: &Path, engine: &AnalysisEngine) -> anyhow::
         "rolling_d2d_payload_bytes",
         "rolling_d2d_duration_ns",
         "rolling_d2d_mib_s",
+        "issue_cpu",
+        "completion_cpu",
     ])?;
     for io in engine.completed_ios() {
         let graph = engine.transaction_for(io);
@@ -513,6 +515,8 @@ pub fn export_completed_io_csv(path: &Path, engine: &AnalysisEngine) -> anyhow::
             io.detail_timing.issue_bandwidth.as_ref().map(|r|r.payload_bytes.to_string()).unwrap_or_default(),
             io.detail_timing.issue_bandwidth.as_ref().map(|r|r.duration_ns.to_string()).unwrap_or_default(),
             io.detail_timing.issue_bandwidth.as_ref().and_then(|r|r.mib_s()).map(|v|v.to_string()).unwrap_or_default(),
+            io.issuer_cpu().map(|v|v.to_string()).unwrap_or_default(),
+            io.completion.cpu.map(|v|v.to_string()).unwrap_or_default(),
         ])?;
     }
     writer.flush()?;

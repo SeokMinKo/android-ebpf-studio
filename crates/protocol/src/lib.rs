@@ -10,7 +10,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 6;
+pub const SCHEMA_VERSION: u16 = 7;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 const MAX_DERIVED_CACHE_ENTRIES: usize = 4_096;
@@ -56,6 +56,9 @@ pub struct BlockIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockComplete {
+    /// CPU executing the completion probe; None in older/unmeasured sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<u32>,
     pub ts_ns: u64,
     pub request_id: u64,
     pub device_major: u32,

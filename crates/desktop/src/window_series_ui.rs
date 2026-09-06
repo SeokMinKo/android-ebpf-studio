@@ -116,7 +116,7 @@ mod window_summary_tests {
         let mut engine=AnalysisEngine::new();let mut activity=crate::host_bw::ActivityTimeline::default();activity.verified_complete=true;
         for (id,a,b) in [(1,0,1_000_000),(2,1_000_001,2_000_000),(3,3_000_000,4_000_000)] {
             engine.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:a,request_id:id,device_major:8,device_minor:0,sector:id*8,sectors:2048,bytes:1_048_576,operation:IoOperation::Read,pid:1,tid:1,cpu:0,comm:"x".into()}));
-            if let Some(io)=engine.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:b,request_id:id,device_major:8,device_minor:0,status:0})) {activity.observe(&io);}
+            if let Some(io)=engine.ingest(StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:b,request_id:id,device_major:8,device_minor:0,status:0})) {activity.observe(&io);}
         }
         let context=||BandwidthContext{activity:Arc::new(activity.clone()),range:(0,4_000_000),devices:vec![(8,0)]};let axis=AxisMetric::Window(WindowMetric::BurstPayload);
         let full=compute_graph_selection(&engine,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,axis,0,context(),1);
@@ -133,7 +133,7 @@ mod window_summary_tests {
         let mut engine=AnalysisEngine::new();let mut activity=crate::host_bw::ActivityTimeline::default();
         for (id,pid,a,b) in [(1,1,0,2),(2,2,1,5),(3,1,7,8),(4,1,7,8)] {
             engine.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:a*1_000_000,request_id:id,device_major:8,device_minor:0,sector:id*8,sectors:2,bytes:1024,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"same".into()}));
-            if let Some(io)=engine.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:b*1_000_000,request_id:id,device_major:8,device_minor:0,status:0})) {activity.observe(&io);}
+            if let Some(io)=engine.ingest(StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:b*1_000_000,request_id:id,device_major:8,device_minor:0,status:0})) {activity.observe(&io);}
         }
         activity.verified_complete=true;
         let context=||BandwidthContext{activity:Arc::new(activity.clone()),range:(0,10_000_000),devices:vec![(8,0)]};
@@ -159,7 +159,7 @@ mod window_summary_tests {
         for id in 0..26 {
             let ts=if id==0 {1_000_000_000}else if id<25 {1_200_000_000+id*1000}else{2_400_000_000};
             engine.ingest(StorageEvent::BlockIssue(BlockIssue {ts_ns:ts-100,request_id:id,device_major:8,device_minor:0,sector:0,sectors:2048,bytes:1_048_576,operation:IoOperation::Read,pid:1,tid:1,cpu:0,comm:"dense".into()}));
-            if let Some(io)=engine.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:ts,request_id:id,device_major:8,device_minor:0,status:0})) {activity.observe(&io);}
+            if let Some(io)=engine.ingest(StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:ts,request_id:id,device_major:8,device_minor:0,status:0})) {activity.observe(&io);}
         }
         activity.verified_complete=true;
         let context=||BandwidthContext{activity:Arc::new(activity.clone()),range:(0,2_500_000_000),devices:vec![(8,0)]};

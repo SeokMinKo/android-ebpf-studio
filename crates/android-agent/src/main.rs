@@ -3000,6 +3000,7 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
             comm: decode_comm(&event.comm),
         })),
         KIND_BLOCK_COMPLETE => Some(StorageEvent::BlockComplete(BlockComplete {
+            cpu: Some(event.cpu),
             ts_ns: event.ts_ns,
             request_id,
             device_major,
@@ -3321,6 +3322,25 @@ fn read_kernel_text(path: impl AsRef<std::path::Path>) -> std::io::Result<String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kernel_completion_cpu_is_preserved_in_protocol_and_cpu_zero_is_measured() {
+        for cpu in [0, 7] {
+            let raw = super::KernelEvent {
+                kind: super::KIND_BLOCK_COMPLETE,
+                cpu,
+                request_id: 100,
+                ts_ns: 200,
+                device: 2048,
+                ..Default::default()
+            };
+            let Some(super::StorageEvent::BlockComplete(completion)) =
+                super::parse_kernel_event(raw, 77)
+            else {
+                panic!("completion expected")
+            };
+            assert_eq!(completion.cpu, Some(cpu));
+        }
+    }
     #[test]
     fn recycled_fd_never_supplies_another_files_path() {
         let original = android_ebpf_protocol::FileIdentity {

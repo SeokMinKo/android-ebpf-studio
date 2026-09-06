@@ -32,6 +32,7 @@ fn completed() -> CompletedIo {
             comm: "reader".into(),
         },
         completion: BlockComplete {
+            cpu: None,
             ts_ns: 2_000,
             request_id: 7,
             device_major: 259,
