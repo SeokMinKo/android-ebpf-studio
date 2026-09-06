@@ -316,7 +316,7 @@ impl StudioApp {
                     let mut viewer = StudioApp::default();
                     viewer.apply_loaded_session(path.clone(), loaded);
                     self.comparison = Some(ComparisonBaseline {
-                        summary: viewer.analyzer.summary(),
+                        summary: viewer.analyzer.retained_summary(),
                         rejected_records: viewer.rejected_records,
                         capabilities: viewer.capabilities.clone(),
                         path,
