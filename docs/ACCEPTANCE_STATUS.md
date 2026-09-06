@@ -18,6 +18,16 @@ This ledger supersedes older statements that no phone was available.
   Unresolved. Unsupported queue measurements stay unavailable.
 - Original Perfetto traces can be exported and replayed without modifying the
   original. Host failure fixtures cover transport and recovery boundaries.
+- Overview request KPIs and category statistics use the same retained completed
+  requests as the graphs, including after retention eviction and filter changes.
+  Session totals remain available separately for export. File-operation evidence
+  keeps its independent scope and follows request filters where applicable.
+
+The retained-summary regression reproduces 100,001 observed completions with
+90,001 remaining in the analysis window. It checks count, separate Read/Write
+bytes, percentile and category populations before and after a Write filter, and
+asserts that original cumulative totals remain unchanged. A separate existing
+file-evidence test verifies that clearing filters restores independent file rows.
 
 ## Performance regression and verification
 

@@ -622,6 +622,74 @@ mod query_regressions {
     }
 
     #[test]
+    fn overview_metrics_match_retained_graph_cohort_after_eviction() {
+        let seed = engine().completed_ios()[0].clone();
+        let mut app = StudioApp::default();
+        for id in 0..100_001u64 {
+            let mut io = seed.clone();
+            io.issue.request_id = id;
+            io.issue.ts_ns = id * 10_000_000;
+            io.completion.ts_ns = io.issue.ts_ns + if id < 10_000 { 5_000_000 } else { 100_000 };
+            io.completion.request_id = id;
+            io.total_latency_ns = Some(io.completion.ts_ns - io.issue.ts_ns);
+            io.issue.bytes = if id < 10_000 { 65_536 } else { 4096 };
+            io.issue.operation = if id.is_multiple_of(2) {
+                IoOperation::Read
+            } else {
+                IoOperation::Write
+            };
+            app.analyzer
+                .ingest(StorageEvent::ObservedBlockCompletion(io));
+        }
+        app.rebuild_filtered();
+        let summary = app.analysis_summary();
+        let detail = app.analysis().completed_ios();
+        assert_eq!(detail.len(), 90_001);
+        assert_eq!(
+            summary.completed_ios,
+            detail.len() as u64,
+            "Overview KPI must describe the same requests as its graphs"
+        );
+        assert_eq!(
+            summary.read_bytes,
+            detail
+                .iter()
+                .filter(|io| io.issue.operation == IoOperation::Read)
+                .map(|io| io.issue.bytes as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            summary.write_bytes,
+            detail
+                .iter()
+                .filter(|io| io.issue.operation == IoOperation::Write)
+                .map(|io| io.issue.bytes as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(summary.p95_latency_ns, Some(100_000));
+        assert_eq!(
+            summary
+                .category_summaries
+                .iter()
+                .map(|c| c.completed_ios)
+                .sum::<u64>(),
+            detail.len() as u64
+        );
+        app.query.operation = Some(IoOperation::Write);
+        app.invalidate_query();
+        app.rebuild_filtered();
+        let filtered = app.analysis_summary();
+        assert_eq!(filtered.completed_ios, 45_000);
+        assert_eq!(filtered.read_bytes, 0);
+        assert_eq!(filtered.write_bytes, 45_000 * 4096);
+        assert_eq!(
+            app.analyzer.summary().completed_ios,
+            100_001,
+            "Original session totals remain available for export"
+        );
+    }
+
+    #[test]
     fn projection_preserves_original_sequential_classification_and_latency() {
         let engine = engine();
         let selected = engine.select_completed(|io| io.issue.pid == 2);

@@ -1432,7 +1432,7 @@ impl StudioApp {
             });
         if !cache_valid {
             let started = Instant::now();
-            let mut summary = self.analysis().summary();
+            let mut summary = self.analysis().retained_summary();
             if let Some(positions) = &self.file_evidence_positions {
                 summary.file_ios = positions.len() as u64;
                 summary.attributed_file_ios = positions

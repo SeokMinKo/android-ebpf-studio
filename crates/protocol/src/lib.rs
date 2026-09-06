@@ -2633,6 +2633,13 @@ impl AnalysisEngine {
                 }
             })
             .collect();
+        summary.attribution = self.completed_attribution();
+        *self.summary_cache.borrow_mut() = Some(summary.clone());
+        summary
+    }
+
+    fn completed_attribution(&self) -> AttributionSummary {
+        let mut attribution = AttributionSummary::default();
         for io in &self.completed {
             let graph = self.transaction_for(io);
             let Some(request) = graph
@@ -2640,26 +2647,60 @@ impl AnalysisEngine {
                 .iter()
                 .find(|node| node.kind == IoNodeKind::BlockRequest)
             else {
-                summary.attribution.unattributed += 1;
+                attribution.unattributed += 1;
                 continue;
             };
             let origins = graph.file_origins_for(request.node_id);
             if origins.len() > 1 {
-                summary.attribution.multi_origin += 1;
+                attribution.multi_origin += 1;
             }
             match origins
                 .iter()
                 .map(|origin| origin.confidence)
                 .max_by_key(|confidence| confidence.rank())
             {
-                Some(EdgeConfidence::Exact) => summary.attribution.exact += 1,
-                Some(EdgeConfidence::Probable) => summary.attribution.probable += 1,
-                Some(EdgeConfidence::ProbableAsync) => summary.attribution.probable_async += 1,
-                Some(EdgeConfidence::ContextOnly) | None => summary.attribution.unattributed += 1,
+                Some(EdgeConfidence::Exact) => attribution.exact += 1,
+                Some(EdgeConfidence::Probable) => attribution.probable += 1,
+                Some(EdgeConfidence::ProbableAsync) => attribution.probable_async += 1,
+                Some(EdgeConfidence::ContextOnly) | None => attribution.unattributed += 1,
             }
         }
-        *self.summary_cache.borrow_mut() = Some(summary.clone());
+        attribution
+    }
+
+    /// Request metrics for exactly the currently retained completed I/O.
+    /// Unlike session-wide summary(), this excludes evicted and pending requests.
+    /// Spatial classification, measured queue depth and attribution keep their
+    /// original evidence. Independent file-operation and unmatched-completion
+    /// counters retain their capture scope; callers scope file evidence separately.
+    pub fn retained_summary(&self) -> AnalysisSummary {
+        let mut projection = Self::new();
+        for io in &self.completed {
+            projection.observe_selected_request(io);
+        }
+        let mut summary = projection.summary();
+        summary.attribution = self.completed_attribution();
+        summary.file_ios = self.summary.file_ios;
+        summary.attributed_file_ios = self.summary.attributed_file_ios;
+        summary.uncorrelated_completions = self.summary.uncorrelated_completions;
         summary
+    }
+
+    fn observe_selected_request(&mut self, io: &CompletedIo) {
+        self.observe_ts(io.start_timestamp());
+        self.observe_ts(io.completion.ts_ns);
+        self.record_completed(io);
+        self.summary.issued_ios += u64::from(io.issue_timestamp().is_some());
+        match io.access_pattern {
+            AccessPattern::Sequential => self.summary.sequential_ios += 1,
+            AccessPattern::Random => self.summary.random_ios += 1,
+            _ => {}
+        }
+        match io.size_class {
+            IoSizeClass::Small => self.summary.small_ios += 1,
+            IoSizeClass::Large => self.summary.large_ios += 1,
+        }
+        self.summary.max_queue_depth = self.summary.max_queue_depth.max(io.queue_depth_after);
     }
 
     /// A bounded-cost snapshot intended for live rendering. Percentiles are
@@ -2721,21 +2762,7 @@ impl AnalysisEngine {
                     .evidence_windows
                     .insert(request_cache_key(io), *window);
             }
-            result.observe_ts(io.insert.as_ref().map_or(io.issue.ts_ns, |v| v.ts_ns));
-            result.observe_ts(io.completion.ts_ns);
-            result.record_completed(io);
-            result.summary.issued_ios += u64::from(io.issue_timestamp().is_some());
-            match io.access_pattern {
-                AccessPattern::Sequential => result.summary.sequential_ios += 1,
-                AccessPattern::Random => result.summary.random_ios += 1,
-                _ => {}
-            }
-            match io.size_class {
-                IoSizeClass::Small => result.summary.small_ios += 1,
-                IoSizeClass::Large => result.summary.large_ios += 1,
-            }
-            result.summary.max_queue_depth =
-                result.summary.max_queue_depth.max(io.queue_depth_after);
+            result.observe_selected_request(io);
             result.completed.push(io.clone());
         }
         result
