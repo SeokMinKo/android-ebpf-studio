@@ -632,12 +632,12 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified rolling/fixed-window slice; exhaustive sweep/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "rolling chunk_length/rolling C2C interval /1024",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "64 consecutive same-device observed event gaps; aligned 64-row Read+Write payload sum / elapsed ns *1e9 /1048576. Full warmup required, missing/zero/overflow unavailable. Terminal-operation grouping does not split the device-wide rate into R/W components. uPAS uses ws=64 despite title32 and adds first cohort request service latency; deliberate denominator difference documented.",
+    "target_ui": "Explore Rolling C2C / D2D bandwidth with linked Summary histogram/percentiles/CDF and CSV; elapsed-window BW retained separately",
+    "capture_changes": "Optional serde-default DetailTiming rate structs; raw eBPF correlator and raw Perfetto projection compute before analysis filters/retention. Existing observed sessions require raw reanalysis.",
+    "verification": "Raw Samsung reanalysis 8294 requests; device8:0 yields8183 valid samples per clock, Read endpoint filter7383. Independent raw-event oracle matches all sums/durations/percentiles/histograms/CSV. Actual uPAS assignment AST executed on equal130-event fixture. See UPAS_ROLLING_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -650,12 +650,12 @@
       "bandwidth",
       "filename"
     ],
-    "status": "partial: fixed-window distribution verified; rolling C2C equivalent pending",
+    "status": "implemented and independently verified rolling/fixed-window slice; exhaustive sweep/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Exact fixed-window rate distribution, one sample per elapsed window, independent of I/O density. Rolling bandwidth remains a different population.",
-    "target_ui": "Linked BW Summary",
-    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
-    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
+    "formula": "64 consecutive same-device observed event gaps; aligned 64-row Read+Write payload sum / elapsed ns *1e9 /1048576. Full warmup required, missing/zero/overflow unavailable. Terminal-operation grouping does not split the device-wide rate into R/W components. uPAS uses ws=64 despite title32 and adds first cohort request service latency; deliberate denominator difference documented.",
+    "target_ui": "Explore Rolling C2C / D2D bandwidth with linked Summary histogram/percentiles/CDF and CSV; elapsed-window BW retained separately",
+    "capture_changes": "Optional serde-default DetailTiming rate structs; raw eBPF correlator and raw Perfetto projection compute before analysis filters/retention. Existing observed sessions require raw reanalysis.",
+    "verification": "Raw Samsung reanalysis 8294 requests; device8:0 yields8183 valid samples per clock, Read endpoint filter7383. Independent raw-event oracle matches all sums/durations/percentiles/histograms/CSV. Actual uPAS assignment AST executed on equal130-event fixture. See UPAS_ROLLING_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -672,12 +672,12 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified rolling/fixed-window slice; exhaustive sweep/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "rolling chunk_length/rolling D2D interval /1024",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "64 consecutive same-device observed event gaps; aligned 64-row Read+Write payload sum / elapsed ns *1e9 /1048576. Full warmup required, missing/zero/overflow unavailable. Terminal-operation grouping does not split the device-wide rate into R/W components. uPAS uses ws=64 despite title32 and adds first cohort request service latency; deliberate denominator difference documented.",
+    "target_ui": "Explore Rolling C2C / D2D bandwidth with linked Summary histogram/percentiles/CDF and CSV; elapsed-window BW retained separately",
+    "capture_changes": "Optional serde-default DetailTiming rate structs; raw eBPF correlator and raw Perfetto projection compute before analysis filters/retention. Existing observed sessions require raw reanalysis.",
+    "verification": "Raw Samsung reanalysis 8294 requests; device8:0 yields8183 valid samples per clock, Read endpoint filter7383. Independent raw-event oracle matches all sums/durations/percentiles/histograms/CSV. Actual uPAS assignment AST executed on equal130-event fixture. See UPAS_ROLLING_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

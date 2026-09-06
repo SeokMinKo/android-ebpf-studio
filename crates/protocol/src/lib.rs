@@ -1,5 +1,7 @@
 //! Platform-independent event protocol and storage analysis core.
 
+pub mod rolling;
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -1732,6 +1734,10 @@ pub struct DetailTiming {
     pub issue_depth: Option<usize>,
     pub issue_gap_ns: Option<u64>,
     pub completion_gap_ns: Option<u64>,
+    #[serde(default)]
+    pub issue_bandwidth: Option<rolling::RollingRate>,
+    #[serde(default)]
+    pub completion_bandwidth: Option<rolling::RollingRate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1838,6 +1844,8 @@ pub struct RequestCorrelator {
     device_pending: HashMap<(u32, u32), usize>,
     last_issue: HashMap<(u32, u32), u64>,
     last_completion: HashMap<(u32, u32), u64>,
+    issue_bandwidth: HashMap<(u32, u32), rolling::RollingRateAccumulator>,
+    completion_bandwidth: HashMap<(u32, u32), rolling::RollingRateAccumulator>,
     ambiguous: HashMap<RequestKey, u64>,
     expired: u64,
     replaced: u64,
@@ -1853,6 +1861,8 @@ impl RequestCorrelator {
             device_pending: HashMap::new(),
             last_issue: HashMap::new(),
             last_completion: HashMap::new(),
+            issue_bandwidth: HashMap::new(),
+            completion_bandwidth: HashMap::new(),
             ambiguous: HashMap::new(),
             expired: 0,
             replaced: 0,
@@ -1886,6 +1896,16 @@ impl RequestCorrelator {
             .insert(device, issue.ts_ns)
             .and_then(|t| issue.ts_ns.checked_sub(t));
         let insert = self.inserted.remove(&key);
+        let payload = if matches!(issue.operation, IoOperation::Read | IoOperation::Write) {
+            issue.bytes as u64
+        } else {
+            0
+        };
+        let issue_bandwidth = self
+            .issue_bandwidth
+            .entry(device)
+            .or_default()
+            .observe(issue_gap_ns, Some(payload));
         let removed = self.pending.remove(&key).is_some();
         let depth = self.device_pending.entry(device).or_default();
         if removed {
@@ -1901,6 +1921,8 @@ impl RequestCorrelator {
                 issue_depth: Some(*depth),
                 issue_gap_ns,
                 completion_gap_ns: None,
+                issue_bandwidth,
+                completion_bandwidth: None,
             };
             self.pending.insert(
                 key,
@@ -1923,6 +1945,22 @@ impl RequestCorrelator {
             .last_completion
             .insert(device, completion.ts_ns)
             .and_then(|t| completion.ts_ns.checked_sub(t));
+        let payload = self
+            .pending
+            .get(&key)
+            .filter(|p| p.issue.ts_ns <= completion.ts_ns)
+            .map(|p| {
+                if matches!(p.issue.operation, IoOperation::Read | IoOperation::Write) {
+                    p.issue.bytes as u64
+                } else {
+                    0
+                }
+            });
+        let completion_bandwidth = self
+            .completion_bandwidth
+            .entry(device)
+            .or_default()
+            .observe(completion_gap_ns, payload);
         if self.ambiguous.remove(&key).is_some() {
             return None;
         }
@@ -1952,6 +1990,7 @@ impl RequestCorrelator {
             queue_depth_after: Some(self.pending.len()),
             detail_timing: DetailTiming {
                 completion_gap_ns,
+                completion_bandwidth,
                 ..pending.detail_timing
             },
             access_pattern: pending.access_pattern,

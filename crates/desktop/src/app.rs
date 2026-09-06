@@ -114,10 +114,12 @@ enum ExplorerPreset {
     WindowBusyPercent,
     WindowBusyMs,
     WindowIdleMs,
+    RollingC2cBandwidth,
+    RollingD2dBandwidth,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 20] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -136,6 +138,8 @@ impl ExplorerPreset {
         Self::WindowBusyPercent,
         Self::WindowBusyMs,
         Self::WindowIdleMs,
+        Self::RollingC2cBandwidth,
+        Self::RollingD2dBandwidth,
     ];
 
     fn label(self) -> &'static str {
@@ -158,6 +162,8 @@ impl ExplorerPreset {
             Self::WindowBusyPercent => "Device busy % over time",
             Self::WindowBusyMs => "Active time by window",
             Self::WindowIdleMs => "Idle time by window",
+            Self::RollingC2cBandwidth => "Rolling C2C bandwidth",
+            Self::RollingD2dBandwidth => "Rolling D2D bandwidth",
         }
     }
 
@@ -212,6 +218,16 @@ impl ExplorerPreset {
                 GroupBy::Direction,
             )),
             Self::CpuTimeline => Some((AxisMetric::TimeMs, AxisMetric::IssueCpu, GroupBy::Process)),
+            Self::RollingC2cBandwidth => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::RollingC2cBandwidth,
+                GroupBy::Direction,
+            )),
+            Self::RollingD2dBandwidth => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::RollingD2dBandwidth,
+                GroupBy::Direction,
+            )),
             Self::WindowBandwidth => Some((
                 AxisMetric::TimeMs,
                 AxisMetric::Window(WindowMetric::Bandwidth),
@@ -273,11 +289,13 @@ enum AxisMetric {
     CompletionGapMs,
     LatencyPerKiB,
     IssueCpu,
+    RollingC2cBandwidth,
+    RollingD2dBandwidth,
     Window(crate::window_series::WindowMetric),
 }
 
 impl AxisMetric {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 19] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
@@ -295,6 +313,8 @@ impl AxisMetric {
         Self::CompletionGapMs,
         Self::LatencyPerKiB,
         Self::IssueCpu,
+        Self::RollingC2cBandwidth,
+        Self::RollingD2dBandwidth,
     ];
 
     fn label(self) -> &'static str {
@@ -316,6 +336,8 @@ impl AxisMetric {
             Self::CompletionGapMs => "C2C completion gap (ms)",
             Self::LatencyPerKiB => "Device latency (ms/KiB)",
             Self::IssueCpu => "Issue CPU",
+            Self::RollingC2cBandwidth => "Rolling C2C BW (MiB/s)",
+            Self::RollingD2dBandwidth => "Rolling D2D BW (MiB/s)",
             Self::Window(metric) => metric.label(),
         }
     }
@@ -357,6 +379,16 @@ impl AxisMetric {
                 }
             }
             Self::IssueCpu => io.issuer_cpu().map(|n| n as f64),
+            Self::RollingC2cBandwidth => io
+                .detail_timing
+                .completion_bandwidth
+                .as_ref()
+                .and_then(|r| r.mib_s()),
+            Self::RollingD2dBandwidth => io
+                .detail_timing
+                .issue_bandwidth
+                .as_ref()
+                .and_then(|r| r.mib_s()),
             Self::Window(_) => None,
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
@@ -396,6 +428,8 @@ impl AxisMetric {
             | Self::IssueGapMs
             | Self::CompletionGapMs
             | Self::LatencyPerKiB
+            | Self::RollingC2cBandwidth
+            | Self::RollingD2dBandwidth
             | Self::Window(_) => format!("{value:.3}"),
         }
     }

@@ -62,6 +62,52 @@ fn projected_issue_depth_uses_intervals_and_gaps_use_raw_device_event_order() {
     assert_eq!(p[2].detail_timing.completion_gap_ns, Some(10));
     assert_eq!(p[1].detail_timing.issue_gap_ns, None);
 }
+
+#[test]
+fn rolling_projection_keeps_raw_completion_volume_and_does_not_mix_device_histories() {
+    let mut trace = fixture();
+    trace.events.clear();
+    for i in 0..66u64 {
+        for minor in [0, 1] {
+            for (offset, kind) in [(0, BlockKind::Issue), (100, BlockKind::Complete)] {
+                let mut e = event(
+                    i * 4 + minor * 2 + u64::from(offset > 0) + 1,
+                    kind,
+                    i * 1_000_000 + offset,
+                    i * 8,
+                );
+                e.device_encoded += minor;
+                e.bytes = if minor == 0 { 1024 } else { 2048 };
+                e.sectors = (e.bytes / 512) as u32;
+                trace.events.push(e);
+            }
+        }
+    }
+    let analysis = analyze(&trace);
+    let rows = Projection::new(&trace)
+        .with_analysis(&analysis)
+        .events(&analysis)
+        .unwrap();
+    for row in rows {
+        if row.issue.sector < 64 * 8 {
+            assert!(row.detail_timing.completion_bandwidth.is_none());
+        } else {
+            let expected = if row.issue.device_minor == 0 {
+                0.9765625
+            } else {
+                1.953125
+            };
+            assert_eq!(
+                row.detail_timing.issue_bandwidth.unwrap().mib_s(),
+                Some(expected)
+            );
+            assert_eq!(
+                row.detail_timing.completion_bandwidth.unwrap().mib_s(),
+                Some(expected)
+            );
+        }
+    }
+}
 #[test]
 fn projected_completions_preserve_unknown_identity_timing_and_all_volume() {
     let trace = fixture();

@@ -81,6 +81,7 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
         AxisMetric::QueueDepth=> {ui.small("Legacy observed depth after completion across all devices. Use QD at issue for send-Q comparisons.");}
         AxisMetric::IssueGapMs|AxisMetric::CompletionGapMs=> {ui.small("Gap from the preceding same-device observed event before analysis filters. First event is unmeasured; sampled/lost events can enlarge gaps. Points are placed at completion time.");}
         AxisMetric::LatencyPerKiB=> {ui.small("Measured issue-to-completion latency / Read or Write size in KiB. Zero size and non-transfer commands are excluded.");}
+        AxisMetric::RollingC2cBandwidth|AxisMetric::RollingD2dBandwidth=> {ui.small("64 consecutive same-device observed event gaps and their Read+Write payload, before analysis filters. Warm-up/missing gaps/unknown payload/zero duration are unavailable. Not unsampled kernel throughput. Points use completion time; Read/Write tabs group the terminal request operation, not separate payload rates. Filtered endpoints retain their original device-wide rolling context.");}
         _=>{}
     }
     if matches!(axis, AxisMetric::Sector | AxisMetric::AddressKiB) {
@@ -329,7 +330,7 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
             writer.write_record(["device_time_share","Analysis wall time",label,"",&b.duration_ns.to_string(),&percent.map_or("unavailable".into(),|v|v.to_string()),"percent; denominator ns"])?;
         }
         for (i,label) in ["Total","Read","Write"].iter().enumerate() {
-            writer.write_record(["bytes","Host BW",label,"","",&[b.bytes.total(),b.bytes.read,b.bytes.write][i].to_string(),"bytes"])?;
+            writer.write_record(["bytes","Host BW",label,"","",&if s.keys.is_empty()&&s.unplottable_rows>0{"unavailable".into()}else{[b.bytes.total(),b.bytes.read,b.bytes.write][i].to_string()},"bytes"])?;
             for (metric,value) in [("Host BW with Idle",b.with_idle_mib_s[i]),("Host BW w/o Idle",b.without_idle_mib_s[i])] {
                 writer.write_record(["bandwidth",metric,label,"","",&value.map_or("unavailable".into(),|v|v.to_string()),"MiB/s"])?;
             }

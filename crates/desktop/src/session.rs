@@ -481,6 +481,12 @@ pub fn export_completed_io_csv(path: &Path, engine: &AnalysisEngine) -> anyhow::
         "c2c_ns",
         "file_candidates_json",
         "completed_io_json",
+        "rolling_c2c_payload_bytes",
+        "rolling_c2c_duration_ns",
+        "rolling_c2c_mib_s",
+        "rolling_d2d_payload_bytes",
+        "rolling_d2d_duration_ns",
+        "rolling_d2d_mib_s",
     ])?;
     for io in engine.completed_ios() {
         let graph = engine.transaction_for(io);
@@ -501,6 +507,12 @@ pub fn export_completed_io_csv(path: &Path, engine: &AnalysisEngine) -> anyhow::
             io.queue_latency_ns.map(|v|v.to_string()).unwrap_or_default(), io.device_latency_ns.map(|v|v.to_string()).unwrap_or_default(), io.total_latency_ns.map(|v|v.to_string()).unwrap_or_default(), format!("{:?}",io.access_pattern),
             io.detail_timing.issue_depth.map(|v|v.to_string()).unwrap_or_default(), io.detail_timing.issue_gap_ns.map(|v|v.to_string()).unwrap_or_default(), io.detail_timing.completion_gap_ns.map(|v|v.to_string()).unwrap_or_default(),
             serde_json::to_string(&origins.iter().map(|v|serde_json::json!({"file":v.file,"path":v.path,"edge_confidence":v.confidence})).collect::<Vec<_>>())?, serde_json::to_string(io)?,
+            io.detail_timing.completion_bandwidth.as_ref().map(|r|r.payload_bytes.to_string()).unwrap_or_default(),
+            io.detail_timing.completion_bandwidth.as_ref().map(|r|r.duration_ns.to_string()).unwrap_or_default(),
+            io.detail_timing.completion_bandwidth.as_ref().and_then(|r|r.mib_s()).map(|v|v.to_string()).unwrap_or_default(),
+            io.detail_timing.issue_bandwidth.as_ref().map(|r|r.payload_bytes.to_string()).unwrap_or_default(),
+            io.detail_timing.issue_bandwidth.as_ref().map(|r|r.duration_ns.to_string()).unwrap_or_default(),
+            io.detail_timing.issue_bandwidth.as_ref().and_then(|r|r.mib_s()).map(|v|v.to_string()).unwrap_or_default(),
         ])?;
     }
     writer.flush()?;

@@ -146,3 +146,68 @@ fn expired_and_duplicate_requests_do_not_leak_into_later_device_depth() {
         .unwrap();
     assert_eq!(io.detail_timing.issue_depth, Some(1));
 }
+
+#[test]
+fn rolling_rates_use_original_device_event_windows_and_survive_filtering_and_old_sessions() {
+    use android_ebpf_protocol::{AnalysisEngine, CompletedIo, StorageEvent};
+    let mut engine = AnalysisEngine::new();
+    for i in 0..66u64 {
+        for minor in [0, 1] {
+            let mut row = issue(i * 1_000_000);
+            row.request_id = i;
+            row.device_minor = minor;
+            row.bytes = if minor == 0 { 1024 } else { 2048 };
+            row.pid = if i % 2 == 0 { 42 } else { 43 };
+            engine.ingest(StorageEvent::BlockIssue(row));
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+                ts_ns: i * 1_000_000 + 100,
+                request_id: i,
+                device_major: 8,
+                device_minor: minor,
+                status: 0,
+            }));
+        }
+    }
+    let rows = engine.completed_ios();
+    assert!(
+        rows.iter()
+            .take(128)
+            .all(|r| r.detail_timing.issue_bandwidth.is_none()
+                && r.detail_timing.completion_bandwidth.is_none())
+    );
+    for row in rows.iter().skip(128) {
+        let expected = if row.issue.device_minor == 0 {
+            0.9765625
+        } else {
+            1.953125
+        };
+        assert_eq!(
+            row.detail_timing.issue_bandwidth.as_ref().unwrap().mib_s(),
+            Some(expected)
+        );
+        assert_eq!(
+            row.detail_timing
+                .completion_bandwidth
+                .as_ref()
+                .unwrap()
+                .mib_s(),
+            Some(expected)
+        );
+    }
+    let filtered = engine.select_completed(|io| io.issue.pid == 42 && io.issue.request_id == 64);
+    assert_eq!(
+        filtered.completed_ios()[0]
+            .detail_timing
+            .completion_bandwidth,
+        rows[128].detail_timing.completion_bandwidth
+    );
+    let mut json = serde_json::to_value(&rows[128]).unwrap();
+    let timing = json["detail_timing"].as_object_mut().unwrap();
+    timing.remove("issue_bandwidth");
+    timing.remove("completion_bandwidth");
+    let legacy: CompletedIo = serde_json::from_value(json).unwrap();
+    assert!(
+        legacy.detail_timing.issue_bandwidth.is_none()
+            && legacy.detail_timing.completion_bandwidth.is_none()
+    );
+}

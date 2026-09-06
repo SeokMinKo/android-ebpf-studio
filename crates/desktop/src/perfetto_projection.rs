@@ -36,18 +36,34 @@ impl<'a> Projection<'a> {
         let mut patterns = HashMap::new();
         let mut timing = HashMap::new();
         let mut clocks: HashMap<u64, (Option<u64>, Option<u64>)> = HashMap::new();
+        let mut rolling: HashMap<
+            u64,
+            (
+                android_ebpf_protocol::rolling::RollingRateAccumulator,
+                android_ebpf_protocol::rolling::RollingRateAccumulator,
+            ),
+        > = HashMap::new();
         let mut events: Vec<_> = trace.events.iter().filter(|e| e.clock == 0).collect();
         events.sort_by_key(|e| (e.timestamp_ns, e.record_id));
         for e in events {
             let (issue, complete) = clocks.entry(e.device_encoded).or_default();
             let mut t = android_ebpf_protocol::DetailTiming::default();
+            let payload = if matches!(operation(&e.rwbs), IoOperation::Read | IoOperation::Write) {
+                e.bytes
+            } else {
+                0
+            };
+            let (issue_rate, complete_rate) = rolling.entry(e.device_encoded).or_default();
             match e.kind {
                 BlockKind::Issue => {
                     t.issue_gap_ns = issue.map(|v| e.timestamp_ns - v);
+                    t.issue_bandwidth = issue_rate.observe(t.issue_gap_ns, Some(payload));
                     *issue = Some(e.timestamp_ns);
                 }
                 BlockKind::Complete => {
                     t.completion_gap_ns = complete.map(|v| e.timestamp_ns - v);
+                    t.completion_bandwidth =
+                        complete_rate.observe(t.completion_gap_ns, Some(payload));
                     *complete = Some(e.timestamp_ns);
                 }
                 _ => {}
@@ -200,6 +216,10 @@ impl<'a> Projection<'a> {
             queue_latency_ns: o.queue_latency_ns,
             queue_depth_after: None,
             detail_timing: android_ebpf_protocol::DetailTiming {
+                completion_bandwidth: self
+                    .timing
+                    .get(&o.completion_record)
+                    .and_then(|t| t.completion_bandwidth.clone()),
                 completion_gap_ns: self
                     .timing
                     .get(&o.completion_record)

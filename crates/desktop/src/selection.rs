@@ -501,6 +501,7 @@ impl StudioApp {
                 ui.small("One row per graph-cohort request. Empty timing fields mean unavailable; file candidates share one row.");
                 ui.separator();
                 host_bw_ui(ui,s);
+                if s.keys.is_empty() && s.unplottable_rows>0 {ui.small("Choose a measured axis or reanalyze available original events. Transfer and latency statistics for this graph cohort are unavailable.");return;}
                 ui.separator();
                 ui.label(RichText::new("Transfer volume").strong().color(ink()));
                 summary_metric_row(ui,"", "Read".into(), "Write".into(),true);

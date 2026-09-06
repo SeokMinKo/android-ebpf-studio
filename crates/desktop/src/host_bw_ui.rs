@@ -5,7 +5,12 @@ struct BandwidthContext {
 }
 impl BandwidthContext {
     fn attach(self,s:&mut SelectionSummary) {
-        s.host_bw=Some(crate::host_bw::calculate(&self.activity,self.range,crate::host_bw::TransferBytes{read:s.read.bytes,write:s.write.bytes,other:s.other_bytes},self.devices));
+        let mut b=crate::host_bw::calculate(&self.activity,self.range,crate::host_bw::TransferBytes{read:s.read.bytes,write:s.write.bytes,other:s.other_bytes},self.devices);
+        if s.keys.is_empty() && s.unplottable_rows>0 {
+            b.with_idle_mib_s=[None;3];b.without_idle_mib_s=[None;3];
+            b.coverage=format!("Graph payload cohort unavailable: no filtered request has the selected metric. {}",b.coverage);
+        }
+        s.host_bw=Some(b);
     }
 }
 impl StudioApp {
@@ -41,6 +46,7 @@ fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
     ui.strong("Host BW · MiB/s");
     if b.estimated {ui.colored_label(amber(),"Reconstructed estimate · block trace, Probable request matching");}
     ui.small("Completion-counted Read + Write payload from this graph cohort. Detail-based BW is not the unsampled kernel throughput.");
+    if s.keys.is_empty() && s.unplottable_rows>0 {ui.colored_label(amber(),"Graph metric unavailable for these filtered requests. The graph's payload and bandwidth are unavailable, not measured zero.");}
     egui::Grid::new("host-bw-rates").num_columns(3).striped(true).show(ui,|ui| {
         ui.label("");ui.strong("with Idle");ui.strong("w/o Idle");ui.end_row();
         for (i,label) in ["Total","Read","Write"].iter().enumerate() {
@@ -49,7 +55,8 @@ fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
             ui.end_row();
         }
     });
-    ui.label(format!("Bytes: Total {} · Read {} · Write {}",format_bytes(b.bytes.total()),format_bytes(b.bytes.read),format_bytes(b.bytes.write)));
+    if s.keys.is_empty() && s.unplottable_rows>0 {ui.label("Graph payload bytes: —");}
+    else {ui.label(format!("Bytes: Total {} · Read {} · Write {}",format_bytes(b.bytes.total()),format_bytes(b.bytes.read),format_bytes(b.bytes.write)));}
     if b.bytes.other>0 {ui.small(format!("Excluded non-R/W command extents: {} (for example, Discard ranges)",format_bytes(b.bytes.other)));}
     ui.label(format!("Analysis time: {}",format_latency(Some(b.duration_ns))));
     ui.label(format!("Active/Busy: {} · Idle: {}",format_latency(b.busy_ns),format_latency(b.idle_ns)));
@@ -79,6 +86,15 @@ fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
 mod bandwidth_ui_tests {
     use super::*;
     use android_ebpf_protocol::{BlockIssue,BlockComplete,StorageEvent};
+    #[test]
+    fn unavailable_graph_cohort_is_distinct_from_an_empty_measured_filter() {
+        let context=||BandwidthContext{activity:Arc::new(Default::default()),range:(0,1_000_000_000),devices:vec![]};
+        let mut unavailable=SelectionSummary{source_rows:10,unplottable_rows:10,..Default::default()};
+        context().attach(&mut unavailable);
+        assert_eq!(unavailable.host_bw.as_ref().unwrap().with_idle_mib_s,[None;3]);
+        let mut empty=SelectionSummary::default();context().attach(&mut empty);
+        assert_eq!(empty.host_bw.as_ref().unwrap().with_idle_mib_s,[Some(0.);3]);
+    }
     #[test]
     fn filter_area_reset_and_csv_share_explicit_clock_and_device_wide_activity() {
         let mut app=StudioApp::default();
