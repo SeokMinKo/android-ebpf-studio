@@ -3,6 +3,58 @@ use android_ebpf_studio::session::{export_csv, load_analysis, load_analysis_wind
 use std::{fs::File, io::BufWriter, path::PathBuf, sync::atomic::AtomicBool};
 
 #[test]
+fn finalization_reopening_window_and_export_keep_one_whole_session_coverage() {
+    let fixture = Fixture::new(8);
+    let path = fixture.0.with_extension("copy.ndjson");
+    let writer = android_ebpf_studio::session::AsyncSessionWriter::create(&path).unwrap();
+    let records = SessionReader::default()
+        .read(std::io::BufReader::new(File::open(&fixture.0).unwrap()))
+        .unwrap();
+    let count = records.events.len() as u64;
+    for (sequence, event) in records.events.into_iter().enumerate() {
+        writer
+            .append(WireRecord::Event {
+                schema_version: SCHEMA_VERSION,
+                sequence: sequence as u64 + 1,
+                event,
+            })
+            .unwrap();
+    }
+    let finalized = writer.finish(count, 0, true).unwrap();
+    assert_eq!(finalized.completion_records(), 8);
+    assert_eq!(finalized.exact.count, 1);
+    assert_eq!(finalized.unresolved.count, 7);
+    let reopened = load_analysis(&path).unwrap();
+    assert_eq!(reopened.file_path_coverage, finalized);
+    let window = load_analysis_window(&path, Some((1_010_000_000, 1_010_000_200)), None).unwrap();
+    assert_eq!(window.engine.completed_ios().len(), 1);
+    assert_eq!(
+        window.file_path_coverage, finalized,
+        "detail window cannot change source coverage"
+    );
+    let csv = fixture.0.with_extension("coverage.csv");
+    let summary = export_csv(&path, &csv).unwrap();
+    let values: std::collections::BTreeMap<_, _> = csv::Reader::from_path(&summary)
+        .unwrap()
+        .records()
+        .map(|r| {
+            let row = r.unwrap();
+            (row[0].to_owned(), row[1].to_owned())
+        })
+        .collect();
+    assert_eq!(values["filepath_count_denominator"], "8");
+    assert_eq!(values["filepath_exact_count"], "1");
+    assert_eq!(values["filepath_unresolved_count"], "7");
+    assert_eq!(
+        serde_json::from_str::<FilePathCoverage>(&values["filepath_full_report_json"]).unwrap(),
+        finalized
+    );
+    for output in [path, csv, summary] {
+        std::fs::remove_file(output).unwrap();
+    }
+}
+
+#[test]
 fn reused_request_pointer_cannot_inherit_an_old_exact_file() {
     let mut engine = AnalysisEngine::new();
     let fixture = Fixture::new(2);
@@ -185,7 +237,7 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
     drop(full);
     let view =
         load_analysis_window(&fixture.0, Some((1_010_000_100, 1_020_000_100)), None).unwrap();
-    assert_eq!(view.source_start_ns, 1_000_000_000);
+    assert_eq!(view.source_start_ns, Some(1_000_000_000));
     assert_eq!(view.engine.completed_ios().len(), 2);
     assert_eq!(
         view.activity.observed_requests, 100_020,
@@ -204,6 +256,8 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
     assert_eq!(io.access_pattern, AccessPattern::Sequential);
     assert_eq!(io.total_latency_ns, Some(100));
     assert_eq!(io.queue_depth_after, Some(0));
+    assert_eq!(io.queue_depth_at_issue, Some(1));
+    assert_eq!(view.engine.retained_summary().max_queue_depth, Some(1));
     let graph = view.engine.transaction_for(io);
     let origins = graph.file_origins_for(block_request_node_id(1));
     assert_eq!(origins.len(), 1);
@@ -247,6 +301,17 @@ fn streamed_export_keeps_all_raw_events_including_old_file_evidence() {
         .map(Result::unwrap)
         .collect();
     assert_eq!(rows.len(), 41);
+    let metrics: std::collections::BTreeMap<String, String> = csv::Reader::from_path(&summary)
+        .unwrap()
+        .records()
+        .map(|r| {
+            let r = r.unwrap();
+            (r[0].to_owned(), r[1].to_owned())
+        })
+        .collect();
+    assert_eq!(metrics["max_queue_depth"], "1");
+    assert_eq!(metrics["measured_queue_depth_ios"], "20");
+    assert!(metrics["queue_depth_definition"].contains("at issue; all captured devices"));
     assert!(
         rows.iter()
             .any(|r| r.get(12) == Some("/data/old-window.bin"))
@@ -261,7 +326,7 @@ fn view_export_contains_only_selected_io_and_preserves_path_provenance() {
     let loaded =
         load_analysis_window(&fixture.0, Some((1_010_000_100, 1_020_000_100)), None).unwrap();
     let summary = loaded.engine.summary();
-    assert_eq!(summary.logging_ns, 10_000_100);
+    assert_eq!(summary.logging_ns, Some(10_000_100));
     let output = fixture.0.with_extension("view.ndjson");
     android_ebpf_studio::session::export_analysis_view(
         &output,

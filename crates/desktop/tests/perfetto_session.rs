@@ -162,6 +162,80 @@ fn shared_projection_emits_capabilities_and_stops_at_sink_failure_without_succes
 }
 
 #[test]
+fn reopening_service_loss_shows_it_even_when_kernel_loss_is_zero() {
+    let f = Fixture::new();
+    let mut decoded = perfetto::decode(&trace()[..]);
+    decoded.quality.ftrace_start_seen = true;
+    decoded.quality.ftrace_end_seen = true;
+    decoded.quality.kernel_start.insert(0, [Some(0); 3]);
+    decoded.quality.kernel_end.insert(0, [Some(0); 3]);
+    decoded.quality.service_stats_seen = true;
+    decoded
+        .quality
+        .service_loss_counters
+        .insert("buffer_0_bytes_overwritten".into(), 32768);
+    decoded
+        .quality
+        .service_loss_counters
+        .insert("buffer_0_chunks_overwritten".into(), 1);
+    let path = f.dir.join("service-loss.ndjson");
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    project_records(&decoded, "perfetto/capture.pftrace", |record| {
+        android_ebpf_protocol::write_record(&mut writer, &record)?;
+        Ok(())
+    })
+    .unwrap();
+    drop(writer);
+    let loaded = session::load_analysis(&path).unwrap();
+    assert!(loaded.loss_status.contains("kernel loss 0"));
+    assert!(
+        loaded.loss_status.contains("Service loss detected"),
+        "{}",
+        loaded.loss_status
+    );
+    assert!(loaded.loss_status.contains("32768 bytes overwritten"));
+    assert!(loaded.loss_status.contains("1 chunks overwritten"));
+    assert_eq!(loaded.engine.summary().completed_ios, 1);
+    assert_eq!(loaded.engine.summary().read_bytes, 4096);
+    assert_eq!(loaded.engine.summary().p99_latency_ns, None);
+}
+
+#[test]
+fn source_quality_preserves_unknown_counters_and_distinct_failure_reasons() {
+    let mut quality = perfetto::TraceQuality::default();
+    let mut metadata = serde_json::json!({"stage":"complete", "quality":quality});
+    let unknown = source_status("perfetto", "Perfetto capture", &metadata);
+    assert!(unknown.contains("Service loss counters unavailable"));
+    assert!(!unknown.contains("Service loss detected"));
+    quality.service_stats_seen = true;
+    quality.lost_bundles = 3;
+    quality.parse_errors = 2;
+    quality.truncated = true;
+    quality.projection_limited = true;
+    quality.final_flush_outcome = Some(2);
+    metadata["quality"] = serde_json::to_value(quality).unwrap();
+    let status = source_status("perfetto", "Perfetto capture", &metadata);
+    for reason in [
+        "Lost ftrace bundles: 3",
+        "Trace parse errors: 2",
+        "Raw trace truncated",
+        "Analysis projection limit reached",
+        "Final trace flush failed",
+    ] {
+        assert!(status.contains(reason), "{status}");
+    }
+    assert_eq!(
+        source_status("other", "Original source", &metadata),
+        "Original source"
+    );
+    metadata["stage"] = "recording".into();
+    assert_eq!(
+        source_status("perfetto", "Still recording", &metadata),
+        "Still recording"
+    );
+}
+
+#[test]
 fn metadata_cannot_redirect_raw_export_to_an_unrelated_file() {
     let f = Fixture::new();
     std::fs::remove_file(&f.raw).unwrap();
@@ -172,6 +246,281 @@ fn metadata_cannot_redirect_raw_export_to_an_unrelated_file() {
     .unwrap();
     assert_eq!(raw_trace_path(&f.session), None);
     assert!(export_raw_trace(&f.session, &f.dir.join("output.pftrace")).is_err());
+}
+
+#[test]
+#[ignore = "requires ANDROID_EBPF_FAKE_PERFETTO_ADB host fixture executable"]
+fn root_start_failure_automatically_uses_perfetto_without_mixing_later_failures() {
+    use android_ebpf_studio::{
+        adb::AdbClient,
+        capture::{self, HostMessage},
+    };
+    let executable = std::env::var_os("ANDROID_EBPF_FAKE_PERFETTO_ADB").unwrap();
+    for (behavior, available, fail_start, reboot, expect_perfetto, expect_counters) in [
+        ("fail", true, false, false, true, false),
+        ("empty-success", true, false, false, true, false),
+        ("fail", false, false, false, false, true),
+        ("fail", true, true, false, false, true),
+        ("ready-then-fail", true, false, false, false, false),
+        ("data-then-fail", true, false, false, false, false),
+        ("stop-then-fail", true, false, false, false, false),
+        ("cancel-recheck", true, false, false, false, false),
+        ("fail", true, false, true, false, false),
+    ] {
+        let f = Fixture::new();
+        std::fs::remove_file(&f.raw).unwrap(); // This matrix starts a new capture.
+        let adb = f.dir.join("fake-adb.exe");
+        std::fs::copy(&executable, &adb).unwrap();
+        std::fs::write(f.dir.join("source.pftrace"), trace()).unwrap();
+        std::fs::write(f.dir.join("fixture.json"), serde_json::to_vec(&serde_json::json!({
+            "capture_test":true,"serial":"root-fixture","boot":"boot-old","ticks":999,
+            "agent_behavior":behavior,"perfetto":available,"fail_start":fail_start,"reboot_after_failure":reboot
+        })).unwrap()).unwrap();
+        let (tx, rx) = crossbeam_channel::bounded(1000);
+        let handle = capture::start_adb(
+            AdbClient::new(&adb),
+            "root-fixture".into(),
+            adb.clone(),
+            adb,
+            "fallback-test".into(),
+            f.dir.join("agent.jsonl"),
+            "info".into(),
+            tx,
+        );
+        let started = std::time::Instant::now();
+        let mut perfetto = false;
+        let mut counters = false;
+        let mut observations = 0;
+        let mut root_events = 0;
+        let mut recorded_failure = false;
+        let mut fallback_report = None;
+        let mut diagnostics = Vec::new();
+        let result = loop {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30));
+            match rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap() {
+                HostMessage::Preflight(Ok(report)) => {
+                    fallback_report = Some(report);
+                }
+                HostMessage::Record(WireRecord::SourceInfo {
+                    source, metadata, ..
+                }) if source == "perfetto" && metadata["stage"] == "recording" => {
+                    perfetto = true;
+                    handle.stop();
+                }
+                HostMessage::Status(status) if status.starts_with("Recording device counters") => {
+                    counters = true
+                }
+                HostMessage::Record(WireRecord::SourceInfo {
+                    source, metadata, ..
+                }) if source == "ebpf" => {
+                    recorded_failure =
+                        metadata["stage"] == "fallback" && metadata["error"].as_str().is_some();
+                }
+                HostMessage::Record(WireRecord::DiskStats { .. }) => {
+                    handle.stop();
+                }
+                HostMessage::Record(WireRecord::Event {
+                    event: StorageEvent::ObservedBlockCompletion(_),
+                    ..
+                }) => observations += 1,
+                HostMessage::Record(WireRecord::Event { .. }) => root_events += 1,
+                HostMessage::Record(WireRecord::Health { .. }) if behavior == "stop-then-fail" => {
+                    handle.stop();
+                    handle.stop();
+                }
+                HostMessage::Ended(result) => break result,
+                HostMessage::Diagnostic(record) => {
+                    if behavior == "cancel-recheck" && record.code == "EBPF_UNAVAILABLE" {
+                        handle.stop();
+                    }
+                    diagnostics.push(format!("{record:?}"));
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(
+            perfetto, expect_perfetto,
+            "{behavior}, service={available}, start failure={fail_start}, reboot={reboot}: {result:?} {diagnostics:?}"
+        );
+        assert_eq!(counters, expect_counters);
+        assert_eq!(observations, usize::from(expect_perfetto));
+        assert_eq!(root_events, usize::from(behavior == "data-then-fail"));
+        assert_eq!(
+            recorded_failure,
+            expect_perfetto || expect_counters || behavior == "cancel-recheck"
+        );
+        assert_eq!(
+            result.is_ok(),
+            expect_perfetto || expect_counters || behavior == "cancel-recheck"
+        );
+        let commands = std::fs::read_to_string(f.dir.join("commands.jsonl")).unwrap();
+        assert_eq!(
+            commands.contains("--background-wait"),
+            expect_perfetto || fail_start
+        );
+        if expect_perfetto {
+            let report = fallback_report.unwrap();
+            assert!(!report.full_ebpf_ready());
+            assert!(report.perfetto);
+            assert!(f.dir.join("perfetto/capture.pftrace").is_file());
+            let profile: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(f.dir.join("device-profile.json")).unwrap())
+                    .unwrap();
+            assert!(profile["ebpf_start_error"].as_str().is_some());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires ANDROID_EBPF_FAKE_PERFETTO_ADB host fixture executable"]
+fn perfetto_readiness_failure_stops_owned_process_and_analyzes_preserved_prefix() {
+    use android_ebpf_studio::{
+        adb::AdbClient,
+        capture::{self, HostMessage},
+    };
+    for fault in [
+        "fail_first_cmdline",
+        "fail_first_stat",
+        "omit_pid",
+        "error_after_launch",
+    ] {
+        let f = Fixture::new();
+        std::fs::remove_file(&f.raw).unwrap();
+        let adb = f.dir.join("fake-adb.exe");
+        std::fs::copy(
+            std::env::var_os("ANDROID_EBPF_FAKE_PERFETTO_ADB").unwrap(),
+            &adb,
+        )
+        .unwrap();
+        std::fs::write(f.dir.join("source.pftrace"), trace()).unwrap();
+        let mut config = serde_json::json!({
+            "capture_test":true,"serial":"root-fixture","boot":"boot-old","ticks":999,
+            "agent_behavior":"fail","perfetto":true,"vary_state":true
+        });
+        config[fault] = true.into();
+        std::fs::write(
+            f.dir.join("fixture.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let (tx, rx) = crossbeam_channel::bounded(1000);
+        let handle = capture::start_adb(
+            AdbClient::new(&adb),
+            "root-fixture".into(),
+            adb.clone(),
+            adb,
+            "startup-failure".into(),
+            f.dir.join("agent.jsonl"),
+            "info".into(),
+            tx,
+        );
+        let mut counters = false;
+        let mut observations = 0;
+        let result = loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap() {
+                HostMessage::Status(status) if status.starts_with("Recording device counters") => {
+                    counters = true
+                }
+                HostMessage::Record(WireRecord::DiskStats { .. }) => handle.stop(),
+                HostMessage::Record(WireRecord::Event {
+                    event: StorageEvent::ObservedBlockCompletion(_),
+                    ..
+                }) => observations += 1,
+                HostMessage::Ended(result) => break result,
+                _ => {}
+            }
+        };
+        assert!(
+            f.dir.join("stopped").exists(),
+            "Owned Perfetto process leaked after readiness failure: {fault}"
+        );
+        assert!(
+            !counters,
+            "Cannot quietly replace the failed running source"
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            observations, 1,
+            "Recovered observations must be analyzed automatically"
+        );
+        assert_eq!(std::fs::read(&f.raw).unwrap(), trace());
+    }
+}
+
+#[test]
+#[ignore = "requires ANDROID_EBPF_FAKE_PERFETTO_ADB host fixture executable"]
+fn failed_start_identity_uncertainty_preserves_manifest_and_allows_recovery_retry() {
+    use android_ebpf_studio::{
+        adb::AdbClient,
+        perfetto_capture::{PerfettoCapture, StartupFailure},
+    };
+    for fault in ["foreign_command", "ambiguous", "fail_enumerate"] {
+        let f = Fixture::new();
+        std::fs::remove_file(&f.raw).unwrap();
+        let adb = f.dir.join("fake-adb.exe");
+        std::fs::copy(
+            std::env::var_os("ANDROID_EBPF_FAKE_PERFETTO_ADB").unwrap(),
+            &adb,
+        )
+        .unwrap();
+        std::fs::write(f.dir.join("source.pftrace"), trace()).unwrap();
+        let mut config = serde_json::json!({
+            "capture_test":true,"serial":"root-fixture","boot":"boot-old","ticks":999,
+            "perfetto":true,"omit_pid":true
+        });
+        config[fault] = true.into();
+        let config_path = f.dir.join("fixture.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let mut failure = PerfettoCapture::start(
+            AdbClient::new(&adb),
+            "root-fixture",
+            &f.dir.join("perfetto"),
+            30000,
+        )
+        .unwrap_err()
+        .downcast::<StartupFailure>()
+        .unwrap();
+        let result = failure.capture.finish_failed_start();
+        if fault == "foreign_command" {
+            assert!(
+                result.unwrap().is_some(),
+                "Saved trace can be pulled without signalling foreign process"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "Uncertain ownership must not be treated as absence: {fault}"
+            );
+        }
+        assert!(
+            !f.dir.join("stopped").exists(),
+            "Must not signal when ownership is unconfirmed: {fault}"
+        );
+        let manifest = f.dir.join("perfetto/perfetto-owner.json");
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert!(saved["pid"].is_null());
+        assert!(saved["process_start_ticks"].is_null());
+        // Reconnect/resolve ambiguity and retry using the saved nonce paths.
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config[fault] = false.into();
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        // A fresh failed pull must not replace an existing source. The fixture trace
+        // intentionally has no final flush, so remove only this test's first pull.
+        if f.raw.exists() {
+            std::fs::remove_file(&f.raw).unwrap();
+        }
+        let mut capture = PerfettoCapture::recover(AdbClient::new(&adb), &manifest).unwrap();
+        let recovered = capture.recover_and_pull().unwrap();
+        assert_eq!(recovered.events.len(), 1);
+        assert!(f.dir.join("stopped").exists());
+        assert_eq!(std::fs::read(&f.raw).unwrap(), trace());
+        assert_eq!(
+            std::fs::read_to_string(&f.session).unwrap(),
+            "original interrupted recording\n"
+        );
+    }
 }
 
 #[test]

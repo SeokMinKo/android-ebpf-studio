@@ -23,10 +23,19 @@ pub struct PerfettoOwner {
     pub local_trace: PathBuf,
 }
 
+#[derive(Debug)]
 pub struct PerfettoCapture {
     client: AdbClient,
     pub owner: PerfettoOwner,
     manifest: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Perfetto startup failed after launch was requested: {cause}")]
+pub struct StartupFailure {
+    pub capture: Box<PerfettoCapture>,
+    #[source]
+    pub cause: anyhow::Error,
 }
 
 fn config(duration_ms: u64) -> String {
@@ -103,35 +112,55 @@ impl PerfettoCapture {
         capture
             .client
             .push_file(serial, &config_path, &capture.owner.remote_config)?;
-        let result = capture.client.unprivileged_text(
-            serial,
-            &[
-                "perfetto",
-                "--txt",
-                "-c",
-                &capture.owner.remote_config,
-                "-o",
-                &capture.owner.remote_trace,
-                "--background-wait",
-            ],
-        )?;
-        let pid=result.lines().find_map(|s|s.trim().parse::<u32>().ok()).filter(|p|*p>1).ok_or_else(||anyhow::anyhow!("Perfetto did not return its owned PID; finite trace and recovery manifest retained"))?;
-        capture.owner.pid = Some(pid);
-        capture.persist()?;
-        let stat = capture
-            .client
-            .unprivileged_text(serial, &["cat", &format!("/proc/{pid}/stat")])?;
-        let (_, ticks) = process_identity(&stat).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Unable to identify Perfetto process lifetime; recovery manifest retained"
-            )
-        })?;
-        capture.owner.process_start_ticks = Some(ticks);
-        capture.persist()?;
-        anyhow::ensure!(
-            capture.owned_process_alive()?,
-            "Perfetto exited before readiness could be confirmed"
-        );
+        let launched = (|| -> anyhow::Result<()> {
+            let output = capture.client.unprivileged_output(
+                serial,
+                &[
+                    "perfetto",
+                    "--txt",
+                    "-c",
+                    &capture.owner.remote_config,
+                    "-o",
+                    &capture.owner.remote_trace,
+                    "--background-wait",
+                ],
+            )?;
+            let result = String::from_utf8_lossy(&output.stdout);
+            capture.owner.pid = result
+                .lines()
+                .find_map(|s| s.trim().parse::<u32>().ok())
+                .filter(|p| *p > 1);
+            capture.persist()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "Perfetto launch returned {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            let pid = capture.owner.pid.ok_or_else(||anyhow::anyhow!("Perfetto did not return its owned PID; finite trace and recovery manifest retained"))?;
+            let stat = capture
+                .client
+                .unprivileged_text(serial, &["cat", &format!("/proc/{pid}/stat")])?;
+            let (_, ticks) = process_identity(&stat).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unable to identify Perfetto process lifetime; recovery manifest retained"
+                )
+            })?;
+            capture.owner.process_start_ticks = Some(ticks);
+            capture.persist()?;
+            anyhow::ensure!(
+                capture.owned_process_alive()?,
+                "Perfetto exited before readiness could be confirmed"
+            );
+            Ok(())
+        })();
+        if let Err(cause) = launched {
+            return Err(StartupFailure {
+                capture: Box::new(capture),
+                cause,
+            }
+            .into());
+        }
         Ok(capture)
     }
     fn persist(&self) -> anyhow::Result<()> {
@@ -232,7 +261,7 @@ impl PerfettoCapture {
     }
     /// After a reboot, only retrieve the nonce-scoped trace. Never signal a PID
     /// from a previous boot, even when the current phone reused its number.
-    pub fn recover_and_pull(&self) -> anyhow::Result<DecodedTrace> {
+    pub fn recover_and_pull(&mut self) -> anyhow::Result<DecodedTrace> {
         let boot = self.client.unprivileged_text(
             &self.owner.serial,
             &["cat", "/proc/sys/kernel/random/boot_id"],
@@ -244,11 +273,102 @@ impl PerfettoCapture {
         if boot != self.owner.boot_id {
             return self.pull();
         }
-        anyhow::ensure!(
-            self.owner.pid.is_some() && self.owner.process_start_ticks.is_some(),
-            "Original Perfetto process lifetime was not confirmed. Automatic signalling is unavailable; the capture ends at its configured limit. A saved raw trace can be reanalyzed without a phone"
-        );
+        if !self.establish_identity()? {
+            return self.pull();
+        }
         self.stop_and_pull()
+    }
+
+    /// A launch can fork a client before returning an error or losing its PID
+    /// output. Reacquire only a unique process with both nonce-owned arguments
+    /// and a stable lifetime, never an arbitrary `pidof` match.
+    fn establish_identity(&mut self) -> anyhow::Result<bool> {
+        if self.owner.pid.is_some() && self.owner.process_start_ticks.is_some() {
+            return Ok(true);
+        }
+        let serial = &self.owner.serial;
+        let boot = self
+            .client
+            .unprivileged_text(serial, &["cat", "/proc/sys/kernel/random/boot_id"])?;
+        anyhow::ensure!(
+            boot == self.owner.boot_id,
+            "Device rebooted; do not signal a previous boot's process"
+        );
+        let output = self
+            .client
+            .unprivileged_output(serial, &["pidof", "perfetto"])?;
+        anyhow::ensure!(
+            output.status.success()
+                || (output.status.code() == Some(1) && output.stderr.is_empty()),
+            "Cannot enumerate Perfetto processes: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut pids = std::collections::BTreeSet::new();
+        for value in text.split_whitespace() {
+            let pid = value.parse::<u32>()?;
+            anyhow::ensure!(
+                pid > 1 && pids.len() < 128,
+                "Invalid or excessive Perfetto process candidates"
+            );
+            pids.insert(pid);
+        }
+        let mut found = None;
+        for pid in pids {
+            let stat = format!("/proc/{pid}/stat");
+            let before = self.client.unprivileged_text(serial, &["cat", &stat])?;
+            let before = process_identity(&before)
+                .ok_or_else(|| anyhow::anyhow!("Malformed process lifetime"))?;
+            let command = self
+                .client
+                .unprivileged_text(serial, &["cat", &format!("/proc/{pid}/cmdline")])?;
+            if !command.split('\0').any(|s| s == self.owner.remote_config)
+                || !command.split('\0').any(|s| s == self.owner.remote_trace)
+            {
+                continue;
+            }
+            let after = self.client.unprivileged_text(serial, &["cat", &stat])?;
+            let after = process_identity(&after)
+                .ok_or_else(|| anyhow::anyhow!("Malformed process lifetime"))?;
+            anyhow::ensure!(
+                after.1 == before.1,
+                "Process lifetime changed during recovery identification"
+            );
+            if matches!(after.0, 'Z' | 'X') {
+                continue;
+            }
+            anyhow::ensure!(
+                found.is_none(),
+                "Multiple processes reference this trace; ownership is ambiguous"
+            );
+            found = Some((pid, before.1));
+        }
+        if let Some((pid, ticks)) = found {
+            self.owner.pid = Some(pid);
+            self.owner.process_start_ticks = Some(ticks);
+            self.persist()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn finish_failed_start(&mut self) -> anyhow::Result<Option<DecodedTrace>> {
+        if self.establish_identity()? {
+            return self.stop_and_pull().map(Some);
+        }
+        let present = self.client.unprivileged_output(
+            &self.owner.serial,
+            &["test", "-f", &self.owner.remote_trace],
+        )?;
+        if present.status.success() {
+            return self.pull().map(Some);
+        }
+        anyhow::ensure!(
+            present.status.code() == Some(1) && present.stderr.is_empty(),
+            "Cannot check the failed capture's raw trace"
+        );
+        Ok(None)
     }
     pub fn pull(&self) -> anyhow::Result<DecodedTrace> {
         let staging = self.owner.local_trace.with_extension("pftrace.partial");

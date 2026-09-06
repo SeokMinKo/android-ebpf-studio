@@ -31,7 +31,9 @@ fn main() {
         );
         return;
     }
-    if command.contains("ro.product.cpu.abi") {
+    if command.contains("--query") && serial == "root-phone" {
+        println!("Perfetto v51.2 fixture\nlinux.ftrace");
+    } else if command.contains("ro.product.cpu.abi") {
         println!(
             "{}",
             if serial == "counter-phone" {

@@ -45,6 +45,7 @@ fn completed() -> CompletedIo {
         total_latency_ns: Some(1_000),
         queue_depth_after: Some(0),
         detail_timing: Default::default(),
+        queue_depth_at_issue: Some(1),
         access_pattern: AccessPattern::Unknown,
         size_class: IoSizeClass::Small,
     }

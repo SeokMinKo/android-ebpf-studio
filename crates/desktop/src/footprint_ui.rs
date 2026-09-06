@@ -138,7 +138,8 @@ fn footprint_groups(io:&CompletedIo,graph:&IoTransactionGraph,mode:FootprintMode
 fn build_footprint(engine:&AnalysisEngine,generation:u64,mode:FootprintMode,origin:u64)->FootprintView {
     let mut view=FootprintView{generation,mode,lanes:BTreeMap::new(),min:[f64::INFINITY;2],max:[f64::NEG_INFINITY;2],unique:0,memberships:0,built:Instant::now()};
     for io in engine.completed_ios() {
-        let time=io.completion.ts_ns.saturating_sub(origin) as f64/1e6;
+        let Some(completion)=io.completion_timestamp() else {continue;};
+        let time=completion.saturating_sub(origin) as f64/1e6;
         let issue_ms=io.issue_timestamp().filter(|ts|*ts<=io.completion.ts_ns).map(|ts|ts.saturating_sub(origin) as f64/1e6);
         let sector=io.issue.sector as f64;
         let end=io.issue.sector.saturating_add(io.issue.sectors as u64) as f64;

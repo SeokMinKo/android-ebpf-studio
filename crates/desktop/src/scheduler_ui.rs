@@ -87,7 +87,7 @@ struct SchedulerState {
     applied:bool,
 }
 fn scheduler_block_filters(q:&AnalysisFilter)->bool {
-    q.request_keys.is_some() || !q.file.is_empty() || !q.device.is_empty() || q.operation.is_some()
+    q.latency_range.is_some() || q.request_keys.is_some() || !q.file.is_empty() || !q.device.is_empty() || q.operation.is_some()
         || q.confidence.is_some() || q.min_bytes>0 || q.max_bytes>0 || q.access.is_some() || q.layer.is_some()
 }
 fn scheduler_xy(w:&android_ebpf_protocol::SchedulerIoWait,origin:u64)->[f64;2] {

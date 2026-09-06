@@ -215,6 +215,9 @@ impl AdbCommandBuilder {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PreflightReport {
+    /// A preflight pass is not proof that the verifier/collector can start.
+    #[serde(default)]
+    pub ebpf_start_error: Option<String>,
     #[serde(default)]
     pub perfetto: bool,
     #[serde(default)]
@@ -247,6 +250,7 @@ pub struct PreflightReport {
 impl PreflightReport {
     pub fn full_ebpf_ready(&self) -> bool {
         self.root
+            && self.ebpf_start_error.is_none()
             && self.abi == "arm64-v8a"
             && self.tracefs
             && self.block_issue
@@ -278,6 +282,14 @@ impl Default for AdbClient {
 }
 
 impl AdbClient {
+    pub(crate) fn unprivileged_output(
+        &self,
+        serial: &str,
+        args: &[&str],
+    ) -> Result<Output, AdbError> {
+        let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
+        Ok(builder.root_shell(RootMethod::Shell, args).execute()?)
+    }
     pub(crate) fn unprivileged_text(
         &self,
         serial: &str,
@@ -460,16 +472,17 @@ impl AdbClient {
             .take(256)
             .map(str::to_owned)
             .collect();
+        // Detect fallbacks even when root tracepoints are readable: attach can
+        // still fail later because of the verifier, policy or collector startup.
+        if let Ok(query) = self.root_text(&builder, RootMethod::Shell, &["perfetto", "--query"]) {
+            report.perfetto = query.contains("linux.ftrace");
+            report.perfetto_version = query
+                .lines()
+                .find(|line| line.contains("Perfetto v"))
+                .unwrap_or("Perfetto service available")
+                .to_owned();
+        }
         if !report.full_ebpf_ready() {
-            if let Ok(query) = self.root_text(&builder, RootMethod::Shell, &["perfetto", "--query"])
-            {
-                report.perfetto = query.contains("linux.ftrace");
-                report.perfetto_version = query
-                    .lines()
-                    .find(|line| line.contains("Perfetto v"))
-                    .unwrap_or("Perfetto service available")
-                    .to_owned();
-            }
             report.diagnostics.push("Full block tracing unavailable: requires arm64 agent and readable issue/complete tracepoints. Root alone does not prove BPF verifier/attach support.".into());
         }
         Ok(report)

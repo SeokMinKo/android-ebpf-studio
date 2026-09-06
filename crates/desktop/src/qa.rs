@@ -10,6 +10,14 @@ struct RenderQa {
     lane_returning:bool,
     filter_step:u32,
     filter_states:Vec<serde_json::Value>,
+    activity: ActivityQa,
+    latency_stable_rect: Option<egui::Rect>,
+    latency_stable_frames: u32,
+    latency_targets: Vec<(u32, egui::Pos2)>,
+    latency_table_target: Option<egui::Pos2>,
+    latency_expected: Option<LatencyRange>,
+    latency_action_at: Option<Instant>,
+    latency_elapsed_ms: Option<f64>,
     compare_ready_ms: Option<f64>,
     started: Option<Instant>,
     regions: BTreeMap<String, (egui::Rect, egui::Rect)>,
@@ -126,7 +134,15 @@ impl StudioApp {
             self.render_qa.filter_step+=1;self.render_qa.range_wait_frame=self.render_qa.frames;
             return;
         }
-        if gesture == "stream-replay" {
+        if gesture.starts_with("activity-") {
+            self.activity_qa_input(raw, &gesture);
+            return;
+        }
+        if gesture.starts_with("latency-") {
+            self.latency_qa_input(raw, &gesture);
+            return;
+        }
+        if gesture == "stream-replay" || gesture.starts_with("coverage-") {
             return;
         }
         if gesture == "device-start-stop" {
@@ -668,6 +684,15 @@ impl StudioApp {
             };
             self.footprint.fit = true;
         }
+        if std::env::var("ANDROID_EBPF_QA_AXES").as_deref() == Ok("address-chunk") {
+            self.x_axis = AxisMetric::Sector;
+            self.y_axis = AxisMetric::ChunkKiB;
+            self.compare_explore.preset = ExplorerPreset::Custom;
+            self.compare_explore.axes = [self.x_axis, self.y_axis];
+            self.compare_explore.needs_apply = true;
+            self.compare_explore.fit = true;
+            self.render_qa.compare_ready_ms = None;
+        }
         if let Ok(filter) = std::env::var("ANDROID_EBPF_QA_FILTER") {
             match filter.as_str() {
                 "read" => self.query.operation = Some(IoOperation::Read),
@@ -704,6 +729,10 @@ impl StudioApp {
             self.x_axis = x;
             self.y_axis = y;
             self.group_by = group;
+            self.compare_explore.preset = *value;
+            self.compare_explore.axes = [x, y];
+            self.compare_explore.category = group;
+            self.compare_explore.needs_apply = true;
         }
         if let Ok(axis) = std::env::var("ANDROID_EBPF_QA_Y_AXIS")
             && let Ok(index) = axis.parse::<usize>()
@@ -853,6 +882,31 @@ impl StudioApp {
                 let cohort=self.analysis().select_completed(|io|s.keys.contains(&selection_key(io)));
                 report["graph_io_export"]=serde_json::json!({"path":io_csv,"result":session::export_completed_io_csv(&io_csv,&cohort).map_err(|e|e.to_string())});
             }
+            report["explorer_axes"] = serde_json::json!([self.x_axis.label(), self.y_axis.label()]);
+            if std::env::var_os("ANDROID_EBPF_QA_DEPTH").is_some() {
+                report["depth_selected_keys"] =
+                    serde_json::json!(self.selection.summary.as_ref().map(|s| &s.keys));
+                report["queue_depth_samples"] = serde_json::json!(self.analysis().completed_ios().iter().map(|io| serde_json::json!({"key":selection_key(io),"at_issue":io.queue_depth_at_issue,"after_completion":io.queue_depth_after})).collect::<Vec<_>>());
+                report["explorer_coordinates"] =
+                    serde_json::json!(self.explorer_view.as_ref().map(|v| {
+                        v.groups
+                            .iter()
+                            .flat_map(|(_, points)| points.iter().map(|p| p.coordinates))
+                            .collect::<Vec<_>>()
+                    }));
+            }
+            report["activity"] = serde_json::json!(self.render_qa.activity);
+            if self.render_qa.activity.expected_second.is_some() {
+                report["activity_selected_keys"] =
+                    serde_json::json!(self.selection.summary.as_ref().map(|s| &s.keys));
+            }
+            report["session_file_path_coverage"] = serde_json::json!(self.file_path_coverage);
+            report["latency_expected"] = serde_json::json!(self.render_qa.latency_expected);
+            report["latency_drilldown_ms"] = serde_json::json!(self.render_qa.latency_elapsed_ms);
+            if self.render_qa.latency_expected.is_some() {
+                report["latency_selected_keys"] =
+                    serde_json::json!(self.selection.summary.as_ref().map(|s| &s.keys));
+            }
             report["displayed_summary"] =
                 serde_json::json!(self.summary_view.as_ref().map(|(_, _, summary)| summary));
             if self.y_axis==AxisMetric::SchedulerIoWait && let Some(s)=self.scheduler.selected.as_ref().or(self.scheduler.view.as_ref()) {
@@ -874,6 +928,7 @@ impl StudioApp {
             report["device_phases"] = serde_json::json!(self.render_qa.device_phases);
             report["preflight"] = serde_json::json!(self.preflight);
             report["source_info"] = serde_json::json!(self.source_info);
+            report["loss_status"] = serde_json::json!(self.loss_status);
             report["status"] = serde_json::json!(self.status);
             report["qa_timed_out"] = serde_json::json!(timed_out);
             report["active_filter"] = serde_json::json!(self.query);

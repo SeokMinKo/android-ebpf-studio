@@ -123,7 +123,7 @@ pub fn build(
         activity_known: activity.exact() || activity.reconstructed_for(devices),
     };
     for io in ios {
-        let Some(index) = result.index_at(io.completion.ts_ns) else {
+        let Some(index) = io.completion_timestamp().and_then(|ts| result.index_at(ts)) else {
             continue;
         };
         let sample = &mut result.samples[index];
@@ -243,12 +243,15 @@ fn build_intervals(
             cumulative: vec![],
         })
         .collect();
-    let mut ordered: Vec<_> = ios.iter().collect();
+    let mut ordered: Vec<_> = ios
+        .iter()
+        .filter(|io| io.completion_timestamp().is_some())
+        .collect();
     if metric == WindowMetric::BurstPayload {
         ordered.sort_by_key(|io| (io.completion.ts_ns, io.issue.request_id));
     }
     for io in ordered {
-        if let Some(index) = result.index_at(io.completion.ts_ns) {
+        if let Some(index) = io.completion_timestamp().and_then(|ts| result.index_at(ts)) {
             let sample = &mut result.samples[index];
             sample.requests[0] += 1;
             let direction = match io.issue.operation {

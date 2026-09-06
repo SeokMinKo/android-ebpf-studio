@@ -10,6 +10,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+mod filepath_coverage;
+pub use filepath_coverage::{
+    CoverageVolume, FilePathConfidence, FilePathCoverage, FilePathCoverageEngine,
+};
+
 pub const SCHEMA_VERSION: u16 = 8;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
@@ -368,6 +373,8 @@ pub struct FileOriginView {
     pub file: FileIdentity,
     pub path: Option<PathSnapshot>,
     pub confidence: EdgeConfidence,
+    /// The collector reported that additional origins were dropped.
+    pub incomplete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -517,6 +524,7 @@ impl IoTransactionGraph {
 
     pub fn file_origins_for(&self, node_id: u64) -> Vec<FileOriginView> {
         let mut queue = VecDeque::from([(node_id, EdgeConfidence::Exact)]);
+        let mut incomplete = false;
         let mut seen = HashSet::new();
         let mut origins = BTreeMap::<FileIdentity, FileOriginView>::new();
         while let Some((current, confidence)) = queue.pop_front() {
@@ -530,6 +538,7 @@ impl IoTransactionGraph {
                     file: file.clone(),
                     path: node.path.clone(),
                     confidence,
+                    incomplete: false,
                 };
                 origins
                     .entry(file.clone())
@@ -541,10 +550,20 @@ impl IoTransactionGraph {
                     .or_insert(candidate);
             }
             for edge in self.edges.iter().filter(|edge| edge.to_node_id == current) {
+                incomplete |= edge
+                    .evidence
+                    .iter()
+                    .any(|e| e.match_type == "direct_bio_request_incomplete");
                 queue.push_back((edge.from_node_id, confidence.weakest(edge.confidence)));
             }
         }
-        origins.into_values().collect()
+        origins
+            .into_values()
+            .map(|mut origin| {
+                origin.incomplete = incomplete;
+                origin
+            })
+            .collect()
     }
 
     pub fn metrics(&self) -> GraphMetrics {
@@ -1450,6 +1469,9 @@ pub struct StackFingerprintRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]
+// Keep the high-frequency event inline; boxing would add an allocation per
+// capture record and alter the public construction API for all collectors.
+#[allow(clippy::large_enum_variant)]
 pub enum WireRecord {
     SourceInfo {
         schema_version: u16,
@@ -1769,6 +1791,12 @@ pub struct CompletedIo {
     pub queue_latency_ns: Option<u64>,
     pub device_latency_ns: Option<u64>,
     pub total_latency_ns: Option<u64>,
+    /// Observed correlated in-flight requests immediately after this issue,
+    /// including this request, across all captured devices. Not hardware depth.
+    /// Older projected completions and unsupported sources leave this unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth_at_issue: Option<usize>,
+    /// Observed correlated requests remaining after this completion, all devices.
     pub queue_depth_after: Option<usize>,
     #[serde(default)]
     pub detail_timing: DetailTiming,
@@ -1781,7 +1809,17 @@ pub struct CompletedIo {
 }
 
 impl CompletedIo {
+    /// Time in the session's normalized clock domain. Raw timestamps stay in
+    /// completion/evidence for inspection, but unsupported clocks cannot be
+    /// compared, filtered or aggregated against the session timeline.
+    pub fn completion_timestamp(&self) -> Option<u64> {
+        self.evidence
+            .as_ref()
+            .is_none_or(|e| e.clock == 0)
+            .then_some(self.completion.ts_ns)
+    }
     pub fn issue_timestamp(&self) -> Option<u64> {
+        self.completion_timestamp()?;
         self.evidence
             .as_ref()
             .map_or(Some(self.issue.ts_ns), |e| e.issue_timestamp_ns)
@@ -1806,12 +1844,15 @@ impl CompletedIo {
             .as_ref()
             .map_or(Some(self.completion.status), |e| e.completion_status)
     }
-    pub fn start_timestamp(&self) -> u64 {
-        self.insert
-            .as_ref()
-            .map(|i| i.ts_ns)
-            .or_else(|| self.issue_timestamp())
-            .unwrap_or(self.completion.ts_ns)
+    pub fn start_timestamp(&self) -> Option<u64> {
+        let completion = self.completion_timestamp()?;
+        Some(
+            self.insert
+                .as_ref()
+                .map(|i| i.ts_ns)
+                .or_else(|| self.issue_timestamp())
+                .unwrap_or(completion),
+        )
     }
     pub fn timing_confidence(&self) -> CorrelationConfidence {
         self.evidence
@@ -1852,6 +1893,7 @@ struct PendingRequest {
     insert: Option<BlockInsert>,
     access_pattern: AccessPattern,
     detail_timing: DetailTiming,
+    queue_depth_at_issue: usize,
 }
 
 /// Correlates optional insert, issue and completion events while guarding ID reuse.
@@ -1950,6 +1992,7 @@ impl RequestCorrelator {
                     insert,
                     access_pattern,
                     detail_timing,
+                    queue_depth_at_issue: self.pending.len() + 1,
                 },
             );
         }
@@ -2006,6 +2049,7 @@ impl RequestCorrelator {
             queue_latency_ns,
             device_latency_ns: Some(device_latency_ns),
             total_latency_ns: Some(total_latency_ns),
+            queue_depth_at_issue: Some(pending.queue_depth_at_issue),
             queue_depth_after: Some(self.pending.len()),
             detail_timing: DetailTiming {
                 completion_gap_ns,
@@ -2128,12 +2172,19 @@ pub struct AnalysisSummary {
     pub small_ios: u64,
     pub large_ios: u64,
     pub max_queue_depth: Option<usize>,
+    /// Completed requests with an observed issue-time depth. max_queue_depth
+    /// remains an observed peak over this subset when other requests lack it.
+    #[serde(default)]
+    pub measured_queue_depth_ios: u64,
     #[serde(default)]
     pub unmeasured_latency_ios: u64,
+    /// Completed I/O preserved outside temporal graphs and time-range filters.
+    #[serde(default)]
+    pub unplaced_time_ios: u64,
     pub p50_latency_ns: Option<u64>,
     pub p95_latency_ns: Option<u64>,
     pub p99_latency_ns: Option<u64>,
-    pub logging_ns: u64,
+    pub logging_ns: Option<u64>,
     pub busy_ns: Option<u64>,
     pub idle_ns: Option<u64>,
     pub file_ios: u64,
@@ -2149,6 +2200,8 @@ pub struct TimeBucket {
     pub completed_ios: u64,
     pub bytes: u64,
     pub average_latency_ns: Option<f64>,
+    /// Peak observed in-flight count at issue timestamps in this second.
+    /// Completion count/bytes/latency use completion timestamps independently.
     pub max_queue_depth: Option<usize>,
 }
 
@@ -2191,6 +2244,9 @@ fn time_buckets(start_ts_ns: u64, end_ts_ns: u64) -> Vec<u64> {
 }
 
 fn request_time_buckets(io: &CompletedIo) -> Vec<u64> {
+    if io.completion_timestamp().is_none() {
+        return Vec::new();
+    }
     let start = io
         .insert
         .as_ref()
@@ -2311,6 +2367,8 @@ impl AnalysisIndex {
 
 #[derive(Debug)]
 pub struct AnalysisEngine {
+    // Only the dedicated final coverage worker disables detail eviction.
+    retain_all_evidence: bool,
     correlator: RequestCorrelator,
     classifier: SequentialClassifier,
     summary: AnalysisSummary,
@@ -2350,6 +2408,7 @@ impl AnalysisEngine {
     /// The second argument remains for source compatibility; continuity is now purely spatial.
     pub fn with_windows(correlation_ttl_ns: u64, _sequential_window_ns: u64) -> Self {
         Self {
+            retain_all_evidence: false,
             correlator: RequestCorrelator::new(correlation_ttl_ns),
             classifier: SequentialClassifier::new(),
             summary: AnalysisSummary::default(),
@@ -2443,10 +2502,8 @@ impl AnalysisEngine {
                 let ts_ns = issue.ts_ns;
                 let depth = self.correlator.on_issue_classified(issue, pattern);
                 self.summary.max_queue_depth = self.summary.max_queue_depth.max(Some(depth));
-                self.buckets
-                    .entry(ts_ns / 1_000_000_000)
-                    .or_default()
-                    .max_queue_depth = Some(depth);
+                let bucket = self.buckets.entry(ts_ns / 1_000_000_000).or_default();
+                bucket.max_queue_depth = bucket.max_queue_depth.max(Some(depth));
                 None
             }
             StorageEvent::BlockComplete(completion) => {
@@ -2474,7 +2531,7 @@ impl AnalysisEngine {
                     request_cache_key(&completed),
                     (low, completed.completion.ts_ns),
                 );
-                if self.completed.len() == MAX_ANALYSIS_SAMPLES {
+                if !self.retain_all_evidence && self.completed.len() == MAX_ANALYSIS_SAMPLES {
                     for old in self.completed.drain(..MAX_ANALYSIS_SAMPLES / 10) {
                         self.evidence_windows.remove(&request_cache_key(&old));
                     }
@@ -2483,8 +2540,7 @@ impl AnalysisEngine {
                 Some(completed)
             }
             StorageEvent::ObservedBlockCompletion(completed) => {
-                self.observe_ts(completed.start_timestamp());
-                self.observe_ts(completed.completion.ts_ns);
+                self.observe_request_time(&completed);
                 self.summary.issued_ios += u64::from(completed.issue_timestamp().is_some());
                 match completed.access_pattern {
                     AccessPattern::Sequential => self.summary.sequential_ios += 1,
@@ -2496,12 +2552,14 @@ impl AnalysisEngine {
                     IoSizeClass::Large => self.summary.large_ios += 1,
                 }
                 if self.completion_window.is_some_and(|(start, end)| {
-                    completed.completion.ts_ns < start || completed.completion.ts_ns > end
+                    completed
+                        .completion_timestamp()
+                        .is_none_or(|ts| ts < start || ts > end)
                 }) {
                     return Some(completed);
                 }
                 self.record_completed(&completed);
-                if self.completed.len() == MAX_ANALYSIS_SAMPLES {
+                if !self.retain_all_evidence && self.completed.len() == MAX_ANALYSIS_SAMPLES {
                     self.completed.drain(..MAX_ANALYSIS_SAMPLES / 10);
                 }
                 self.completed.push(completed.clone());
@@ -2518,7 +2576,7 @@ impl AnalysisEngine {
                 ) {
                     self.summary.attributed_file_ios += 1;
                 }
-                if self.file_ios.len() == MAX_ANALYSIS_SAMPLES {
+                if !self.retain_all_evidence && self.file_ios.len() == MAX_ANALYSIS_SAMPLES {
                     self.file_ios.drain(..MAX_ANALYSIS_SAMPLES / 10);
                 }
                 if file.end_ts_ns >= file.start_ts_ns {
@@ -2569,6 +2627,7 @@ impl AnalysisEngine {
                             && observation.ts_ns >= begin.ts_ns
                         {
                             bounded_push(
+                                self.retain_all_evidence,
                                 &mut self.pipeline_observations,
                                 PipelineObservation {
                                     ts_ns: begin.ts_ns,
@@ -2589,7 +2648,11 @@ impl AnalysisEngine {
                             );
                         }
                     }
-                    _ => bounded_push(&mut self.pipeline_observations, observation),
+                    _ => bounded_push(
+                        self.retain_all_evidence,
+                        &mut self.pipeline_observations,
+                        observation,
+                    ),
                 }
                 let newest = self.last_ts_ns.unwrap_or_default();
                 self.pending_pipeline
@@ -2603,7 +2666,7 @@ impl AnalysisEngine {
                 self.attribution_generation = self.attribution_generation.saturating_add(1);
                 self.observe_ts(node.start_ts_ns);
                 self.observe_ts(node.end_or_start());
-                bounded_push(&mut self.graph_nodes, node);
+                bounded_push(self.retain_all_evidence, &mut self.graph_nodes, node);
                 None
             }
             StorageEvent::RequestOrigin(origin) => {
@@ -2612,6 +2675,7 @@ impl AnalysisEngine {
                 let node_id = request_origin_node_id(origin.request_id, origin.origin_id);
                 let request_node_id = block_request_node_id(origin.request_id);
                 bounded_push(
+                    self.retain_all_evidence,
                     &mut self.graph_nodes,
                     IoNode {
                         node_id,
@@ -2634,6 +2698,7 @@ impl AnalysisEngine {
                     },
                 );
                 bounded_push(
+                    self.retain_all_evidence,
                     &mut self.graph_edges,
                     IoEdge {
                         edge_id: request_origin_edge_id(origin.request_id, origin.origin_id),
@@ -2669,7 +2734,7 @@ impl AnalysisEngine {
             }
             StorageEvent::Edge(edge) => {
                 self.attribution_generation = self.attribution_generation.saturating_add(1);
-                bounded_push(&mut self.graph_edges, edge);
+                bounded_push(self.retain_all_evidence, &mut self.graph_edges, edge);
                 None
             }
         }
@@ -2677,6 +2742,14 @@ impl AnalysisEngine {
 
     fn record_completed(&mut self, completed: &CompletedIo) {
         self.summary.completed_ios += 1;
+        if let Some(depth) = completed.queue_depth_at_issue {
+            self.summary.measured_queue_depth_ios += 1;
+            self.summary.max_queue_depth = self.summary.max_queue_depth.max(Some(depth));
+            if let Some(ts) = completed.issue_timestamp() {
+                let bucket = self.buckets.entry(ts / 1_000_000_000).or_default();
+                bucket.max_queue_depth = bucket.max_queue_depth.max(Some(depth));
+            }
+        }
         let bytes = completed.issue.bytes as u64;
         match completed.issue.operation {
             IoOperation::Read => self.summary.read_bytes += bytes,
@@ -2686,24 +2759,26 @@ impl AnalysisEngine {
         if let Some(latency) = completed.total_latency_ns {
             self.latencies_ns.push(latency);
             self.live_latency_histogram.record(latency);
-            merge_interval(
-                &mut self.busy_intervals,
-                (completed.start_timestamp(), completed.completion.ts_ns),
-            );
+            if let Some(interval) = completed
+                .start_timestamp()
+                .zip(completed.completion_timestamp())
+            {
+                merge_interval(&mut self.busy_intervals, interval);
+            }
         } else {
             self.summary.unmeasured_latency_ios += 1;
         }
-        let bucket = self
-            .buckets
-            .entry(completed.completion.ts_ns / 1_000_000_000)
-            .or_default();
-        bucket.completed_ios += 1;
-        bucket.bytes += bytes;
-        if let Some(latency) = completed.total_latency_ns {
-            bucket.latency_sum_ns += latency as u128;
-            bucket.latency_samples += 1;
+        if let Some(timestamp) = completed.completion_timestamp() {
+            let bucket = self.buckets.entry(timestamp / 1_000_000_000).or_default();
+            bucket.completed_ios += 1;
+            bucket.bytes += bytes;
+            if let Some(latency) = completed.total_latency_ns {
+                bucket.latency_sum_ns += latency as u128;
+                bucket.latency_samples += 1;
+            }
+        } else {
+            self.summary.unplaced_time_ios += 1;
         }
-        bucket.max_queue_depth = bucket.max_queue_depth.max(completed.queue_depth_after);
         let category = self
             .categories
             .entry((
@@ -2725,6 +2800,21 @@ impl AnalysisEngine {
         self.last_ts_ns = Some(self.last_ts_ns.map_or(ts_ns, |value| value.max(ts_ns)));
     }
 
+    fn observe_request_time(&mut self, io: &CompletedIo) {
+        if let Some((start, end)) = io.start_timestamp().zip(io.completion_timestamp()) {
+            self.observe_ts(start);
+            self.observe_ts(end);
+        }
+    }
+
+    /// The span of events that can be placed on this session's clock. This is
+    /// useful for range controls, even when other preserved events lack a clock.
+    pub fn known_time_span_ns(&self) -> Option<u64> {
+        self.first_ts_ns
+            .zip(self.last_ts_ns)
+            .map(|(first, last)| last.saturating_sub(first))
+    }
+
     /// Stable timestamp across retention and filtered views.
     pub fn session_start_ns(&self) -> Option<u64> {
         self.first_ts_ns
@@ -2741,14 +2831,19 @@ impl AnalysisEngine {
         summary.p95_latency_ns = percentile(&values, 95);
         summary.p99_latency_ns = percentile(&values, 99);
         summary.logging_ns = self
-            .first_ts_ns
-            .zip(self.last_ts_ns)
-            .map_or(0, |(first, last)| last.saturating_sub(first));
+            .known_time_span_ns()
+            .filter(|_| summary.unplaced_time_ios == 0);
         summary.busy_ns = (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0)
-            .then(|| union_duration(&self.busy_intervals).min(summary.logging_ns));
+            .then(|| {
+                summary
+                    .logging_ns
+                    .map(|span| union_duration(&self.busy_intervals).min(span))
+            })
+            .flatten();
         summary.idle_ns = summary
             .busy_ns
-            .map(|busy| summary.logging_ns.saturating_sub(busy));
+            .zip(summary.logging_ns)
+            .map(|(busy, span)| span.saturating_sub(busy));
         summary.category_summaries = self
             .categories
             .iter()
@@ -2822,8 +2917,7 @@ impl AnalysisEngine {
     }
 
     fn observe_selected_request(&mut self, io: &CompletedIo) {
-        self.observe_ts(io.start_timestamp());
-        self.observe_ts(io.completion.ts_ns);
+        self.observe_request_time(io);
         self.record_completed(io);
         self.summary.issued_ios += u64::from(io.issue_timestamp().is_some());
         match io.access_pattern {
@@ -2835,7 +2929,6 @@ impl AnalysisEngine {
             IoSizeClass::Small => self.summary.small_ios += 1,
             IoSizeClass::Large => self.summary.large_ios += 1,
         }
-        self.summary.max_queue_depth = self.summary.max_queue_depth.max(io.queue_depth_after);
     }
 
     /// A bounded-cost snapshot intended for live rendering. Percentiles are
@@ -2847,20 +2940,23 @@ impl AnalysisEngine {
         summary.p95_latency_ns = histogram_percentile_upper(&self.live_latency_histogram, 95);
         summary.p99_latency_ns = histogram_percentile_upper(&self.live_latency_histogram, 99);
         summary.logging_ns = self
-            .first_ts_ns
-            .zip(self.last_ts_ns)
-            .map_or(0, |(first, last)| last.saturating_sub(first));
-        summary.busy_ns =
-            (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0).then(|| {
-                self.busy_intervals
-                    .iter()
-                    .map(|(start, end)| end.saturating_sub(*start))
-                    .sum::<u64>()
-                    .min(summary.logging_ns)
-            });
+            .known_time_span_ns()
+            .filter(|_| summary.unplaced_time_ios == 0);
+        summary.busy_ns = (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0)
+            .then(|| {
+                summary.logging_ns.map(|span| {
+                    self.busy_intervals
+                        .iter()
+                        .map(|(start, end)| end.saturating_sub(*start))
+                        .sum::<u64>()
+                        .min(span)
+                })
+            })
+            .flatten();
         summary.idle_ns = summary
             .busy_ns
-            .map(|busy| summary.logging_ns.saturating_sub(busy));
+            .zip(summary.logging_ns)
+            .map(|(busy, span)| span.saturating_sub(busy));
         summary.category_summaries = self
             .categories
             .iter()
@@ -3208,8 +3304,8 @@ fn durations_by_kind(graph: &IoTransactionGraph) -> BTreeMap<IoNodeKind, u64> {
         .collect()
 }
 
-fn bounded_push<T>(values: &mut Vec<T>, value: T) {
-    if values.len() == MAX_ANALYSIS_SAMPLES {
+fn bounded_push<T>(retain_all: bool, values: &mut Vec<T>, value: T) {
+    if !retain_all && values.len() == MAX_ANALYSIS_SAMPLES {
         values.drain(..MAX_ANALYSIS_SAMPLES / 10);
     }
     values.push(value);

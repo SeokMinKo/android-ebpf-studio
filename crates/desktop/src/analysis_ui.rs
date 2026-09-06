@@ -112,7 +112,7 @@ mod diskstats_performance_tests {
             app.summary_view.is_none(),
             "pending batches must not rebuild results on every frame"
         );
-        app.tx.send(HostMessage::Finalized(Ok(()))).unwrap();
+        app.tx.send(HostMessage::Finalized(Ok(None))).unwrap();
         app.drain_messages();
         let mut output = ctx.run_ui(Default::default(), |root| {
             egui::CentralPanel::default().show(root, |ui| app.analysis_page_ui(ui));
@@ -185,6 +185,7 @@ mod diskstats_performance_tests {
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 struct AnalysisFilter {
+    latency_range: Option<LatencyRange>,
     request_keys: Option<std::collections::HashSet<IoSelectionKey>>,
     start_ms: f64,
     end_ms: f64,
@@ -202,38 +203,10 @@ struct AnalysisFilter {
     layer:Option<IoNodeKind>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-enum PathConfidence {
-    Exact,
-    Probable,
-    Unresolved,
-}
+type PathConfidence = android_ebpf_protocol::FilePathConfidence;
 
 fn path_confidence(origins: &[FileOriginView]) -> PathConfidence {
-    if origins.is_empty()
-        || origins.iter().any(|v| {
-            v.path
-                .as_ref()
-                .and_then(|p| p.path.as_ref())
-                .is_none_or(|p| p.is_empty())
-        })
-    {
-        PathConfidence::Unresolved
-    } else if origins
-        .iter()
-        .all(|v| v.confidence == EdgeConfidence::Exact)
-    {
-        PathConfidence::Exact
-    } else if origins.iter().any(|v| {
-        matches!(
-            v.confidence,
-            EdgeConfidence::Probable | EdgeConfidence::ProbableAsync
-        )
-    }) {
-        PathConfidence::Probable
-    } else {
-        PathConfidence::Unresolved
-    }
+    PathConfidence::from_origins(origins)
 }
 
 impl AnalysisFilter {
@@ -242,16 +215,27 @@ impl AnalysisFilter {
     }
     fn matches(&self, engine: &AnalysisEngine, io: &CompletedIo, origin: u64) -> bool {
         if self
+            .latency_range
+            .is_some_and(|range| !range.contains(io.total_latency_ns))
+        {
+            return false;
+        }
+        if self
             .request_keys
             .as_ref()
             .is_some_and(|keys| !keys.contains(&selection_key(io)))
         {
             return false;
         }
-        let time = io.completion.ts_ns.saturating_sub(origin) as f64 / 1_000_000.0;
-        if time < self.start_ms
-            || (self.end_ms > 0.0 && time > self.end_ms)
-            || (self.pid != 0 && Some(self.pid) != io.issuer_pid())
+        if (self.start_ms > 0.0 || self.end_ms > 0.0)
+            && io.completion_timestamp().is_none_or(|ts| {
+                let time = ts.saturating_sub(origin) as f64 / 1_000_000.0;
+                time < self.start_ms || (self.end_ms > 0.0 && time > self.end_ms)
+            })
+        {
+            return false;
+        }
+        if (self.pid != 0 && Some(self.pid) != io.issuer_pid())
             || (self.tid != 0 && Some(self.tid) != io.issuer_tid())
             || self.operation.is_some_and(|v| v != io.issue.operation)
             || io.issue.bytes<self.min_bytes
@@ -412,11 +396,13 @@ impl StudioApp {
         self.filtered.as_ref().unwrap_or(&self.analyzer)
     }
 
-    fn time_origin(&self) -> u64 {
+    fn known_time_origin(&self) -> Option<u64> {
         self.reanalysis
             .source_start_ns
             .or_else(||self.analyzer.session_start_ns().into_iter().chain(self.analyzer.scheduler_start_ns()).min())
-            .unwrap_or(0)
+    }
+    fn time_origin(&self) -> u64 {
+        self.known_time_origin().unwrap_or(0)
     }
 
     fn invalidate_query(&mut self) {
@@ -462,6 +448,14 @@ impl StudioApp {
             return;
         }
         let previous = self.query.clone();
+        if let Some(range) = self.query.latency_range {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Total latency: {}", range.label()));
+                if ui.button("Clear latency range").clicked() {
+                    self.query.latency_range = None;
+                }
+            });
+        }
         let header=ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
             // A numeric editor commits its buffered text when it loses focus.
             // Replace input identities after Clear so a delayed commit cannot
@@ -533,6 +527,16 @@ impl StudioApp {
                 },
             ));
         }
+        self.time_filter_scope_ui(ui);
+    }
+
+    fn time_filter_scope_ui(&self, ui: &mut egui::Ui) {
+        if self.query.start_ms > 0.0 || self.query.end_ms > 0.0 {
+            let count = self.analyzer.live_summary().unplaced_time_ios;
+            if count > 0 {
+                ui.label(format!("Time filter excludes unsupported-clock I/O ({count} in the loaded source). Clear the time filter to inspect their count, bytes and addresses."));
+            }
+        }
     }
 
     fn trends_ui(&mut self, ui: &mut egui::Ui) {
@@ -552,42 +556,121 @@ impl StudioApp {
         {
             self.trend_view = Some((
                 self.analysis_generation,
-                TrendData::build(self.analysis(), origin),
+                Arc::new(TrendData::build(self.analysis(), origin)),
             ));
         }
+        let data = Arc::clone(&self.trend_view.as_ref().unwrap().1);
         let TrendData {
             bins,
+            activity_points,
             histogram,
             coverage,
             multi,
             targets,
+            unplaced_time_count,
             ..
-        } = self.trend_view.as_ref().unwrap().1.clone();
+        } = &*data;
+        self.session_file_path_coverage_ui(ui);
         let total: u64 = coverage.iter().sum();
-        ui.label(format!("FilePath by request count (n={total}): Exact {:.1}% · Probable {:.1}% · Unresolved {:.1}% · multi-origin {multi}", ratio(coverage[0],total), ratio(coverage[1],total), ratio(coverage[2],total)));
+        if *unplaced_time_count > 0 {
+            ui.label(format!("{unplaced_time_count} / {total} I/O have no supported session clock. Time graphs and time filters exclude them; count, bytes, address and FilePath coverage retain them."));
+        }
+        ui.label(format!("Retained detail FilePath by request count (n={total}): Exact {} · Probable {} · Unresolved {} · multi-origin {multi}", coverage_percent(coverage[0],total), coverage_percent(coverage[1],total), coverage_percent(coverage[2],total)));
         ui.label("FilePath confidence requires a path snapshot as well as identity evidence. Exact inode without a path remains FilePath Unresolved. This ratio describes retained detail, not bytes or suppressed/unpaired I/O.");
         if let Some(aggregate) = &self.latest_aggregate {
-            ui.label(format!("Session-wide kernel observed: {} · retained completed: {} · remaining I/O cannot be assigned a FilePath coverage claim", aggregate.counters.observed, self.analyzer.completed_ios().len()));
+            ui.label(format!("Last kernel snapshot observed: {} · retained completed: {} · lost/suppressed I/O are outside observed-completion FilePath coverage", aggregate.counters.observed, self.analyzer.completed_ios().len()));
         }
         let mut selected_bin = None;
         for (id, title, offset) in [
             ("iops-timeline", "IOPS (requests / s)", 0),
             ("throughput-timeline", "Throughput (MiB / s)", 2),
         ] {
+            if bins.is_empty() {
+                ui.label(format!(
+                    "{title}: unavailable — no I/O can be placed on the session timeline."
+                ));
+                continue;
+            }
+            let mut rendered = [0usize; 2];
+            let qa_gesture = self
+                .render_qa
+                .output
+                .as_ref()
+                .and_then(|_| std::env::var("ANDROID_EBPF_QA_GESTURE").ok());
+            let qa_active = qa_gesture.as_deref().is_some_and(|g| {
+                g.starts_with("activity-")
+                    && (offset == if g == "activity-throughput" { 2 } else { 0 })
+            });
+            if qa_active && self.render_qa.frames >= 28 && self.render_qa.input_step == 0 {
+                ui.scroll_to_rect(
+                    egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), 200.0),
+                    ),
+                    Some(egui::Align::Center),
+                );
+            }
+            let clip = ui.clip_rect();
             studio_plot(id)
+                .include_x(activity_points[offset].full().first().unwrap().x)
+                .include_x(activity_points[offset].full().last().unwrap().x)
+                .include_y(
+                    activity_points[offset].y_bounds[0]
+                        .min(activity_points[offset + 1].y_bounds[0]),
+                )
+                .include_y(
+                    activity_points[offset].y_bounds[1]
+                        .max(activity_points[offset + 1].y_bounds[1]),
+                )
                 .height(170.0)
                 .legend(Legend::default())
                 .x_axis_label("Seconds since session start")
                 .y_axis_label(title)
                 .show(ui, |plot| {
-                    for (index, label, color) in
-                        [(0, "Read / other", accent()), (1, "Write", green())]
-                    {
-                        let points: PlotPoints = bins
-                            .iter()
-                            .map(|(second, v)| [*second as f64 + 0.5, v[offset + index]])
-                            .collect();
-                        plot.points(Points::new(label, points).radius(4.0).color(color));
+                    for (index, label, color) in [(0, "Read", accent()), (1, "Write", green())] {
+                        let bounds = plot.plot_bounds();
+                        let columns = (plot.response().rect.width() * plot.ctx().pixels_per_point())
+                            .ceil() as usize;
+                        let samples = activity_points[offset + index]
+                            .visible([bounds.min()[0], bounds.max()[0]], columns);
+                        rendered[index] = samples.len();
+                        if qa_active {
+                            self.render_qa.activity.visible_points[index] = samples
+                                .iter()
+                                .filter(|p| {
+                                    p.x >= bounds.min()[0]
+                                        && p.x <= bounds.max()[0]
+                                        && p.y >= bounds.min()[1]
+                                        && p.y <= bounds.max()[1]
+                                })
+                                .count();
+                        }
+                        if qa_active && index == 0 {
+                            let qa = &mut self.render_qa.activity;
+                            let rect = plot.response().rect;
+                            if qa.rect == Some(rect) {
+                                qa.stable_frames += 1;
+                            } else {
+                                qa.rect = Some(rect);
+                                qa.stable_frames = 0;
+                            }
+                            qa.origin_ns = origin;
+                            qa.full_bins = bins.len();
+                            qa.width = bounds.max()[0] - bounds.min()[0];
+                            qa.mean_spacing =
+                                samples.first().zip(samples.last()).map_or(0.0, |(a, b)| {
+                                    (b.x - a.x) / samples.len().saturating_sub(1).max(1) as f64
+                                });
+                            if self.render_qa.input_step == 0 {
+                                let original = activity_points[offset].full();
+                                let middle = original[original.len() / 2];
+                                let target = plot.screen_from_plot(middle);
+                                qa.target = (rect.contains(target) && clip.contains(target))
+                                    .then_some(target);
+                                qa.expected_second = Some(middle.x.floor() as u64);
+                            }
+                        }
+                        plot.points(Points::new(label, samples).radius(4.0).color(color));
                     }
                     if plot.response().clicked()
                         && let Some(point) = plot.pointer_coordinate()
@@ -596,37 +679,27 @@ impl StudioApp {
                         selected_bin = Some(point.x.floor());
                     }
                 });
+            if qa_active {
+                self.render_qa.activity.rendered_points = rendered;
+            }
+            if rendered.iter().any(|&n| n < bins.len()) {
+                ui.label(format!("Displayed time-bin points: Read {} / {} · Write {} / {} · first/min/max/last samples. Zoom for finer detail; analysis uses all bins.", rendered[0], bins.len(), rendered[1], bins.len()));
+            }
         }
         if let Some(second) = selected_bin {
-            self.query.start_ms = second * 1000.0;
-            self.query.end_ms = (second + 1.0) * 1000.0 - 0.000001;
-            self.invalidate_query();
-            self.rebuild_filtered();
-            self.page = Page::Explore;
+            self.explore_activity_second(second);
         }
-        studio_plot("latency-distribution")
-            .height(160.0)
-            .x_axis_label("Total latency log2(ns), bin [2^x, 2^(x+1))")
-            .y_axis_label("Requests")
-            .show(ui, |plot| {
-                let bars = histogram
-                    .iter()
-                    .map(|(bucket, count)| {
-                        egui_plot::Bar::new(*bucket as f64, *count as f64).width(0.8)
-                    })
-                    .collect();
-                plot.bar_chart(
-                    egui_plot::BarChart::new("Retained total latency", bars).color(amber()),
-                );
-            });
+        if let Some(range) = self.latency_distribution_ui(ui, histogram, total) {
+            self.explore_latency_range(range);
+        }
         ui.label("Total latency: insert→complete when insert exists, otherwise issue→complete. Queue: insert→issue (unavailable without insert). Device: issue→complete. Queue depth is observed block in-flight depth; missing/suppressed events can reduce it. Sequential: previous sector + sectors equals current sector, within the same device and direction, at the block issue layer.");
         ui.collapsing("Processes ranked by transferred bytes in selection", |ui| {
-            let mut rows: Vec<_> = targets.into_iter().collect();
+            let mut rows: Vec<_> = targets.iter().collect();
             rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
             for (name, (count, bytes)) in rows.into_iter().take(30) {
                 ui.label(format!(
                     "{name} · {count} requests · {}",
-                    format_bytes(bytes)
+                    format_bytes(*bytes)
                 ));
             }
         });
@@ -838,6 +911,7 @@ mod query_regressions {
             mount_id: None,
         };
         let mut origin = FileOriginView {
+            incomplete: false,
             file: identity,
             path: None,
             confidence: EdgeConfidence::Exact,
@@ -911,15 +985,31 @@ mod query_regressions {
     }
 }
 
-#[derive(Clone)]
+include!("activity_series.rs");
+include!("activity_qa.rs");
+
+impl StudioApp {
+    fn explore_activity_second(&mut self, second: f64) {
+        self.query.start_ms = second * 1000.0;
+        self.query.end_ms = (second + 1.0) * 1000.0 - 0.000001;
+        self.invalidate_query();
+        self.rebuild_filtered();
+        self.page = Page::Explore;
+        self.begin_selection(all_plot_requests());
+    }
+}
+
 struct TrendData {
     slowest: Option<CompletedIo>,
     top_issuer: Option<(u32, String, u64, u64)>,
     bins: BTreeMap<u64, [f64; 4]>,
+    activity_points: [ActivitySeries; 4],
+    busiest_second: Option<(u64, [f64; 4])>,
     histogram: BTreeMap<u32, u64>,
     coverage: [u64; 3],
     multi: u64,
     targets: BTreeMap<String, (u64, u64)>,
+    unplaced_time_count: u64,
 }
 impl TrendData {
     fn build(engine: &AnalysisEngine, origin: u64) -> Self {
@@ -930,6 +1020,7 @@ impl TrendData {
         let mut coverage = [0_u64; 3];
         let mut multi = 0;
         let mut targets = BTreeMap::<String, (u64, u64)>::new();
+        let mut unplaced_time_count = 0;
         for io in engine.completed_ios() {
             if io.total_latency_ns.is_some()
                 && slowest
@@ -945,15 +1036,19 @@ impl TrendData {
                 issuer.1 += 1;
                 issuer.2 += io.issue.bytes as u64;
             }
-            let second = io.completion.ts_ns.saturating_sub(origin) / 1_000_000_000;
-            let bin = bins.entry(second).or_default();
-            let offset = usize::from(io.issue.operation == IoOperation::Write);
-            if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write) {
-                bin[offset] += 1.0;
-                bin[2 + offset] += io.issue.bytes as f64 / 1_048_576.0;
+            if let Some(timestamp) = io.completion_timestamp() {
+                let second = timestamp.saturating_sub(origin) / 1_000_000_000;
+                let bin = bins.entry(second).or_default();
+                let offset = usize::from(io.issue.operation == IoOperation::Write);
+                if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write) {
+                    bin[offset] += 1.0;
+                    bin[2 + offset] += io.issue.bytes as f64 / 1_048_576.0;
+                }
+            } else {
+                unplaced_time_count += 1;
             }
             if let Some(latency) = io.total_latency_ns {
-                let bucket = 63 - latency.max(1).leading_zeros();
+                let bucket = latency_bucket(latency);
                 *histogram.entry(bucket).or_default() += 1;
             }
             let origins = block_file_origins(&engine.transaction_for(io));
@@ -972,7 +1067,22 @@ impl TrendData {
             target.1 += io.issue.bytes as u64;
         }
 
+        let activity_points = std::array::from_fn(|index| {
+            ActivitySeries::new(
+                bins.iter()
+                    .map(|(&second, values)| {
+                        egui_plot::PlotPoint::new(second as f64 + 0.5, values[index])
+                    })
+                    .collect(),
+            )
+        });
+        let busiest_second = bins
+            .iter()
+            .max_by(|a, b| (a.1[2] + a.1[3]).total_cmp(&(b.1[2] + b.1[3])))
+            .map(|(&second, &values)| (second, values));
         Self {
+            activity_points,
+            busiest_second,
             slowest,
             top_issuer: issuers
                 .into_iter()
@@ -983,6 +1093,7 @@ impl TrendData {
             coverage,
             multi,
             targets,
+            unplaced_time_count,
         }
     }
 }

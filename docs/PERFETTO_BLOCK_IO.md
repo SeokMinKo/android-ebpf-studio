@@ -30,6 +30,21 @@ assignment. Multiple candidates remain attached to the completion. Missing
 latency and queue wait are `None`, never a fabricated zero. Request insert is
 optional and queue wait requires a unique, earlier insert candidate.
 
+Unsupported ftrace bundle clocks also make normalized completion/start time
+unavailable. Those observations retain raw timestamps and clock IDs, device,
+sector and bytes, but cannot establish a session origin or enter temporal bins.
+Time filters exclude them explicitly; address/chunk views can still select them.
+If any selected observation lacks normalized time, the full selection's span and
+throughput are unavailable, including when known and unknown clocks are mixed.
+Known-clock subset bounds are labeled separately. Compare follows the same rule
+independently for each side; JSON uses null and CSV leaves normalized time empty
+while retaining the original timestamp/clock in its evidence column.
+
+This is an explicit limitation of the current decoder, not ClockSnapshot-based
+normalization support. Host regressions exercise all-unknown and mixed clocks,
+replay, time filters, selection summaries and exports. Physical unsupported-clock
+acceptance has not been performed.
+
 The tracepoint PID is a **TID**. Completion context is not used as the issuer.
 Raw process/thread snapshots and process age metadata are preserved. The latest
 dated snapshot at or before issue provides a candidate TGID/name only if process
@@ -40,6 +55,51 @@ FilePath is always **Unresolved** for this block-only source. Neither the comman
 name nor a nearby file operation establishes a file association.
 
 ## Quality and recovery
+
+### Automatic fallback after root collector startup failure
+
+Preflight checks shell-accessible Perfetto even when root, ABI and readable
+tracepoints suggest eBPF can start. A verifier/deployment/startup failure before
+readiness and before measurements triggers fresh detection for the same serial.
+The boot must still match. The failed collector is stopped before another source
+is started. Perfetto is preferred to device counters; counters remain available
+if the service is absent or rejects startup. Block-only FilePath stays Unresolved.
+
+The first profile is preserved as `device-profile-before-fallback.json` and the
+updated `device-profile.json` includes `ebpf_start_error`. The original failure
+and selected fallback are also recorded in a session SourceInfo record. A new
+Start performs a fresh preflight rather than persisting that failure across runs.
+Already emitted measurements, readiness followed by failure, a changed boot or
+cancellation prevent an unrelated collector from continuing the same session.
+Exit code zero without readiness is not treated as successful capture.
+
+Host-only fake ADB tests exercise these transitions through the production
+capture code and owned Perfetto transport. They are not physical root acceptance.
+
+### Perfetto launch failures and partial recovery
+
+A failed `--background-wait` call can follow a successful background fork; its
+exit status alone does not prove that no collector is running. The desktop saves
+any returned PID even on a nonzero exit. If launch/readiness fails, it first
+identifies and stops its own capture and projects retrieved observations into the
+normal session analysis. The result remains Error, with the startup reason,
+quality evidence, raw trace and recovery manifest preserved. It does not silently
+replace partially collected block I/O with device counters.
+
+If PID or lifetime output was lost, recovery checks the original boot and looks
+for a unique Perfetto process containing both exact nonce-scoped config and trace
+arguments. Creation ticks must stay stable across identification; normal changes
+between running and sleeping states do not change process ownership. Foreign or
+ambiguous processes are never signalled. Failed enumeration/connectivity leaves
+an explicit recovery error; retry uses the saved manifest after reconnection.
+Counters start only when no owned process or accessible trace remains.
+
+Host regressions cover transient identity reads, missing PID output, nonzero exit
+after launch, changing process state, foreign commands, ambiguous matches and a
+failed enumeration followed by successful recovery. They do not simulate physical
+USB removal. Background semantics: [Perfetto CLI reference](https://perfetto.dev/docs/reference/perfetto-cli).
+
+### Saved source quality
 
 The decoder preserves ftrace lost-bundle flags, parse errors, unavailable and
 failed events, kernel start/end counters, service loss counters and final-flush
@@ -71,6 +131,21 @@ New device recordings keep `capture.ndjson`, device profile, logs and the
 `perfetto/` subdirectory together in a unique session directory. This makes raw
 export and recovery locate the same run without searching another session's log
 tree. Existing standalone NDJSON sessions remain readable.
+
+### Stage timing probe
+
+```text
+cargo run --release -p android-ebpf-studio --example perfetto_benchmark -- <saved-capture.pftrace>
+```
+
+This read-only probe reports decoder, correlation, index, projection and
+projection-plus-serialization timings. Serialization repeats projection, so do
+not sum the two projection measurements. The benchmark excludes ADB operations,
+GUI ingestion, disk writes and fsync; native Start/Stop remains the end-to-end
+acceptance gate. A 45,147,958-byte real trace with 515,961 completion observations
+measured approximately 492 ms decode, 288 ms correlation, 110 ms index and
+384 ms projection plus serialization to a sink on the recorded Windows host.
+These figures identify component costs, not a five-second capture guarantee.
 
 ## Evidence recorded on 2026-09-06
 

@@ -45,6 +45,23 @@ mod timeline_tests {
     }
     fn context()->BandwidthContext {BandwidthContext{activity:Arc::new(crate::host_bw::ActivityTimeline::default()),range:(0,7_000_000),devices:vec![(8,0),(8,1)]}}
     #[test]
+    fn unsupported_clock_is_not_placed_in_added_time_graphs() {
+        let source=fixture();let mut engine=AnalysisEngine::new();
+        let mut io=source.completed_ios().iter().find(|io|io.evidence.is_some()).unwrap().clone();
+        io.evidence.as_mut().unwrap().clock=99;
+        engine.ingest(StorageEvent::ObservedBlockCompletion(io));
+        let request=SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]};
+        assert_eq!(build_footprint(&engine,0,FootprintMode::Process,0).unique,0);
+        for mode in [TimelineMode::Commands,TimelineMode::Requests,TimelineMode::Cpus] {
+            assert!(build_timeline(&engine,mode,0).points.is_empty());
+            let s=compute_timeline_selection(&engine,request,mode,0,context());
+            assert!(s.keys.is_empty());assert_eq!(s.unplottable_rows,1);
+        }
+        let s=compute_graph_selection(&engine,request,AxisMetric::TimeMs,AxisMetric::Window(crate::window_series::WindowMetric::Iops),0,context(),1);
+        assert!(s.keys.is_empty());assert_eq!(s.unplottable_rows,1);
+        assert!(s.window_series.unwrap().samples.iter().all(|w|w.requests[0]==0));
+    }
+    #[test]
     fn cpu_timeline_keeps_phase_cpus_and_unknown_lane_distinct_including_across_pages() {
         let source=fixture();let mut engine=AnalysisEngine::new();
         for original in source.completed_ios() {let mut io=original.clone();io.completion.cpu=match io.issue.request_id {1=>Some(7),2=>Some(0),_=>None};engine.ingest(StorageEvent::ObservedBlockCompletion(io));}
@@ -93,7 +110,7 @@ mod timeline_tests {
     }
 }
 fn build_timeline(engine:&AnalysisEngine,mode:TimelineMode,origin:u64)->TimelineView {
-    let mut ordered:Vec<_>=engine.completed_ios().iter().collect();
+    let mut ordered:Vec<_>=engine.completed_ios().iter().filter(|io|io.completion_timestamp().is_some()).collect();
     ordered.sort_by_key(|io|(io.issue_timestamp().unwrap_or(io.completion.ts_ns),io.completion.ts_ns,selection_key(io)));
     let command_label=|io:&CompletedIo|format!("Device {}:{} / {}",io.issue.device_major,io.issue.device_minor,operation_label(io.issue.operation));
     let cpu_label=|io:&CompletedIo,cpu:Option<u32>|format!("Device {}:{} / CPU {}",io.issue.device_major,io.issue.device_minor,cpu.map_or("unmeasured".into(),|n|n.to_string()));
@@ -122,7 +139,7 @@ fn compute_timeline_selection(engine:&AnalysisEngine,request:SelectionRequest,mo
     let keys:std::collections::HashSet<_>=timeline.points.iter().map(|p|p.key).collect();
     let cohort=engine.select_completed(|io|keys.contains(&selection_key(io)));
     let mut result=compute_selection(&cohort,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,origin);
-    result.source_rows=engine.completed_ios().len();result.metric_axis=Some(AxisMetric::DeviceLatencyMs);result.metric=Default::default();result.bounds=None;
+    result.source_rows=engine.completed_ios().len();result.unplottable_rows=engine.completed_ios().iter().filter(|io|io.completion_timestamp().is_none()).count();result.metric_axis=Some(AxisMetric::DeviceLatencyMs);result.metric=Default::default();result.bounds=None;
     for io in cohort.completed_ios() {result.metric.observe(io.issue.operation,io.device_latency_ns.map(|n|n as f64/1e6));}
     result.metric.finish();
     for p in &timeline.points {

@@ -10,6 +10,10 @@ impl BandwidthContext {
             b.with_idle_mib_s=[None;3];b.without_idle_mib_s=[None;3];
             b.coverage=format!("Graph payload cohort unavailable: no filtered request has the selected metric. {}",b.coverage);
         }
+        if s.unplaced_time_count>0 {
+            b.with_idle_mib_s=[None;3];b.without_idle_mib_s=[None;3];
+            b.coverage=format!("{} cohort requests have an unsupported clock; payload cannot be assigned to this analysis time. {}",s.unplaced_time_count,b.coverage);
+        }
         s.host_bw=Some(b);
     }
 }
@@ -29,8 +33,9 @@ impl StudioApp {
                 }
             }
             Some(SelectionRequest::Point(key))=> {
-                if let Some(io)=self.analysis().completed_ios().iter().find(|io|selection_key(io)==key) {
-                    range=(io.start_timestamp().max(range.0),io.completion.ts_ns.min(range.1));
+                if let Some(io)=self.analysis().completed_ios().iter().find(|io|selection_key(io)==key)
+                    && let Some((start,end))=io.start_timestamp().zip(io.completion_timestamp()) {
+                    range=(start.max(range.0),end.min(range.1));
                 }
             }
             None=>{}

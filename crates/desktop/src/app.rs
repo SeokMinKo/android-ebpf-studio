@@ -38,6 +38,7 @@ const MAX_MESSAGES_PER_FRAME: usize = 1_000;
 const LIVE_ANALYSIS_REFRESH: Duration = Duration::from_millis(250);
 const PERFORMANCE_WARNING_INTERVAL: Duration = Duration::from_secs(10);
 include!("analysis_ui.rs");
+include!("latency_distribution.rs");
 include!("qa.rs");
 include!("selection.rs");
 include!("graph_summary_ui.rs");
@@ -207,7 +208,7 @@ impl ExplorerPreset {
                 GroupBy::File,
             )),
             Self::QueuePressure => Some((
-                AxisMetric::QueueDepth,
+                AxisMetric::QueueDepthAtIssue,
                 AxisMetric::TotalLatencyMs,
                 GroupBy::Direction,
             )),
@@ -342,6 +343,7 @@ enum AxisMetric {
     DeviceLatencyMs,
     Pid,
     QueueDepth,
+    QueueDepthAtIssue,
     FilesystemLatencyMs,
     UfsLatencyMs,
     CriticalPathMs,
@@ -358,7 +360,7 @@ enum AxisMetric {
 }
 
 impl AxisMetric {
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 20] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
@@ -378,6 +380,7 @@ impl AxisMetric {
         Self::IssueCpu,
         Self::RollingC2cBandwidth,
         Self::RollingD2dBandwidth,
+        Self::QueueDepthAtIssue,
     ];
 
     fn label(self) -> &'static str {
@@ -391,6 +394,7 @@ impl AxisMetric {
             Self::DeviceLatencyMs => "Device latency (ms)",
             Self::Pid => "PID",
             Self::QueueDepth => "QD after completion (all devices)",
+            Self::QueueDepthAtIssue => "Observed QD at issue (all devices)",
             Self::FilesystemLatencyMs => "Filesystem latency (ms)",
             Self::UfsLatencyMs => "UFS latency (ms)",
             Self::CriticalPathMs => "Critical path (ms)",
@@ -421,7 +425,9 @@ impl AxisMetric {
         graph: Option<&IoTransactionGraph>,
     ) -> Option<f64> {
         match self {
-            Self::TimeMs => Some(io.completion.ts_ns.saturating_sub(origin_ns) as f64 / 1e6),
+            Self::TimeMs => io
+                .completion_timestamp()
+                .map(|ts| ts.saturating_sub(origin_ns) as f64 / 1e6),
             Self::Sector => Some(io.issue.sector as f64),
             Self::AddressKiB => Some(io.issue.sector as f64 / 2.0),
             Self::ChunkKiB => Some(io.issue.bytes as f64 / 1024.0),
@@ -455,6 +461,7 @@ impl AxisMetric {
                 .as_ref()
                 .and_then(|r| r.mib_s()),
             Self::Window(_) | Self::Timeline(_) | Self::SchedulerIoWait => None,
+            Self::QueueDepthAtIssue => io.queue_depth_at_issue.map(|n| n as f64),
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
@@ -480,6 +487,7 @@ impl AxisMetric {
             Self::Sector
             | Self::Pid
             | Self::QueueDepth
+            | Self::QueueDepthAtIssue
             | Self::IssueQueueDepth
             | Self::IssueCpu => format!("{value:.0}"),
             Self::AddressKiB | Self::ChunkKiB => format!("{value:.1}"),
@@ -684,13 +692,14 @@ pub struct StudioApp {
     status: String,
     diagnostics: VecDeque<DiagnosticRecord>,
     analyzer: AnalysisEngine,
+    file_path_coverage: Option<android_ebpf_protocol::FilePathCoverage>,
     query: AnalysisFilter,
     disk_stats: Vec<WireRecord>,
     disk_stats_view: DiskStatsView,
     filtered: Option<AnalysisEngine>,
     filtered_generation: u64,
     filter_edit_epoch: u64,
-    trend_view: Option<(u64, TrendData)>,
+    trend_view: Option<(u64, Arc<TrendData>)>,
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
     simulator_stop: Option<Arc<AtomicBool>>,
@@ -773,6 +782,7 @@ impl Default for StudioApp {
             status: "Ready".into(),
             diagnostics: VecDeque::new(),
             analyzer: AnalysisEngine::new(),
+            file_path_coverage: None,
             disk_stats: Vec::new(),
             disk_stats_view: DiskStatsView::default(),
             query: AnalysisFilter::default(),
@@ -1061,11 +1071,12 @@ impl StudioApp {
             std::thread::spawn(move || {
                 let result = writer
                     .finish(seen, rejected, graceful)
+                    .map(Some)
                     .map_err(|e| e.to_string());
                 let _ = tx.send(HostMessage::Finalized(result));
             });
         } else {
-            let _ = self.tx.try_send(HostMessage::Finalized(Ok(())));
+            let _ = self.tx.try_send(HostMessage::Finalized(Ok(None)));
         }
     }
 
@@ -1104,18 +1115,22 @@ impl StudioApp {
         self.footprint.view = None;
         self.footprint.pending = None;
         self.footprint.fit = true;
-        self.reanalysis.source_start_ns = Some(loaded.source_start_ns);
+        self.file_path_coverage = Some(loaded.file_path_coverage);
+        self.reanalysis.source_start_ns = loaded.source_start_ns;
         self.reanalysis.source_end_ns = loaded.source_end_ns;
         self.reanalysis.source_count = loaded.source_completed_ios;
         self.reanalysis.window = loaded.window_ns;
         self.reanalysis.elapsed_ms = loaded.load_elapsed_ms;
-        let (a, b) = loaded
-            .window_ns
-            .unwrap_or((loaded.source_start_ns, loaded.source_end_ns));
-        self.reanalysis.draft = [
-            ((a - loaded.source_start_ns) as f64 / 1e6).to_string(),
-            ((b - loaded.source_start_ns) as f64 / 1e6).to_string(),
-        ];
+        self.reanalysis.draft = loaded.source_start_ns.zip(loaded.source_end_ns).map_or(
+            [String::new(), String::new()],
+            |(origin, end)| {
+                let (a, b) = loaded.window_ns.unwrap_or((origin, end));
+                [
+                    ((a.saturating_sub(origin)) as f64 / 1e6).to_string(),
+                    ((b.saturating_sub(origin)) as f64 / 1e6).to_string(),
+                ]
+            },
+        );
         self.recent = loaded
             .engine
             .completed_ios()
@@ -1201,7 +1216,15 @@ impl StudioApp {
 
     fn drain_messages(&mut self) {
         let started = Instant::now();
-        for _ in 0..MAX_MESSAGES_PER_FRAME {
+        // Post-Stop batches can be cheap enough that the live-capture count cap
+        // wastes most of the time budget on hundreds of redundant UI frames.
+        // Retain the 4 ms yield boundary so input/close handling stays responsive.
+        let max_messages = if self.phase == CapturePhase::Analyzing {
+            MAX_MESSAGES_PER_FRAME * 4
+        } else {
+            MAX_MESSAGES_PER_FRAME
+        };
+        for _ in 0..max_messages {
             if started.elapsed() >= Duration::from_millis(4) {
                 break;
             }
@@ -1331,8 +1354,9 @@ impl StudioApp {
                     self.host_diagnostic_writer = None;
                 }
                 HostMessage::Finalized(result) => {
-                    if let Err(error) = result {
-                        self.capture_error = Some(error);
+                    match result {
+                        Ok(coverage) => self.file_path_coverage = coverage,
+                        Err(error) => self.capture_error = Some(error),
                     }
                     self.page = Page::Overview;
                     self.phase = if self.capture_error.is_some() {
@@ -1393,7 +1417,8 @@ impl StudioApp {
                     unreachable!()
                 };
                 if source != "scheduler_iowait" {
-                    self.loss_status = status.clone();
+                    self.loss_status =
+                        crate::perfetto_session::source_status(source, status, metadata);
                 }
                 if metadata.get("stage").and_then(|s| s.as_str()) == Some("recording")
                     && self.phase == CapturePhase::Preparing
@@ -1548,6 +1573,7 @@ impl StudioApp {
         self.disk_stats.clear();
         self.disk_stats_view = DiskStatsView::default();
         self.analyzer = AnalysisEngine::new();
+        self.file_path_coverage = None;
         self.analysis_generation = self.analysis_generation.wrapping_add(1);
         self.explorer_view = None;
         self.pipeline_view = None;
@@ -1786,11 +1812,14 @@ impl StudioApp {
             );
             metric_card(
                 &mut columns[2],
-                "MAX QUEUE DEPTH",
+                "MAX OBSERVED DEPTH",
                 summary
                     .max_queue_depth
                     .map_or("Not measured".into(), |n| n.to_string()),
-                "in-flight requests",
+                &format!(
+                    "at issue · all devices · {}/{} I/O measured",
+                    summary.measured_queue_depth_ios, summary.completed_ios
+                ),
                 accent(),
             );
         });
@@ -2035,6 +2064,12 @@ impl StudioApp {
         if view.displayed == 0 && !compact {
             ui.label("No plottable I/O for these axes and filters. Missing measurements are excluded; retained requests remain in the table below.");
         }
+        if [x_axis, y_axis]
+            .iter()
+            .any(|a| matches!(a, AxisMetric::QueueDepth | AxisMetric::QueueDepthAtIssue))
+        {
+            ui.label("Observed in-flight requests across all captured devices: at issue includes this request; after completion excludes it. Filters preserve the original context. Loss, ID ambiguity and expiry can reduce the count; this is not hardware queue depth.");
+        }
         let plot = studio_plot("interactive-storage-explorer");
         let plot = if show_legend {
             plot.legend(Legend::default())
@@ -2267,29 +2302,29 @@ impl StudioApp {
             summary_card(
                 &mut columns[0],
                 "Logging time (observed)",
-                format_duration(summary.logging_ns),
+                summary
+                    .logging_ns
+                    .map_or("Unavailable".into(), format_duration),
             );
             summary_card(
                 &mut columns[1],
                 "Busy time",
-                summary.busy_ns.map_or("Not measured".into(), |busy| {
-                    format!(
-                        "{} ({:.1}%)",
-                        format_duration(busy),
-                        ratio(busy, summary.logging_ns)
-                    )
-                }),
+                summary
+                    .busy_ns
+                    .zip(summary.logging_ns)
+                    .map_or("Not measured".into(), |(busy, span)| {
+                        format!("{} ({:.1}%)", format_duration(busy), ratio(busy, span))
+                    }),
             );
             summary_card(
                 &mut columns[2],
                 "Idle time",
-                summary.idle_ns.map_or("Not measured".into(), |idle| {
-                    format!(
-                        "{} ({:.1}%)",
-                        format_duration(idle),
-                        ratio(idle, summary.logging_ns)
-                    )
-                }),
+                summary
+                    .idle_ns
+                    .zip(summary.logging_ns)
+                    .map_or("Not measured".into(), |(idle, span)| {
+                        format!("{} ({:.1}%)", format_duration(idle), ratio(idle, span))
+                    }),
             );
             summary_card(
                 &mut columns[3],
@@ -2679,6 +2714,13 @@ impl StudioApp {
         if let Some(evidence) = &io.evidence {
             ui.heading("Perfetto block observation");
             ui.label(format!(
+                "Raw completion timestamp {} ns · ftrace clock {}",
+                io.completion.ts_ns, evidence.clock
+            ));
+            if io.completion_timestamp().is_none() {
+                ui.label("Session time unavailable: this ftrace clock has no supported normalization. Raw timestamp, count, bytes and address are preserved.");
+            }
+            ui.label(format!(
                 "Timing: {:?} · {}",
                 evidence.timing_confidence, evidence.reason
             ));
@@ -2928,6 +2970,16 @@ impl StudioApp {
                             ("Queue latency", format_latency(io.queue_latency_ns)),
                             ("Device latency", format_latency(io.device_latency_ns)),
                             ("Total latency", format_latency(io.total_latency_ns)),
+                            (
+                                "In-flight at issue (all devices)",
+                                io.queue_depth_at_issue
+                                    .map_or("Not measured".into(), |v| v.to_string()),
+                            ),
+                            (
+                                "In-flight after completion (all devices)",
+                                io.queue_depth_after
+                                    .map_or("Not measured".into(), |v| v.to_string()),
+                            ),
                         ] {
                             ui.label(RichText::new(name).color(muted()));
                             ui.label(RichText::new(value).monospace());
@@ -3156,7 +3208,11 @@ impl StudioApp {
                                     .unwrap_or_else(|| origins[0].file.fallback_label())
                             };
                             for (value, width) in [
-                                (io.completion.ts_ns.to_string(), 145.0),
+                                (
+                                    io.completion_timestamp()
+                                        .map_or("Unavailable".into(), |ts| ts.to_string()),
+                                    145.0,
+                                ),
                                 (operation_label(io.issue.operation).into(), 65.0),
                                 (access_label(io.access_pattern).into(), 100.0),
                                 (io.issue.bytes.to_string(), 80.0),
@@ -4451,6 +4507,9 @@ fn file_origin_tooltip(origins: &[FileOriginView]) -> String {
     if origins.len() > 4 {
         lines.push(format!("  +{} more", origins.len() - 4));
     }
+    if origins.iter().any(|v| v.incomplete) {
+        lines.push("FilePath Unresolved: collector dropped additional origins; listed file evidence is incomplete".into());
+    }
     lines.join("\n")
 }
 
@@ -4609,6 +4668,7 @@ mod ui_tests {
     #[test]
     fn file_group_uses_path_and_preserves_multiple_origins() {
         let origin = FileOriginView {
+            incomplete: false,
             file: FileIdentity {
                 fs_device_major: 259,
                 fs_device_minor: 7,
@@ -4638,6 +4698,7 @@ mod ui_tests {
     #[test]
     fn lba_hover_tooltip_shows_path_confidence_and_identity_fallback() {
         let attributed = FileOriginView {
+            incomplete: false,
             file: FileIdentity {
                 fs_device_major: 254,
                 fs_device_minor: 11,
@@ -4659,6 +4720,7 @@ mod ui_tests {
         );
 
         let unresolved = FileOriginView {
+            incomplete: false,
             path: None,
             confidence: EdgeConfidence::Probable,
             ..attributed
@@ -4686,7 +4748,7 @@ mod ui_tests {
         assert_eq!(
             ExplorerPreset::QueuePressure.query(),
             Some((
-                AxisMetric::QueueDepth,
+                AxisMetric::QueueDepthAtIssue,
                 AxisMetric::TotalLatencyMs,
                 GroupBy::Direction
             ))

@@ -36,6 +36,159 @@ fn fixture() -> DecodedTrace {
         quality: Default::default(),
     }
 }
+
+#[test]
+fn whole_session_coverage_counts_perfetto_volume_without_joining_root_identifiers() {
+    let trace = fixture();
+    let projected = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    let mut coverage = FilePathCoverageEngine::default();
+    let mut expected = 0;
+    for _ in 0..50_001 {
+        for io in &projected {
+            expected += 1;
+            coverage.ingest(&StorageEvent::ObservedBlockCompletion(io.clone()));
+        }
+    }
+    let result = coverage.finish();
+    assert_eq!(result.completion_records(), expected);
+    assert_eq!(result.unresolved.count, expected);
+    assert_eq!(result.observation_without_file_identity, expected);
+    assert_eq!(result.exact.count + result.probable.count, 0);
+    assert_eq!(result.known_bytes(), expected * 4096);
+}
+
+#[test]
+fn unsupported_clock_keeps_volume_without_a_session_origin_or_time_buckets() {
+    let mut trace = fixture();
+    for event in &mut trace.events {
+        event.clock = 99;
+    }
+    let mut engine = AnalysisEngine::new();
+    for io in Projection::new(&trace).events(&analyze(&trace)).unwrap() {
+        engine.ingest(StorageEvent::ObservedBlockCompletion(io));
+    }
+    assert_eq!(engine.summary().completed_ios, 2);
+    assert_eq!(engine.summary().read_bytes, 8192);
+    assert_eq!(
+        engine.session_start_ns(),
+        None,
+        "Unsupported clock must not establish the session's time origin"
+    );
+    assert!(
+        engine.buckets().is_empty(),
+        "Unsupported clock must not enter throughput/IOPS bins"
+    );
+    for summary in [
+        engine.summary(),
+        engine.live_summary(),
+        engine.retained_summary(),
+    ] {
+        assert_eq!(summary.unplaced_time_ios, 2);
+        assert_eq!(summary.logging_ns, None);
+        assert_eq!(summary.busy_ns, None);
+        assert_eq!(summary.idle_ns, None);
+    }
+    assert!(
+        engine
+            .completed_ios()
+            .iter()
+            .all(|io| io.completion_timestamp().is_none()
+                && io.start_timestamp().is_none()
+                && io.evidence.as_ref().unwrap().clock == 99)
+    );
+    for io in Projection::new(&fixture())
+        .events(&analyze(&fixture()))
+        .unwrap()
+    {
+        engine.ingest(StorageEvent::ObservedBlockCompletion(io));
+    }
+    for summary in [
+        engine.summary(),
+        engine.live_summary(),
+        engine.retained_summary(),
+    ] {
+        assert_eq!(summary.completed_ios, 4);
+        assert_eq!(summary.read_bytes, 16384);
+        assert_eq!(summary.unplaced_time_ios, 2);
+        assert_eq!(summary.logging_ns, None);
+    }
+    assert_eq!(engine.session_start_ns(), Some(100));
+    assert_eq!(engine.known_time_span_ns(), Some(200));
+    let known = engine.select_completed(|io| io.completion_timestamp().is_some());
+    assert_eq!(known.summary().logging_ns, Some(200));
+}
+
+#[test]
+fn unsupported_clock_replay_excludes_only_time_selection_and_csv_keeps_raw_evidence() {
+    for mixed in [false, true] {
+        let dir = std::env::temp_dir().join(format!("clock-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("capture.ndjson");
+        let mut trace = fixture();
+        for e in &mut trace.events {
+            if !mixed || e.record_id == 3 {
+                e.clock = 99;
+            }
+        }
+        let mut file = std::fs::File::create(&path).unwrap();
+        for (i, io) in Projection::new(&trace)
+            .events(&analyze(&trace))
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            write_record(
+                &mut file,
+                &WireRecord::Event {
+                    schema_version: SCHEMA_VERSION,
+                    sequence: i as u64,
+                    event: StorageEvent::ObservedBlockCompletion(io),
+                },
+            )
+            .unwrap();
+        }
+        drop(file);
+        let original = std::fs::read(&path).unwrap();
+        let full = session::load_analysis_window(&path, None, None).unwrap();
+        assert_eq!(full.source_completed_ios, 2);
+        assert_eq!(full.source_start_ns, mixed.then_some(100));
+        assert_eq!(full.source_end_ns, mixed.then_some(200));
+        assert_eq!(full.engine.summary().read_bytes, 8192);
+        assert_eq!(full.engine.summary().logging_ns, None);
+        let window = session::load_analysis_window(&path, Some((50, 350)), None).unwrap();
+        assert_eq!(window.engine.summary().completed_ios, u64::from(mixed));
+        assert_eq!(window.source_completed_ios, 2);
+        let csv = dir.join("events.csv");
+        let summary_path = session::export_csv(&path, &csv).unwrap();
+        let mut reader = csv::Reader::from_path(csv).unwrap();
+        let rows: Vec<_> = reader.records().map(Result::unwrap).collect();
+        assert_eq!(rows.len(), 2);
+        let row = rows.last().unwrap();
+        assert_eq!(
+            &row[1], "",
+            "CSV normalized time must be missing, not raw or zero"
+        );
+        assert_eq!(&row[2], "");
+        let raw: CompletedIo = serde_json::from_str(&row[17]).unwrap();
+        assert_eq!(raw.completion.ts_ns, 300);
+        assert_eq!(raw.evidence.unwrap().clock, 99);
+        assert!(
+            std::fs::read_to_string(summary_path)
+                .unwrap()
+                .contains("logging_ns,\n")
+        );
+        assert_eq!(
+            session::load_analysis_window(&path, None, None)
+                .unwrap()
+                .engine
+                .summary()
+                .completed_ios,
+            2
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
 #[test]
 fn completion_cpu_is_independent_of_issue_correlation_and_never_falls_back_to_issue_cpu() {
     let mut trace = fixture();

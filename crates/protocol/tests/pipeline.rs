@@ -69,7 +69,7 @@ fn utilization_is_union_of_overlapping_request_intervals() {
     engine.ingest(complete(2, 8_000_000));
 
     let summary = engine.summary();
-    assert_eq!(summary.logging_ns, 7_000_000);
+    assert_eq!(summary.logging_ns, Some(7_000_000));
     assert_eq!(summary.busy_ns, Some(7_000_000));
     assert_eq!(summary.idle_ns, Some(0));
     assert_eq!(summary.category_summaries.len(), 2);
@@ -104,7 +104,7 @@ fn a_gap_between_requests_is_idle_time() {
     engine.ingest(complete(2, 8_000_000));
 
     let summary = engine.summary();
-    assert_eq!(summary.logging_ns, 7_000_000);
+    assert_eq!(summary.logging_ns, Some(7_000_000));
     assert_eq!(summary.busy_ns, Some(4_000_000));
     assert_eq!(summary.idle_ns, Some(3_000_000));
 }

@@ -234,6 +234,7 @@ struct SelectionSummary {
     keys: std::collections::HashSet<IoSelectionKey>,
     start_ns: Option<u64>,
     end_ns: Option<u64>,
+    unplaced_time_count: u64,
     read: DirectionSummary,
     write: DirectionSummary,
     other_count: u64,
@@ -256,12 +257,12 @@ impl SelectionSummary {
             ("Completion CPU",identity_number(io.completion.cpu)),
             ("Process",format!("{}:{} / {} · PID {}",io.issue.device_major,io.issue.device_minor,io.issue.comm,identity_number(io.issuer_pid()))),
         ] {self.observe_category(dimension,label,io);}
-        let start = io.start_timestamp();
-        self.start_ns = Some(self.start_ns.map_or(start, |v| v.min(start)));
-        self.end_ns = Some(
-            self.end_ns
-                .map_or(io.completion.ts_ns, |v| v.max(io.completion.ts_ns)),
-        );
+        if let Some((start, end)) = io.start_timestamp().zip(io.completion_timestamp()) {
+            self.start_ns = Some(self.start_ns.map_or(start, |v| v.min(start)));
+            self.end_ns = Some(self.end_ns.map_or(end, |v| v.max(end)));
+        } else {
+            self.unplaced_time_count += 1;
+        }
         match io.issue.operation {
             IoOperation::Read => self.read.observe(io),
             IoOperation::Write => self.write.observe(io),
@@ -281,6 +282,9 @@ impl SelectionSummary {
         bounds.extend_with(&egui_plot::PlotPoint::new(point[0], point[1]));
     }
     fn duration_ns(&self) -> Option<u64> {
+        if self.unplaced_time_count > 0 {
+            return None;
+        }
         self.start_ns
             .zip(self.end_ns)
             .map(|(start, end)| end.saturating_sub(start))
@@ -499,8 +503,11 @@ impl StudioApp {
                     ui.label(if selected {"selected I/O"} else if s.window_series.is_some() {"contributing I/O"}else{"plottable I/O"}).on_hover_text("Full-resolution completed requests in this graph cohort; display sampling never changes this count");
                 });
                 ui.label(format!("End − Start: {}",format_latency(s.duration_ns())));
-                if let Some((start,end))=s.start_ns.zip(s.end_ns) {
+                if s.unplaced_time_count == 0 && let Some((start,end))=s.start_ns.zip(s.end_ns) {
                     ui.small(format!("{:.2}–{:.2} ms from session origin",(start as f64-origin as f64)/1e6,(end as f64-origin as f64)/1e6));
+                }
+                if s.unplaced_time_count > 0 {
+                    ui.label(format!("{} selected I/O have an unsupported clock. Selection span and throughput are unavailable; volume and identities include all selected I/O.",s.unplaced_time_count));
                 }
                 ui.horizontal_wrapped(|ui| {
                     if ui.link(format!("{} file candidates",s.files.len())).clicked() {self.selection.inspector_tab=InspectorTab::Files;}
@@ -528,9 +535,9 @@ impl StudioApp {
                 }
                 if s.other_count>0 {ui.small(format!("Other: {} requests · {}",s.other_count,format_bytes(s.other_bytes)));}
                 ui.collapsing("Definitions & timestamps",|ui| {
-                    ui.label(format!("Start: {} ns",s.start_ns.map_or("—".into(),|v|v.to_string())));
-                    ui.label(format!("End: {} ns",s.end_ns.map_or("—".into(),|v|v.to_string())));
-                    ui.label("I/O span: earliest known insert/issue (completion when start is unknown) to latest completion. Host BW uses the explicit analysis interval described above. — means unavailable. Percentiles use exact nearest rank over valid timing samples.");
+                    ui.label(format!("Known-clock subset start: {} ns",s.start_ns.map_or("—".into(),|v|v.to_string())));
+                    ui.label(format!("Known-clock subset end: {} ns",s.end_ns.map_or("—".into(),|v|v.to_string())));
+                    ui.label("Span: earliest known insert/issue (completion when start is unknown) to latest completion. Host BW uses the explicit analysis interval and known-clock eligibility described above. — means unavailable. Percentiles use exact nearest rank over valid timing samples.");
                     ui.label(format!("Selection aggregation: {:.1} ms",s.elapsed.as_secs_f64()*1000.0));
                 });
                 ui.separator();
@@ -778,6 +785,7 @@ mod selection_tests {
         let engine = fixture(2);
         let io = &engine.completed_ios()[0];
         let file = FileOriginView {
+            incomplete: false,
             file: android_ebpf_protocol::FileIdentity {
                 fs_device_major: 254,
                 fs_device_minor: 1,

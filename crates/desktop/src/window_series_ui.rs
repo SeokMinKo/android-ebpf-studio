@@ -6,7 +6,7 @@ fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:Axi
     let started=Instant::now();
     let full_graph=matches!(request,SelectionRequest::Rectangle{min,max} if min==[f64::NEG_INFINITY;2] && max==[f64::INFINITY;2]);
     let series=crate::window_series::build(engine.completed_ios(),&bw.activity,&bw.devices,bw.range,width_ms.saturating_mul(1_000_000),metric);
-    let point_index=if let SelectionRequest::Point(key)=request {engine.completed_ios().iter().find(|io|selection_key(io)==key).and_then(|io|series.index_at(io.completion.ts_ns))}else{None};
+    let point_index=if let SelectionRequest::Point(key)=request {engine.completed_ios().iter().find(|io|selection_key(io)==key).and_then(|io|io.completion_timestamp()).and_then(|ts|series.index_at(ts))}else{None};
     let selected:Vec<bool>=series.samples.iter().enumerate().map(|(index,sample)| {
         let time=(sample.start_ns-origin) as f64/1e6+(sample.end_ns-sample.start_ns) as f64/2e6;
         match request {
@@ -15,9 +15,9 @@ fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:Axi
             SelectionRequest::Point(_)=>point_index==Some(index),
         }
     }).collect();
-    let cohort=engine.select_completed(|io|if metric.intervals() && full_graph {io.completion.ts_ns>=bw.range.0 && io.completion.ts_ns<=bw.range.1}else{series.index_at(io.completion.ts_ns).is_some_and(|i|selected[i])});
+    let cohort=engine.select_completed(|io|io.completion_timestamp().is_some_and(|ts|if metric.intervals() && full_graph {ts>=bw.range.0 && ts<=bw.range.1}else{series.index_at(ts).is_some_and(|i|selected[i])}));
     let mut summary=compute_selection(&cohort,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,origin);
-    summary.source_rows=engine.completed_ios().len();summary.metric_axis=Some(y);summary.metric=Default::default();summary.bounds=None;
+    summary.source_rows=engine.completed_ios().len();summary.unplottable_rows=engine.completed_ios().iter().filter(|io|io.completion_timestamp().is_none()).count();summary.metric_axis=Some(y);summary.metric=Default::default();summary.bounds=None;
     let mut chosen=series;chosen.samples=std::mem::take(&mut chosen.samples).into_iter().zip(selected).filter_map(|(s,yes)|yes.then_some(s)).collect();
     if !(metric.intervals() && full_graph) {
         if let (Some(first),Some(last))=(chosen.samples.first(),chosen.samples.last()) {bw.range=(first.start_ns,last.end_ns);}

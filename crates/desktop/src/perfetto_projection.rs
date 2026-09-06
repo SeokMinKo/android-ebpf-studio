@@ -234,6 +234,7 @@ impl<'a> Projection<'a> {
                     Default::default()
                 }
             },
+            queue_depth_at_issue: None,
             access_pattern,
             size_class: IoSizeClass::classify(bytes),
             evidence: Some(Box::new(CompletionEvidence {

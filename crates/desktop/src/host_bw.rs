@@ -186,7 +186,9 @@ impl ActivityTimeline {
         );
     }
     pub fn observe(&mut self, io: &CompletedIo) {
-        self.observe_range(io.start_timestamp(), io.completion.ts_ns);
+        if let Some((start, end)) = io.start_timestamp().zip(io.completion_timestamp()) {
+            self.observe_range(start, end);
+        }
         self.observed_requests += 1;
         let device = (io.issue.device_major, io.issue.device_minor);
         *self.observed_devices.entry(device).or_default() += 1;
@@ -194,8 +196,8 @@ impl ActivityTimeline {
             .devices
             .entry((io.issue.device_major, io.issue.device_minor))
             .or_default();
-        if let Some(start) = io.issue_timestamp() {
-            union.insert(start, io.completion.ts_ns);
+        if let Some((start, end)) = io.issue_timestamp().zip(io.completion_timestamp()) {
+            union.insert(start, end);
         } else {
             self.missing_issue += 1;
             *self.missing_devices.entry(device).or_default() += 1;
