@@ -487,7 +487,7 @@ impl StudioApp {
         if unplaced_time_count > 0 {
             ui.label(format!("{unplaced_time_count} / {total} I/O have no supported session clock. Time graphs and time filters exclude them; count, bytes, address and FilePath coverage retain them."));
         }
-        ui.label(format!("Retained detail FilePath by request count (n={total}): Exact {:.1}% · Probable {:.1}% · Unresolved {:.1}% · multi-origin {multi}", ratio(coverage[0],total), ratio(coverage[1],total), ratio(coverage[2],total)));
+        ui.label(format!("Retained detail FilePath by request count (n={total}): Exact {} · Probable {} · Unresolved {} · multi-origin {multi}", coverage_percent(coverage[0],total), coverage_percent(coverage[1],total), coverage_percent(coverage[2],total)));
         ui.label("FilePath confidence requires a path snapshot as well as identity evidence. Exact inode without a path remains FilePath Unresolved. This ratio describes retained detail, not bytes or suppressed/unpaired I/O.");
         if let Some(aggregate) = &self.latest_aggregate {
             ui.label(format!("Last kernel snapshot observed: {} · retained completed: {} · lost/suppressed I/O are outside observed-completion FilePath coverage", aggregate.counters.observed, self.analyzer.completed_ios().len()));

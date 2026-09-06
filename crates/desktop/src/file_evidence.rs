@@ -1,5 +1,37 @@
 // Keep raw session evidence in the engine for attribution; expose only evidence
 // related to the filtered block cohort in the file table and coverage counters.
+fn coverage_percent(count: u64, total: u64) -> String {
+    if total == 0 {
+        return "N/A".into();
+    }
+    if count == 0 {
+        return "0%".into();
+    }
+    if count == total {
+        return "100%".into();
+    }
+    let value = ratio(count, total);
+    if value < 0.1 {
+        "<0.1%".into()
+    } else if value > 99.9 {
+        ">99.9%".into()
+    } else {
+        format!("{value:.1}%")
+    }
+}
+
+#[test]
+fn coverage_labels_do_not_round_missing_requests_into_perfect_resolution() {
+    assert_eq!(coverage_percent(99_998, 100_001), ">99.9%");
+    assert_eq!(coverage_percent(3, 100_001), "<0.1%");
+    assert_eq!(coverage_percent(1, u64::MAX), "<0.1%");
+    assert_eq!(coverage_percent(u64::MAX - 1, u64::MAX), ">99.9%");
+    assert_eq!(coverage_percent(0, 184), "0%");
+    assert_eq!(coverage_percent(184, 184), "100%");
+    assert_eq!(coverage_percent(141, 184), "76.6%");
+    assert_eq!(coverage_percent(0, 0), "N/A");
+}
+
 fn related_file_positions(engine: &AnalysisEngine) -> Vec<usize> {
     if engine.file_ios().is_empty() || engine.completed_ios().is_empty() {
         return Vec::new();
@@ -105,8 +137,8 @@ impl StudioApp {
         }
         ui.label(
             egui::RichText::new(format!(
-                "Whole session FilePath · {total} completion records · linked {:.1}%",
-                ratio(coverage.exact.count + coverage.probable.count, total)
+                "Whole session FilePath · {total} completion records · linked {}",
+                coverage_percent(coverage.exact.count + coverage.probable.count, total)
             ))
             .strong(),
         );
@@ -117,9 +149,9 @@ impl StudioApp {
                 ("Unresolved", coverage.unresolved),
             ] {
                 ui.label(format!(
-                    "{name} {} ({:.1}%)",
+                    "{name} {} ({})",
                     row.count,
-                    ratio(row.count, total)
+                    coverage_percent(row.count, total)
                 ));
             }
         });
