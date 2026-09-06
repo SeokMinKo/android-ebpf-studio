@@ -1,5 +1,7 @@
 # Active goal checkpoint — not overall completion
 
+User-requested cleanup (2026-09-07): see [UPAS_REMAINING.md](UPAS_REMAINING.md). Feature implementation stopped for the user's remaining-work/cleanup request. Completed implementation259e46e is preserved on the feature and backup branches. Unfinished HW Queue experiment is saved in stashbeafa50e plus a verified independent patch; working tree cleaned. Original main now has20 additional commits requiring integration before eventual deployment. Do not automatically reapply unfinished WIP based on earlier continuation notes. Full Goal is incomplete.
+
 Latest linked Summary continuation (2026-09-07): [UPAS_CATEGORY_CHECKPOINT.md](UPAS_CATEGORY_CHECKPOINT.md). Exact Chunk-byte categories and joint Command/access/size counts/payload are connected to the existing Summary. Native8247-I/O categories, Read/Write/point/empty/scroll, full CSV and actual four-function uPAS AST comparison passed. Full Goal remains active; next hardware queue and remaining feature/full-matrix/performance/install work.
 
 Latest native collector continuation (2026-09-07): [UPAS_NATIVE_SCHEDULER_CHECKPOINT.md](UPAS_NATIVE_SCHEDULER_CHECKPOINT.md). Optional root I/O wait probe, runtime schedstats guard/restoration and acquisition metadata are implemented/build validated. 191 host tests passed; BPF/Android Release builds and native linked Summary fixture passed. No connected phone for physical acceptance. Full Goal remains active.
