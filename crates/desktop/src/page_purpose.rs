@@ -42,6 +42,89 @@ mod page_purpose_tests {
         e
     }
     #[test]
+    fn activity_cache_reuses_frames_and_rebuilds_after_filter_and_session_reset() {
+        let mut app = StudioApp {
+            analyzer: fixture(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let render = |app: &mut StudioApp| {
+            let mut output = ctx.run_ui(Default::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| app.trends_ui(ui));
+            });
+            output.textures_delta.clear();
+        };
+        render(&mut app);
+        let original = Arc::clone(&app.trend_view.as_ref().unwrap().1);
+        render(&mut app);
+        assert!(Arc::ptr_eq(&original, &app.trend_view.as_ref().unwrap().1));
+        assert_eq!(original.busiest_second, Some((1, [2.0, 0.0, 0.125, 0.0])));
+        for (index, series) in original.activity_points.iter().enumerate() {
+            let expected: Vec<_> = original
+                .bins
+                .iter()
+                .map(|(&s, v)| egui_plot::PlotPoint::new(s as f64 + 0.5, v[index]))
+                .collect();
+            assert_eq!(series.full(), expected.as_slice());
+        }
+        app.query.pid = 10;
+        app.invalidate_query();
+        app.rebuild_filtered();
+        render(&mut app);
+        let filtered = &app.trend_view.as_ref().unwrap().1;
+        assert!(!Arc::ptr_eq(&original, filtered));
+        assert_eq!(filtered.coverage, [0, 0, 1]);
+        assert_eq!(filtered.bins.len(), 1);
+        assert_eq!(
+            filtered.busiest_second,
+            Some((0, [1.0, 0.0, 4096.0 / 1_048_576.0, 0.0]))
+        );
+        assert_eq!(original.coverage, [0, 0, 3]);
+        assert_eq!(app.analyzer.completed_ios().len(), 3);
+        app.reset_analysis();
+        assert!(app.trend_view.is_none());
+        render(&mut app);
+        assert!(
+            app.trend_view.is_none(),
+            "empty next session cannot reuse old bins"
+        );
+    }
+
+    #[test]
+    fn activity_click_populates_summary_for_the_interval_and_preserves_other_filters() {
+        let mut app = StudioApp {
+            analyzer: fixture(),
+            ..Default::default()
+        };
+        app.query.pid = 20;
+        app.query.operation = Some(IoOperation::Read);
+        app.explore_activity_second(1.0);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.selection.pending.is_some() {
+            app.poll_selection();
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(app.page, Page::Explore);
+        assert_eq!(app.query.pid, 20);
+        assert_eq!(app.query.operation, Some(IoOperation::Read));
+        let selected = &app
+            .selection
+            .summary
+            .as_ref()
+            .expect("time-bin click must fill Summary")
+            .keys;
+        assert_eq!(selected.len(), 2);
+        assert!(
+            app.analysis()
+                .completed_ios()
+                .iter()
+                .all(|io| selected.contains(&selection_key(io)))
+        );
+        assert_eq!(app.analyzer.completed_ios().len(), 3);
+    }
+
+    #[test]
     fn overview_distinguishes_longest_request_busiest_interval_and_largest_issuer() {
         let d = TrendData::build(&fixture(), 0);
         assert_eq!(d.slowest.unwrap().issue.request_id, 1);
@@ -173,7 +256,7 @@ impl StudioApp {
         {
             self.trend_view = Some((
                 self.analysis_generation,
-                TrendData::build(self.analysis(), self.time_origin()),
+                Arc::new(TrendData::build(self.analysis(), self.time_origin())),
             ));
         }
         let data = &self.trend_view.as_ref().unwrap().1;
@@ -192,11 +275,7 @@ impl StudioApp {
                 FindingAction::Request(selection_key(io)),
             ));
         }
-        if let Some((&second, bin)) = data
-            .bins
-            .iter()
-            .max_by(|a, b| (a.1[2] + a.1[3]).total_cmp(&(b.1[2] + b.1[3])))
-        {
+        if let Some((second, bin)) = data.busiest_second {
             findings.push((
                 "Busiest second",
                 format!(

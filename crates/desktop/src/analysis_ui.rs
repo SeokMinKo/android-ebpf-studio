@@ -470,21 +470,23 @@ impl StudioApp {
         {
             self.trend_view = Some((
                 self.analysis_generation,
-                TrendData::build(self.analysis(), origin),
+                Arc::new(TrendData::build(self.analysis(), origin)),
             ));
         }
+        let data = Arc::clone(&self.trend_view.as_ref().unwrap().1);
         let TrendData {
             bins,
+            activity_points,
             histogram,
             coverage,
             multi,
             targets,
             unplaced_time_count,
             ..
-        } = self.trend_view.as_ref().unwrap().1.clone();
+        } = &*data;
         self.session_file_path_coverage_ui(ui);
         let total: u64 = coverage.iter().sum();
-        if unplaced_time_count > 0 {
+        if *unplaced_time_count > 0 {
             ui.label(format!("{unplaced_time_count} / {total} I/O have no supported session clock. Time graphs and time filters exclude them; count, bytes, address and FilePath coverage retain them."));
         }
         ui.label(format!("Retained detail FilePath by request count (n={total}): Exact {} · Probable {} · Unresolved {} · multi-origin {multi}", coverage_percent(coverage[0],total), coverage_percent(coverage[1],total), coverage_percent(coverage[2],total)));
@@ -503,18 +505,75 @@ impl StudioApp {
                 ));
                 continue;
             }
+            let mut rendered = [0usize; 2];
+            let qa_gesture = self
+                .render_qa
+                .output
+                .as_ref()
+                .and_then(|_| std::env::var("ANDROID_EBPF_QA_GESTURE").ok());
+            let qa_active = qa_gesture.as_deref().is_some_and(|g| {
+                g.starts_with("activity-")
+                    && (offset == if g == "activity-throughput" { 2 } else { 0 })
+            });
+            if qa_active && self.render_qa.frames >= 28 && self.render_qa.input_step == 0 {
+                ui.scroll_to_rect(
+                    egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), 200.0),
+                    ),
+                    Some(egui::Align::Center),
+                );
+            }
+            let clip = ui.clip_rect();
             studio_plot(id)
+                .include_x(activity_points[offset].full().first().unwrap().x)
+                .include_x(activity_points[offset].full().last().unwrap().x)
+                .include_y(
+                    activity_points[offset].y_bounds[0]
+                        .min(activity_points[offset + 1].y_bounds[0]),
+                )
+                .include_y(
+                    activity_points[offset].y_bounds[1]
+                        .max(activity_points[offset + 1].y_bounds[1]),
+                )
                 .height(170.0)
                 .legend(Legend::default())
                 .x_axis_label("Seconds since session start")
                 .y_axis_label(title)
                 .show(ui, |plot| {
                     for (index, label, color) in [(0, "Read", accent()), (1, "Write", green())] {
-                        let points: PlotPoints = bins
-                            .iter()
-                            .map(|(second, v)| [*second as f64 + 0.5, v[offset + index]])
-                            .collect();
-                        plot.points(Points::new(label, points).radius(4.0).color(color));
+                        let bounds = plot.plot_bounds();
+                        let columns = (plot.response().rect.width() * plot.ctx().pixels_per_point())
+                            .ceil() as usize;
+                        let samples = activity_points[offset + index]
+                            .visible([bounds.min()[0], bounds.max()[0]], columns);
+                        rendered[index] = samples.len();
+                        if qa_active && index == 0 {
+                            let qa = &mut self.render_qa.activity;
+                            let rect = plot.response().rect;
+                            if qa.rect == Some(rect) {
+                                qa.stable_frames += 1;
+                            } else {
+                                qa.rect = Some(rect);
+                                qa.stable_frames = 0;
+                            }
+                            qa.origin_ns = origin;
+                            qa.full_bins = bins.len();
+                            qa.width = bounds.max()[0] - bounds.min()[0];
+                            qa.mean_spacing =
+                                samples.first().zip(samples.last()).map_or(0.0, |(a, b)| {
+                                    (b.x - a.x) / samples.len().saturating_sub(1).max(1) as f64
+                                });
+                            if self.render_qa.input_step == 0 {
+                                let original = activity_points[offset].full();
+                                let middle = original[original.len() / 2];
+                                let target = plot.screen_from_plot(middle);
+                                qa.target = (rect.contains(target) && clip.contains(target))
+                                    .then_some(target);
+                                qa.expected_second = Some(middle.x.floor() as u64);
+                            }
+                        }
+                        plot.points(Points::new(label, samples).radius(4.0).color(color));
                     }
                     if plot.response().clicked()
                         && let Some(point) = plot.pointer_coordinate()
@@ -523,25 +582,27 @@ impl StudioApp {
                         selected_bin = Some(point.x.floor());
                     }
                 });
+            if qa_active {
+                self.render_qa.activity.rendered_points = rendered;
+            }
+            if rendered.iter().any(|&n| n < bins.len()) {
+                ui.label(format!("Displayed time-bin points: Read {} / {} · Write {} / {} · first/min/max/last samples. Zoom for finer detail; analysis uses all bins.", rendered[0], bins.len(), rendered[1], bins.len()));
+            }
         }
         if let Some(second) = selected_bin {
-            self.query.start_ms = second * 1000.0;
-            self.query.end_ms = (second + 1.0) * 1000.0 - 0.000001;
-            self.invalidate_query();
-            self.rebuild_filtered();
-            self.page = Page::Explore;
+            self.explore_activity_second(second);
         }
-        if let Some(range) = self.latency_distribution_ui(ui, &histogram, total) {
+        if let Some(range) = self.latency_distribution_ui(ui, histogram, total) {
             self.explore_latency_range(range);
         }
         ui.label("Total latency: insert→complete when insert exists, otherwise issue→complete. Queue: insert→issue (unavailable without insert). Device: issue→complete. Queue depth is observed block in-flight depth; missing/suppressed events can reduce it. Sequential: previous sector + sectors equals current sector, within the same device and direction, at the block issue layer.");
         ui.collapsing("Processes ranked by transferred bytes in selection", |ui| {
-            let mut rows: Vec<_> = targets.into_iter().collect();
+            let mut rows: Vec<_> = targets.iter().collect();
             rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
             for (name, (count, bytes)) in rows.into_iter().take(30) {
                 ui.label(format!(
                     "{name} · {count} requests · {}",
-                    format_bytes(bytes)
+                    format_bytes(*bytes)
                 ));
             }
         });
@@ -815,11 +876,26 @@ mod query_regressions {
     }
 }
 
-#[derive(Clone)]
+include!("activity_series.rs");
+include!("activity_qa.rs");
+
+impl StudioApp {
+    fn explore_activity_second(&mut self, second: f64) {
+        self.query.start_ms = second * 1000.0;
+        self.query.end_ms = (second + 1.0) * 1000.0 - 0.000001;
+        self.invalidate_query();
+        self.rebuild_filtered();
+        self.page = Page::Explore;
+        self.begin_selection(all_plot_requests());
+    }
+}
+
 struct TrendData {
     slowest: Option<CompletedIo>,
     top_issuer: Option<(u32, String, u64, u64)>,
     bins: BTreeMap<u64, [f64; 4]>,
+    activity_points: [ActivitySeries; 4],
+    busiest_second: Option<(u64, [f64; 4])>,
     histogram: BTreeMap<u32, u64>,
     coverage: [u64; 3],
     multi: u64,
@@ -882,7 +958,22 @@ impl TrendData {
             target.1 += io.issue.bytes as u64;
         }
 
+        let activity_points = std::array::from_fn(|index| {
+            ActivitySeries::new(
+                bins.iter()
+                    .map(|(&second, values)| {
+                        egui_plot::PlotPoint::new(second as f64 + 0.5, values[index])
+                    })
+                    .collect(),
+            )
+        });
+        let busiest_second = bins
+            .iter()
+            .max_by(|a, b| (a.1[2] + a.1[3]).total_cmp(&(b.1[2] + b.1[3])))
+            .map(|(&second, &values)| (second, values));
         Self {
+            activity_points,
+            busiest_second,
             slowest,
             top_issuer: issuers
                 .into_iter()
