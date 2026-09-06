@@ -298,6 +298,15 @@ pub fn load_analysis_window(
             }
         })
         .unwrap_or(loss_status);
+    for record in &loaded.source_info {
+        activity.observe_record(record);
+    }
+    if let Some(footer) = &loaded.footer {
+        activity.observe_record(footer);
+    }
+    if loaded.integrity_ok != Some(true) || loaded.rejected_lines > 0 {
+        activity.limitation = Some("Incomplete or rejected saved event stream".into());
+    }
     Ok(LoadedAnalysis {
         activity: std::sync::Arc::new(activity),
         source_info: loaded.source_info,

@@ -610,6 +610,7 @@ impl StudioApp {
     }
 
     fn apply_qa_preset(&mut self) {
+        if let Ok(device)=std::env::var("ANDROID_EBPF_QA_DEVICE_FILTER") {self.query.device=device;self.invalidate_query();}
         if let Ok(mode) = std::env::var("ANDROID_EBPF_QA_FOOTPRINT") {
             self.footprint.mode = match mode.as_str() {
                 "file" => FootprintMode::FilePath,
@@ -779,9 +780,13 @@ impl StudioApp {
                     "metric":s.metric_axis.map(AxisMetric::label),
                     "samples":s.metric.total.values.len(),"missing":s.metric.total.missing,
                     "p50":s.metric.total.percentile(50),"p95":s.metric.total.percentile(95),
-                    "histogram":s.metric.total.histogram(16),"address_counts":s.address_counts,
-                    "cohort_count":s.keys.len(),"selected":self.selection.summary.is_some(),"host_bw":s.host_bw
+                    "histogram":s.metric.total.histogram(16),"cdf":s.metric.total.cdf_points(512),"address_counts":s.address_counts,
+                    "cohort_count":s.keys.len(),"selected":self.selection.summary.is_some(),"host_bw":s.host_bw,"categories":s.categories
                 }));
+            if let Some(s)=self.selection.summary.as_ref().or_else(||self.selection.all_summary.as_ref().map(|v|&v.3)) {
+                let csv=path.with_extension("summary.csv");
+                report["graph_summary_export"]=serde_json::json!({"path":csv,"result":write_graph_summary_csv(&csv,s).map_err(|e|e.to_string())});
+            }
             report["displayed_summary"] =
                 serde_json::json!(self.summary_view.as_ref().map(|(_, _, summary)| summary));
             report["trend_request_count"] = serde_json::json!(

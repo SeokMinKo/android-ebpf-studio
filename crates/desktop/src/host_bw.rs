@@ -1,11 +1,20 @@
 //! Host bandwidth has a completion-counted numerator and a device-wide clock.
 //! Activity is collected before UI filters and detail-window eviction. Unknown
 //! coverage never converts an unobserved gap into measured device idle.
-use android_ebpf_protocol::{CompletedIo, IoOperation};
-use serde::Serialize;
+use android_ebpf_protocol::{CompletedIo, IoOperation, WireRecord};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub type Device = (u32, u32);
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeviceCoverage {
+    pub device: Device,
+    pub completions: u64,
+    pub unresolved: u64,
+    pub unmatched: u64,
+    pub requeues: u64,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct IntervalUnion(BTreeMap<u64, u64>);
@@ -58,8 +67,118 @@ pub struct ActivityTimeline {
     /// inferred from zero drops alone or the retained event count.
     pub verified_complete: bool,
     pub limitation: Option<String>,
+    unfiltered_perfetto: bool,
+    expected_perfetto: Option<u64>,
+    reconstructed: bool,
+    expected_devices: BTreeMap<Device, u64>,
+    device_coverage_supplied: bool,
+    observed_devices: BTreeMap<Device, u64>,
+    missing_devices: BTreeMap<Device, u64>,
 }
 impl ActivityTimeline {
+    /// The capture recipe emits scope provenance; imported/older traces without
+    /// it remain unknown even when their recorded loss counters are zero.
+    pub fn observe_record(&mut self, record: &WireRecord) {
+        match record {
+            WireRecord::SourceInfo {
+                source, metadata, ..
+            } if source == "perfetto" => {
+                self.reconstructed = false;
+                if metadata["stage"] == "recording" {
+                    self.unfiltered_perfetto =
+                        metadata["block_activity_scope"] == "unfiltered_issue_complete_v1";
+                }
+                if metadata["stage"] == "complete" {
+                    self.expected_perfetto = None;
+                    self.expected_devices.clear();
+                    self.device_coverage_supplied = false;
+                    let quality = serde_json::from_value::<crate::perfetto::TraceQuality>(
+                        metadata["quality"].clone(),
+                    );
+                    let complete = quality.is_ok_and(|q| {
+                        q.kernel_lost_events() == Some(0)
+                            && q.kernel_start.len() == q.kernel_end.len()
+                            && q.service_stats_seen
+                            && !q.service_loss_counters.is_empty()
+                            && q.service_loss_counters.values().all(|v| *v == 0)
+                            && q.final_flush_outcome.is_some_and(|v| v <= 1)
+                            && q.packets > 0
+                            && q.lost_bundles == 0
+                            && q.parse_errors == 0
+                            && !q.truncated
+                            && !q.projection_limited
+                            && q.unsupported_clocks.is_empty()
+                            && q.failed_events.is_empty()
+                            && q.diagnostics.is_empty()
+                            && q.unknown_events.iter().all(|v| {
+                                v == "block/block_rq_insert" || v == "block/block_rq_requeue"
+                            })
+                    });
+                    if complete
+                        && [
+                            "unresolved_timing",
+                            "unmatched_issues",
+                            "unpaired_requeues",
+                            "correlation_limit_hits",
+                        ]
+                        .iter()
+                        .all(|k| metadata[*k].as_u64() == Some(0))
+                    {
+                        self.expected_perfetto = metadata["completion_observations"].as_u64();
+                    }
+                    if complete
+                        && metadata["correlation_limit_hits"].as_u64() == Some(0)
+                        && let Ok(rows) = serde_json::from_value::<Vec<DeviceCoverage>>(
+                            metadata["block_activity_devices"].clone(),
+                        )
+                    {
+                        self.expected_perfetto = metadata["completion_observations"].as_u64();
+                        self.device_coverage_supplied = true;
+                        self.expected_devices = rows
+                            .into_iter()
+                            .filter(|r| r.unresolved == 0 && r.unmatched == 0 && r.requeues == 0)
+                            .map(|r| (r.device, r.completions))
+                            .collect();
+                    }
+                }
+            }
+            WireRecord::Footer {
+                events_seen,
+                events_persisted,
+                events_dropped,
+                events_rejected,
+                graceful,
+                ..
+            } => {
+                self.reconstructed = self.unfiltered_perfetto
+                    && self.expected_perfetto == Some(self.observed_requests)
+                    && *events_seen == self.observed_requests
+                    && *events_persisted == self.observed_requests
+                    && *events_dropped == 0
+                    && *events_rejected == 0
+                    && *graceful == Some(true);
+            }
+            _ => {}
+        }
+    }
+    pub fn reconstructed(&self) -> bool {
+        self.reconstructed_for(&self.devices.keys().copied().collect::<Vec<_>>())
+    }
+    pub fn reconstructed_for(&self, devices: &[Device]) -> bool {
+        self.reconstructed
+            && self.expected_perfetto == Some(self.observed_requests)
+            && !devices.is_empty()
+            && devices.iter().all(|device| {
+                if !self.device_coverage_supplied {
+                    self.missing_issue == 0
+                } else {
+                    self.expected_devices.get(device) == self.observed_devices.get(device)
+                        && self.expected_devices.contains_key(device)
+                        && self.missing_devices.get(device).copied().unwrap_or(0) == 0
+                }
+            })
+            && self.limitation.is_none()
+    }
     pub fn observe_range(&mut self, start: u64, end: u64) {
         self.range = Some(
             self.range
@@ -69,6 +188,8 @@ impl ActivityTimeline {
     pub fn observe(&mut self, io: &CompletedIo) {
         self.observe_range(io.start_timestamp(), io.completion.ts_ns);
         self.observed_requests += 1;
+        let device = (io.issue.device_major, io.issue.device_minor);
+        *self.observed_devices.entry(device).or_default() += 1;
         let union = self
             .devices
             .entry((io.issue.device_major, io.issue.device_minor))
@@ -77,6 +198,7 @@ impl ActivityTimeline {
             union.insert(start, io.completion.ts_ns);
         } else {
             self.missing_issue += 1;
+            *self.missing_devices.entry(device).or_default() += 1;
         }
     }
     pub fn exact(&self) -> bool {
@@ -89,6 +211,9 @@ impl ActivityTimeline {
                 self.missing_issue
             );
         }
+        if self.reconstructed() {
+            return "Reconstructed unfiltered Perfetto block activity: all completions paired, no reported kernel/service loss, complete saved stream. Request matching is Probable; trace boundaries and unobserved requeues limit physical-device interpretation.".into();
+        }
         self.limitation.clone().unwrap_or_else(||if self.verified_complete {"Complete device activity coverage".into()}else{"Full, unfiltered block activity coverage is not proven for this source; detail gaps may be sampling, capture filters or loss".into()})
     }
 }
@@ -97,6 +222,7 @@ impl ActivityTimeline {
 pub struct TransferBytes {
     pub read: u64,
     pub write: u64,
+    /// Non-R/W command extents, excluded from transferred payload and BW.
     pub other: u64,
 }
 impl TransferBytes {
@@ -109,14 +235,13 @@ impl TransferBytes {
         *target = target.saturating_add(io.issue.bytes as u64);
     }
     pub fn total(&self) -> u64 {
-        self.read
-            .saturating_add(self.write)
-            .saturating_add(self.other)
+        self.read.saturating_add(self.write)
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HostBandwidth {
+    pub estimated: bool,
     pub start_ns: u64,
     pub end_ns: u64,
     pub duration_ns: u64,
@@ -149,7 +274,8 @@ pub fn calculate(
         }
     }
     let observed_busy_ns = combined.duration(start_ns, end_ns);
-    let busy_ns = activity.exact().then_some(observed_busy_ns);
+    let estimated = activity.reconstructed_for(&devices);
+    let busy_ns = (activity.exact() || estimated).then_some(observed_busy_ns);
     let idle_ns = busy_ns.map(|v| duration_ns.saturating_sub(v));
     let rate = |bytes: u64, ns: Option<u64>| {
         ns.filter(|n| *n > 0)
@@ -157,6 +283,7 @@ pub fn calculate(
     };
     let counts = [bytes.total(), bytes.read, bytes.write];
     HostBandwidth {
+        estimated,
         start_ns,
         end_ns,
         duration_ns,
@@ -167,13 +294,183 @@ pub fn calculate(
         without_idle_mib_s: counts.map(|b| rate(b, busy_ns)),
         bytes,
         devices,
-        coverage: activity.reason(),
+        coverage: if estimated {
+            "Reconstructed unfiltered Perfetto block activity on selected devices: all completions paired, no reported kernel/service loss, complete saved stream. Probable request matching; capture boundaries and unobserved requeues limit physical-device interpretation.".into()
+        } else {
+            activity.reason()
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discard_and_flush_extents_do_not_inflate_transferred_payload() {
+        let mut a = ActivityTimeline {
+            verified_complete: true,
+            ..Default::default()
+        };
+        a.devices.entry((8, 0)).or_default().insert(0, 500_000_000);
+        let b = calculate(
+            &a,
+            (0, 1_000_000_000),
+            TransferBytes {
+                read: 1_048_576,
+                write: 2_097_152,
+                other: 1_073_741_824,
+            },
+            vec![(8, 0)],
+        );
+        assert_eq!(b.bytes.total(), 3_145_728);
+        assert_eq!(b.with_idle_mib_s, [Some(3.), Some(1.), Some(2.)]);
+        assert_eq!(b.without_idle_mib_s, [Some(6.), Some(2.), Some(4.)]);
+    }
+    fn coverage_fixture() -> (ActivityTimeline, WireRecord, WireRecord, WireRecord) {
+        let mut a = ActivityTimeline {
+            observed_requests: 1,
+            ..Default::default()
+        };
+        a.devices.entry((8, 0)).or_default().insert(2, 8);
+        let scope = WireRecord::SourceInfo {
+            schema_version: 6,
+            source: "perfetto".into(),
+            status: String::new(),
+            metadata: serde_json::json!({"stage":"recording","block_activity_scope":"unfiltered_issue_complete_v1"}),
+        };
+        let q = crate::perfetto::TraceQuality {
+            packets: 10,
+            ftrace_start_seen: true,
+            ftrace_end_seen: true,
+            kernel_start: BTreeMap::from([(0, [Some(0); 3])]),
+            kernel_end: BTreeMap::from([(0, [Some(0); 3])]),
+            service_stats_seen: true,
+            service_loss_counters: BTreeMap::from([("chunks_discarded".into(), 0)]),
+            final_flush_outcome: Some(0),
+            ..Default::default()
+        };
+        let quality = WireRecord::SourceInfo {
+            schema_version: 6,
+            source: "perfetto".into(),
+            status: String::new(),
+            metadata: serde_json::json!({"stage":"complete","quality":q,"completion_observations":1,"unresolved_timing":0,"unmatched_issues":0,"unpaired_requeues":0,"correlation_limit_hits":0}),
+        };
+        let footer = WireRecord::Footer {
+            schema_version: 6,
+            events_seen: 1,
+            events_persisted: 1,
+            events_dropped: 0,
+            events_rejected: 0,
+            graceful: Some(true),
+        };
+        (a, scope, quality, footer)
+    }
+    #[test]
+    fn only_complete_unfiltered_loss_free_source_can_provide_reconstructed_bw() {
+        let (mut a, scope, quality, footer) = coverage_fixture();
+        a.observe_record(&quality);
+        a.observe_record(&footer);
+        assert!(
+            !a.reconstructed(),
+            "legacy zero-loss metadata alone is not scope proof"
+        );
+        a.observe_record(&scope);
+        a.observe_record(&quality);
+        a.observe_record(&footer);
+        let b = calculate(&a, (0, 10), TransferBytes::default(), vec![(8, 0)]);
+        assert!(b.estimated);
+        assert!(!a.exact());
+        assert_eq!(b.busy_ns, Some(6));
+        assert_eq!(b.idle_ns, Some(4));
+        a.observed_requests += 1;
+        assert!(!a.reconstructed(), "a footer cannot cover later events");
+        for name in ["truncated", "projection_limited"] {
+            let (mut a, scope, mut quality, footer) = coverage_fixture();
+            if let WireRecord::SourceInfo { metadata, .. } = &mut quality {
+                metadata["quality"][name] = serde_json::json!(true);
+            }
+            a.observe_record(&scope);
+            a.observe_record(&quality);
+            a.observe_record(&footer);
+            assert!(!a.reconstructed(), "{name}");
+        }
+        for name in [
+            "unresolved_timing",
+            "unmatched_issues",
+            "unpaired_requeues",
+            "correlation_limit_hits",
+        ] {
+            let (mut a, scope, mut quality, footer) = coverage_fixture();
+            if let WireRecord::SourceInfo { metadata, .. } = &mut quality {
+                metadata[name] = serde_json::json!(1);
+            }
+            a.observe_record(&scope);
+            a.observe_record(&quality);
+            a.observe_record(&footer);
+            assert!(!a.reconstructed(), "{name}");
+        }
+        let (mut a, scope, mut quality, footer) = coverage_fixture();
+        if let WireRecord::SourceInfo { metadata, .. } = &mut quality {
+            metadata["quality"]["kernel_end"]["0"] = serde_json::json!([1, 0, 0]);
+        }
+        a.observe_record(&scope);
+        a.observe_record(&quality);
+        a.observe_record(&footer);
+        assert!(!a.reconstructed());
+    }
+    #[test]
+    fn incomplete_other_device_does_not_erase_verified_device_activity() {
+        let (mut a, scope, mut quality, mut footer) = coverage_fixture();
+        a.observed_requests = 2;
+        a.missing_issue = 1;
+        a.observed_devices = BTreeMap::from([((8, 0), 1), ((7, 0), 1)]);
+        a.missing_devices = BTreeMap::from([((7, 0), 1)]);
+        a.devices.entry((7, 0)).or_default();
+        if let WireRecord::SourceInfo { metadata, .. } = &mut quality {
+            metadata["completion_observations"] = serde_json::json!(2);
+            metadata["unresolved_timing"] = serde_json::json!(1);
+            metadata["block_activity_devices"] = serde_json::json!([
+                DeviceCoverage {
+                    device: (8, 0),
+                    completions: 1,
+                    ..Default::default()
+                },
+                DeviceCoverage {
+                    device: (7, 0),
+                    completions: 1,
+                    unresolved: 1,
+                    ..Default::default()
+                }
+            ]);
+        }
+        if let WireRecord::Footer {
+            events_seen,
+            events_persisted,
+            ..
+        } = &mut footer
+        {
+            *events_seen = 2;
+            *events_persisted = 2;
+        }
+        a.observe_record(&scope);
+        a.observe_record(&quality);
+        a.observe_record(&footer);
+        assert!(a.reconstructed_for(&[(8, 0)]));
+        assert!(!a.reconstructed());
+        assert!(!a.reconstructed_for(&[(7, 0)]));
+        let b = calculate(&a, (0, 10), TransferBytes::default(), vec![(8, 0)]);
+        assert!(b.estimated);
+        assert_eq!(b.busy_ns, Some(6));
+        if let WireRecord::SourceInfo { metadata, .. } = &mut quality {
+            metadata["block_activity_devices"][0]["unmatched"] = serde_json::json!(1);
+        }
+        a.observe_record(&quality);
+        a.observe_record(&footer);
+        assert!(
+            !a.reconstructed_for(&[(8, 0)]),
+            "an explicitly empty eligible device set is not global coverage"
+        );
+    }
     #[test]
     fn overlap_unordered_adjacency_and_boundaries_use_union_not_latency_sum() {
         let mut a = ActivityTimeline {

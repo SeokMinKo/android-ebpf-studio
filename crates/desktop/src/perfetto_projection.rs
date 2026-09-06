@@ -29,10 +29,31 @@ pub struct Projection<'a> {
     records: HashMap<u64, &'a BlockEvent>,
     patterns: HashMap<u64, AccessPattern>,
     metadata: HashMap<u32, Vec<&'a ProcessMetadata>>,
+    timing: HashMap<u64, android_ebpf_protocol::DetailTiming>,
 }
 impl<'a> Projection<'a> {
     pub fn new(trace: &'a DecodedTrace) -> Self {
         let mut patterns = HashMap::new();
+        let mut timing = HashMap::new();
+        let mut clocks: HashMap<u64, (Option<u64>, Option<u64>)> = HashMap::new();
+        let mut events: Vec<_> = trace.events.iter().filter(|e| e.clock == 0).collect();
+        events.sort_by_key(|e| (e.timestamp_ns, e.record_id));
+        for e in events {
+            let (issue, complete) = clocks.entry(e.device_encoded).or_default();
+            let mut t = android_ebpf_protocol::DetailTiming::default();
+            match e.kind {
+                BlockKind::Issue => {
+                    t.issue_gap_ns = issue.map(|v| e.timestamp_ns - v);
+                    *issue = Some(e.timestamp_ns);
+                }
+                BlockKind::Complete => {
+                    t.completion_gap_ns = complete.map(|v| e.timestamp_ns - v);
+                    *complete = Some(e.timestamp_ns);
+                }
+                _ => {}
+            }
+            timing.insert(e.record_id, t);
+        }
         let mut classifier = SequentialClassifier::default();
         let mut metadata: HashMap<u32, Vec<&ProcessMetadata>> = HashMap::new();
         for row in &trace.processes {
@@ -76,6 +97,7 @@ impl<'a> Projection<'a> {
             records: trace.events.iter().map(|e| (e.record_id, e)).collect(),
             patterns,
             metadata,
+            timing,
         }
     }
     fn process_candidate(&self, tid: Option<u32>, ts: Option<u64>) -> Option<&ProcessMetadata> {
@@ -177,6 +199,20 @@ impl<'a> Projection<'a> {
                 .and_then(|d| d.checked_add(o.queue_latency_ns.unwrap_or(0))),
             queue_latency_ns: o.queue_latency_ns,
             queue_depth_after: None,
+            detail_timing: android_ebpf_protocol::DetailTiming {
+                completion_gap_ns: self
+                    .timing
+                    .get(&o.completion_record)
+                    .and_then(|t| t.completion_gap_ns),
+                ..if o.issue_timestamp_ns.is_some() && o.issue_candidates.len() == 1 {
+                    self.timing
+                        .get(&o.issue_candidates[0])
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                }
+            },
             access_pattern,
             size_class: IoSizeClass::classify(bytes),
             evidence: Some(Box::new(CompletionEvidence {
@@ -205,5 +241,39 @@ impl<'a> Projection<'a> {
             .iter()
             .map(|o| self.completion(o))
             .collect()
+    }
+    /// Reconstruct observed in-flight requests from uniquely paired intervals.
+    /// Collapse partial completions sharing one issue to its final completion.
+    /// Unpaired requests are absent: this is explicitly detail-based depth.
+    pub fn with_analysis(mut self, analysis: &BlockAnalysis) -> Self {
+        let mut intervals: HashMap<u64, (u64, u64, u64)> = HashMap::new();
+        for o in &analysis.completions {
+            if o.clock == 0
+                && let Some(start) = o.issue_timestamp_ns
+                && o.issue_candidates.len() == 1
+                && start < o.timestamp_ns
+            {
+                let row = intervals.entry(o.issue_candidates[0]).or_insert((
+                    o.device_encoded,
+                    start,
+                    o.timestamp_ns,
+                ));
+                row.2 = row.2.max(o.timestamp_ns);
+            }
+        }
+        let mut devices: HashMap<u64, Vec<(u64, u64, u64)>> = HashMap::new();
+        for (id, (device, start, end)) in intervals {
+            devices.entry(device).or_default().push((start, id, end));
+        }
+        for mut rows in devices.into_values() {
+            rows.sort_unstable();
+            let mut ends: Vec<_> = rows.iter().map(|r| r.2).collect();
+            ends.sort_unstable();
+            for (i, (start, id, _)) in rows.iter().enumerate() {
+                let completed = ends.partition_point(|end| end <= start);
+                self.timing.entry(*id).or_default().issue_depth = Some(i + 1 - completed);
+            }
+        }
+        self
     }
 }

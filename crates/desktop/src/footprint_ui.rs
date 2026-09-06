@@ -55,6 +55,9 @@ mod footprint_tests {
         assert!(view.lanes.keys().any(|n|n.contains("/data/42")&&n.contains("Probable")));
         let s=compute_selection(&engine,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::Sector,0);
         assert_eq!(s.keys.len(),3);assert_eq!(s.read.bytes,3*4096);
+        assert_eq!(s.categories["File candidate membership"].values().map(|v|v.0).sum::<u64>(),4);
+        assert_eq!(s.categories["Process"].values().map(|v|v.0).sum::<u64>(),3);
+        assert_eq!(s.categories["File candidate membership"].values().map(|v|v.1).sum::<u64>(),4*4096);
     }
 }
 impl FootprintMode {

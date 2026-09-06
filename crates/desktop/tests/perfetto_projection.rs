@@ -36,6 +36,33 @@ fn fixture() -> DecodedTrace {
     }
 }
 #[test]
+fn projected_issue_depth_uses_intervals_and_gaps_use_raw_device_event_order() {
+    let mut trace = fixture();
+    trace.events = vec![
+        event(1, BlockKind::Issue, 10, 0),
+        event(2, BlockKind::Issue, 20, 16),
+        event(3, BlockKind::Complete, 30, 16),
+        event(4, BlockKind::Complete, 40, 0),
+        event(5, BlockKind::Issue, 40, 32),
+        event(6, BlockKind::Complete, 50, 32),
+    ];
+    let a = analyze(&trace);
+    let p = Projection::new(&trace)
+        .with_analysis(&a)
+        .events(&a)
+        .unwrap();
+    assert_eq!(
+        p.iter()
+            .map(|io| io.detail_timing.issue_depth)
+            .collect::<Vec<_>>(),
+        [Some(2), Some(1), Some(1)]
+    );
+    assert_eq!(p[0].detail_timing.issue_gap_ns, Some(10));
+    assert_eq!(p[0].detail_timing.completion_gap_ns, None);
+    assert_eq!(p[2].detail_timing.completion_gap_ns, Some(10));
+    assert_eq!(p[1].detail_timing.issue_gap_ns, None);
+}
+#[test]
 fn projected_completions_preserve_unknown_identity_timing_and_all_volume() {
     let trace = fixture();
     let projected = Projection::new(&trace).events(&analyze(&trace)).unwrap();

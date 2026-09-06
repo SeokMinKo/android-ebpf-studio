@@ -103,10 +103,14 @@ enum ExplorerPreset {
     Custom,
     ChunkTimeline,
     QueueTimeline,
+    IssueGapTimeline,
+    CompletionGapTimeline,
+    NormalizedLatencyTimeline,
+    CpuTimeline,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 12] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -115,6 +119,10 @@ impl ExplorerPreset {
         Self::Custom,
         Self::ChunkTimeline,
         Self::QueueTimeline,
+        Self::IssueGapTimeline,
+        Self::CompletionGapTimeline,
+        Self::NormalizedLatencyTimeline,
+        Self::CpuTimeline,
     ];
 
     fn label(self) -> &'static str {
@@ -127,6 +135,10 @@ impl ExplorerPreset {
             Self::Custom => "Custom",
             Self::ChunkTimeline => "Chunk size over time",
             Self::QueueTimeline => "Queue depth over time",
+            Self::IssueGapTimeline => "D2D issue gap over time",
+            Self::CompletionGapTimeline => "C2C completion gap over time",
+            Self::NormalizedLatencyTimeline => "Latency per KiB over time",
+            Self::CpuTimeline => "Issue CPU over time",
         }
     }
 
@@ -161,9 +173,25 @@ impl ExplorerPreset {
             }
             Self::QueueTimeline => Some((
                 AxisMetric::TimeMs,
-                AxisMetric::QueueDepth,
+                AxisMetric::IssueQueueDepth,
                 GroupBy::Direction,
             )),
+            Self::IssueGapTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::IssueGapMs,
+                GroupBy::Direction,
+            )),
+            Self::CompletionGapTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::CompletionGapMs,
+                GroupBy::Direction,
+            )),
+            Self::NormalizedLatencyTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::LatencyPerKiB,
+                GroupBy::Direction,
+            )),
+            Self::CpuTimeline => Some((AxisMetric::TimeMs, AxisMetric::IssueCpu, GroupBy::Process)),
         }
     }
 }
@@ -190,10 +218,15 @@ enum AxisMetric {
     FilesystemLatencyMs,
     UfsLatencyMs,
     CriticalPathMs,
+    IssueQueueDepth,
+    IssueGapMs,
+    CompletionGapMs,
+    LatencyPerKiB,
+    IssueCpu,
 }
 
 impl AxisMetric {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 17] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
@@ -206,6 +239,11 @@ impl AxisMetric {
         Self::FilesystemLatencyMs,
         Self::UfsLatencyMs,
         Self::CriticalPathMs,
+        Self::IssueQueueDepth,
+        Self::IssueGapMs,
+        Self::CompletionGapMs,
+        Self::LatencyPerKiB,
+        Self::IssueCpu,
     ];
 
     fn label(self) -> &'static str {
@@ -218,10 +256,15 @@ impl AxisMetric {
             Self::QueueLatencyMs => "Queue latency (ms)",
             Self::DeviceLatencyMs => "Device latency (ms)",
             Self::Pid => "PID",
-            Self::QueueDepth => "Queue depth",
+            Self::QueueDepth => "QD after completion (all devices)",
             Self::FilesystemLatencyMs => "Filesystem latency (ms)",
             Self::UfsLatencyMs => "UFS latency (ms)",
             Self::CriticalPathMs => "Critical path (ms)",
+            Self::IssueQueueDepth => "Observed QD at issue (device)",
+            Self::IssueGapMs => "D2D issue gap (ms)",
+            Self::CompletionGapMs => "C2C completion gap (ms)",
+            Self::LatencyPerKiB => "Device latency (ms/KiB)",
+            Self::IssueCpu => "Issue CPU",
         }
     }
 
@@ -248,6 +291,20 @@ impl AxisMetric {
             Self::DeviceLatencyMs => io.device_latency_ns.map(|n| n as f64 / 1e6),
             Self::Pid => io.issuer_pid().map(|pid| pid as f64),
             Self::QueueDepth => io.queue_depth_after.map(|n| n as f64),
+            Self::IssueQueueDepth => io.detail_timing.issue_depth.map(|n| n as f64),
+            Self::IssueGapMs => io.detail_timing.issue_gap_ns.map(|n| n as f64 / 1e6),
+            Self::CompletionGapMs => io.detail_timing.completion_gap_ns.map(|n| n as f64 / 1e6),
+            Self::LatencyPerKiB => {
+                if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write)
+                    && io.issue.bytes > 0
+                {
+                    io.device_latency_ns
+                        .map(|n| n as f64 / 1e6 / (io.issue.bytes as f64 / 1024.))
+                } else {
+                    None
+                }
+            }
+            Self::IssueCpu => io.issuer_cpu().map(|n| n as f64),
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
@@ -270,7 +327,11 @@ impl AxisMetric {
 
     fn format_value(self, value: f64) -> String {
         match self {
-            Self::Sector | Self::Pid | Self::QueueDepth => format!("{value:.0}"),
+            Self::Sector
+            | Self::Pid
+            | Self::QueueDepth
+            | Self::IssueQueueDepth
+            | Self::IssueCpu => format!("{value:.0}"),
             Self::AddressKiB | Self::ChunkKiB => format!("{value:.1}"),
             Self::TimeMs
             | Self::TotalLatencyMs
@@ -278,7 +339,10 @@ impl AxisMetric {
             | Self::DeviceLatencyMs
             | Self::FilesystemLatencyMs
             | Self::UfsLatencyMs
-            | Self::CriticalPathMs => format!("{value:.3}"),
+            | Self::CriticalPathMs
+            | Self::IssueGapMs
+            | Self::CompletionGapMs
+            | Self::LatencyPerKiB => format!("{value:.3}"),
         }
     }
 }
@@ -1137,6 +1201,12 @@ impl StudioApp {
     }
 
     fn ingest_record(&mut self, record: WireRecord) {
+        if matches!(
+            &record,
+            WireRecord::SourceInfo { .. } | WireRecord::Footer { .. }
+        ) {
+            Arc::make_mut(&mut self.activity).observe_record(&record);
+        }
         if let WireRecord::Footer { graceful, .. } = &record {
             self.agent_footer_seen = true;
             self.agent_graceful = *graceful;
@@ -1181,6 +1251,8 @@ impl StudioApp {
                 if let Some(previous) = self.last_sequence
                     && sequence != previous.saturating_add(1)
                 {
+                    Arc::make_mut(&mut self.activity).limitation =
+                        Some("Event sequence gap in the received stream".into());
                     self.push_diagnostic_record(host_record(
                         self.session_id.as_deref().unwrap_or("session"),
                         DiagnosticLevel::Warn,

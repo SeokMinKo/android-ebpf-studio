@@ -46,12 +46,12 @@
       "cmd_category",
       "filename"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "user selected categorical field counts or size sums",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Command, size class, access, device, issue CPU, device+comm+PID, file candidate and layer memberships; count or Read+Write payload share; top4+remainder pie, complete pageable table and CSV",
+    "target_ui": "Cohort categories in linked Summary",
+    "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -92,12 +92,12 @@
       "process",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "send_time vs send_core; event time vs core",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Measured issue CPU only, missing CPU excluded; filter requires measured issuer CPU. Completion CPU is not substituted",
+    "target_ui": "Explore Issue CPU preset + Summary CPU categories",
+    "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -139,12 +139,12 @@
       "process",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "send_time vs lba with process facets",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Shared time/LBA axes, device+PID identities, four groups/page, all groups reachable; multi-origin memberships distinct from unique total",
+    "target_ui": "FilePath / Process / File I/O process candidate lanes",
+    "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -180,12 +180,12 @@
       "lba",
       "send_time"
     ],
-    "status": "partial: paired numeric summary implemented; full uPAS semantics/coverage verification ongoing",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "uPAS lba KiB / 1024 / 1024, address bin sums chunk_length",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Summary uses existing retained CompletedIo and exact address extents; no protocol change in this slice",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "16 equal-width starting-sector bins, count histogram plus summed full Read/Write payload; [lower,upper), last upper inclusive; sector512B, MiB1024^2B",
+    "target_ui": "LBA Summary > Spatial payload / temporal reuse",
+    "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "ebpf_metric": "Sector / AddressKiB",
     "summary_pair": "LBA histogram; byte-weighted spatial histogram pending",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
@@ -202,13 +202,14 @@
       "lba",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "access frequency per LBA over time (review exact grouping)",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
-    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
+    "formula": "Sort measured issue timestamps within device+operation+starting-sector in current graph cohort; consecutive reuse gaps in ms; first visits/missing timestamps excluded; paired histogram/percentile and address-vs-gap scatter",
+    "target_ui": "LBA Summary > Spatial payload / temporal reuse",
+    "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
+    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB).",
+    "upas_difference": "UpasAnalyzer.py2943-2947 mutates df inside the direction loop, potentially dropping the second direction; new code keeps Read and Write independent. Device separation avoids cross-device same-LBA reuse."
   },
   {
     "id": "overwrite",
@@ -484,13 +485,14 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented numeric axis and paired summary; real-data oracle passed; full target matrix pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "(complete_time-send_time)/chunk_length KiB",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
-    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
+    "formula": "Measured issue-to-completion milliseconds / (Read or Write bytes /1024). Zero size and non-transfer commands excluded, never zero latency.",
+    "target_ui": "Explore latency-per-KiB preset or custom Chunk vs latency-per-KiB axes; linked right Summary histogram/percentile/CDF/sorted rank",
+    "capture_changes": "Existing device latency and bytes; no kernel change",
+    "verification": "Independent real trace8063 R/W values, histogram, percentile, CDF and CSV checked in verify_new_metrics.py",
+    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB).",
+    "ebpf_metric": "LatencyPerKiB"
   },
   {
     "id": "1_chunk_latency_anlaysis",
@@ -507,13 +509,14 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented numeric axis and paired summary; real-data oracle passed; full target matrix pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "normalized D2C by chunk_length",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
-    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
+    "formula": "Measured issue-to-completion milliseconds / (Read or Write bytes /1024). Zero size and non-transfer commands excluded, never zero latency.",
+    "target_ui": "Explore latency-per-KiB preset or custom Chunk vs latency-per-KiB axes; linked right Summary histogram/percentile/CDF/sorted rank",
+    "capture_changes": "Existing device latency and bytes; no kernel change",
+    "verification": "Independent real trace8063 R/W values, histogram, percentile, CDF and CSV checked in verify_new_metrics.py",
+    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB).",
+    "ebpf_metric": "LatencyPerKiB"
   },
   {
     "id": "c2c_trend",
@@ -531,13 +534,14 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "complete_time - prior completion time",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
-    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
+    "formula": "Same-device previous observed completion timestamp gap in ms before analysis filters. First or out-of-order gap unavailable",
+    "target_ui": "Explore C2C completion-gap preset + linked Summary",
+    "capture_changes": "Optional serde-default DetailTiming for issue QD and per-device D2D/C2C; acquired before retention/filtering. No version bump; older observed sessions retain unavailable new fields. Existing raw eBPF sessions recalculate on load.",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
+    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB).",
+    "upas_difference": "UpasAnalyzer.py991/995 uses a global shift after filename sorting; new code prevents cross-device gaps and leaves the first observation unavailable. No cross-file negative boundary gap is fabricated."
   },
   {
     "id": "c2c_sorting",
@@ -549,12 +553,12 @@
       "c2c_latency",
       "filename"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "sorted completion gaps",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Exact sample sort and cumulative count, ties included; original-value percentile table",
+    "target_ui": "C2C Summary > CDF / sorted rank",
+    "capture_changes": "Optional serde-default DetailTiming for issue QD and per-device D2D/C2C; acquired before retention/filtering. No version bump; older observed sessions retain unavailable new fields. Existing raw eBPF sessions recalculate on load.",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -572,13 +576,14 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "send_time - prior send time",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
-    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
+    "formula": "Same-device previous observed issue timestamp gap in ms before analysis filters. First or out-of-order gap unavailable; x uses completion time and is labelled explicitly",
+    "target_ui": "Explore D2D issue-gap preset + linked Summary",
+    "capture_changes": "Optional serde-default DetailTiming for issue QD and per-device D2D/C2C; acquired before retention/filtering. No version bump; older observed sessions retain unavailable new fields. Existing raw eBPF sessions recalculate on load.",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
+    "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB).",
+    "upas_difference": "UpasAnalyzer.py991/995 uses a global shift after filename sorting; new code prevents cross-device gaps and leaves the first observation unavailable. No cross-file negative boundary gap is fabricated."
   },
   {
     "id": "d2d_sorting",
@@ -590,12 +595,12 @@
       "d2d_latency",
       "filename"
     ],
-    "status": "pending",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "sorted issue gaps",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Exact sample sort and cumulative count, ties included; original-value percentile table",
+    "target_ui": "D2D Summary > CDF / sorted rank",
+    "capture_changes": "Optional serde-default DetailTiming for issue QD and per-device D2D/C2C; acquired before retention/filtering. No version bump; older observed sessions retain unavailable new fields. Existing raw eBPF sessions recalculate on load.",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -710,12 +715,12 @@
       "send_q",
       "send_time"
     ],
-    "status": "partial: paired numeric summary implemented; full uPAS semantics/coverage verification ongoing",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "existing eBPF field is depth after completion; uPAS send_q is issue depth; parity calculation pending",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Summary uses existing retained CompletedIo and exact address extents; no protocol change in this slice",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Per-device observed in-flight depth immediately after issue, preserved before analysis filters. eBPF uses correlator detail stream; Perfetto uses uniquely paired half-open intervals. Not hardware or unsampled QD. Legacy after-completion axis retained explicitly",
+    "target_ui": "Explore QD at issue trend + linked Summary",
+    "capture_changes": "Optional serde-default DetailTiming for issue QD and per-device D2D/C2C; acquired before retention/filtering. No version bump; older observed sessions retain unavailable new fields. Existing raw eBPF sessions recalculate on load.",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "ebpf_metric": "QueueDepth",
     "summary_pair": "QD histogram and exact percentile table",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
@@ -732,12 +737,12 @@
       "send_q",
       "send_time"
     ],
-    "status": "partial: paired numeric summary implemented; full uPAS semantics/coverage verification ongoing",
+    "status": "implemented slice; deterministic and real-trace verification passed; full parity and final install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "existing completion-depth samples; uPAS uses send_q",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Summary uses existing retained CompletedIo and exact address extents; no protocol change in this slice",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Exact nearest rank and empirical cumulative count with all ties; render up to512 original values, CSV every sorted sample and exact cumulative count",
+    "target_ui": "QD Summary > CDF / sorted rank",
+    "capture_changes": "Optional serde-default DetailTiming for issue QD and per-device D2D/C2C; acquired before retention/filtering. No version bump; older observed sessions retain unavailable new fields. Existing raw eBPF sessions recalculate on load.",
+    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
     "ebpf_metric": "QueueDepth",
     "summary_pair": "Histogram/percentiles available; sorted rank/CDF pending",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."

@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let decoded = perfetto::decode(std::io::BufReader::new(std::fs::File::open(&source)?));
     let analysis = perfetto::analyze(&decoded);
-    let projection = Projection::new(&decoded);
+    let projection = Projection::new(&decoded).with_analysis(&analysis);
     let mut out = std::io::BufWriter::new(
         std::fs::OpenOptions::new()
             .write(true)

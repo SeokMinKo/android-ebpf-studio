@@ -95,6 +95,30 @@ fn recovery_creates_new_reopenable_sessions_and_keeps_all_unresolved_volume() {
 }
 
 #[test]
+fn reanalysis_preserves_capture_scope_but_never_upgrades_incomplete_raw_coverage() {
+    let f = Fixture::new();
+    let source = WireRecord::SourceInfo {
+        schema_version: 6,
+        source: "perfetto".into(),
+        status: "recording".into(),
+        metadata: serde_json::json!({"stage":"recording","block_activity_scope":"unfiltered_issue_complete_v1"}),
+    };
+    let mut file = std::fs::File::create(&f.session).unwrap();
+    android_ebpf_protocol::write_record(&mut file, &source).unwrap();
+    drop(file);
+    let output = reanalyze_saved_trace(&f.session).unwrap();
+    let loaded = session::load_analysis(&output).unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded.source_info[0]).unwrap(),
+        serde_json::to_value(source).unwrap()
+    );
+    assert!(
+        !loaded.activity.reconstructed(),
+        "one unpaired completion with no quality counters is still incomplete"
+    );
+}
+
+#[test]
 fn truncated_raw_recovery_retains_complete_prefix_and_reports_loss_of_tail() {
     let f = Fixture::new();
     let mut raw = trace();

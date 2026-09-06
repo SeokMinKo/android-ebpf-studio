@@ -217,6 +217,7 @@ impl DirectionSummary {
 
 #[derive(Debug, Default)]
 struct SelectionSummary {
+    categories:BTreeMap<String,BTreeMap<String,(u64,u64)>>,
     host_bw:Option<crate::host_bw::HostBandwidth>,
     source_rows: usize,
     unplottable_rows: usize,
@@ -224,6 +225,7 @@ struct SelectionSummary {
     metric: crate::graph_summary::MetricDistribution,
     address_distributions: BTreeMap<(u32,u32), crate::graph_summary::MetricDistribution>,
     address_counts: Vec<crate::graph_summary::AddressCount>,
+    locality:BTreeMap<(u32,u32),crate::graph_summary::AddressLocality>,
     files: BTreeMap<(String, String, String), SelectedTarget>,
     processes: BTreeMap<IssuerIdentity, SelectedTarget>,
     multiple_candidates: u64,
@@ -241,6 +243,14 @@ struct SelectionSummary {
 impl SelectionSummary {
     fn observe(&mut self, io: &CompletedIo, point: [f64; 2]) {
         self.keys.insert(selection_key(io));
+        for (dimension,label) in [
+            ("Command",format!("{:?}",io.issue.operation)),
+            ("Access pattern",format!("{:?}",io.access_pattern)),
+            ("Size class",format!("{:?}",io.size_class)),
+            ("Device",format!("{}:{}",io.issue.device_major,io.issue.device_minor)),
+            ("Issue CPU",identity_number(io.issuer_cpu())),
+            ("Process",format!("{}:{} / {} · PID {}",io.issue.device_major,io.issue.device_minor,io.issue.comm,identity_number(io.issuer_pid()))),
+        ] {self.observe_category(dimension,label,io);}
         let start = io.start_timestamp();
         self.start_ns = Some(self.start_ns.map_or(start, |v| v.min(start)));
         self.end_ns = Some(
@@ -274,6 +284,11 @@ impl SelectionSummary {
         self.duration_ns()
             .filter(|v| *v > 0)
             .map(|ns| bytes as f64 * 1e9 / ns as f64 / 1_048_576.0)
+    }
+    fn observe_category(&mut self,dimension:&str,label:String,io:&CompletedIo) {
+        let row=self.categories.entry(dimension.into()).or_default().entry(label).or_default();
+        row.0+=1;
+        if matches!(io.issue.operation,IoOperation::Read|IoOperation::Write) {row.1+=io.issue.bytes as u64;}
     }
 }
 
@@ -313,6 +328,7 @@ fn compute_selection(
         ..Default::default()
     };
     let mut addresses = crate::graph_summary::AddressAccumulator::default();
+    let mut locality = crate::graph_summary::LocalityAccumulator::default();
     for io in engine.completed_ios() {
         if let SelectionRequest::Point(key) = request
             && selection_key(io) != key
@@ -342,15 +358,20 @@ fn compute_selection(
             result.address_distributions.entry((io.issue.device_major, io.issue.device_minor)).or_default()
                 .observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));
             addresses.observe(io);
+            locality.observe(io);
         }
         let graph = graph.unwrap_or_else(|| engine.transaction_for(io));
         result.observe_targets(io, &block_file_origins(&graph));
+        let layers:std::collections::BTreeSet<_>=graph.nodes.iter().map(|n|format!("{:?}",n.kind)).collect();
+        for layer in layers {result.observe_category("Observed layer membership",layer,io);}
     }
     result.read.latency.sort_unstable();
     result.write.latency.sort_unstable();
     result.metric.finish();
     for dist in result.address_distributions.values_mut() { dist.finish(); }
     result.address_counts = addresses.finish();
+    result.locality=locality.finish();
+    result.categories.insert("File candidate membership".into(),result.files.iter().map(|((path,identity,confidence),r)|(format!("{path} / {identity} [{confidence}]"),(r.count,r.read_bytes.saturating_add(r.write_bytes)))).collect());
     result.elapsed = started.elapsed();
     result
 }

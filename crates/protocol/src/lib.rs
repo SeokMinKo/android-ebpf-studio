@@ -1725,6 +1725,15 @@ pub struct CompletionEvidence {
     pub clock: u32,
 }
 
+/// Detail-stream timing, computed before retention or analysis filters.
+/// Observed software requests, never an unsampled hardware queue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetailTiming {
+    pub issue_depth: Option<usize>,
+    pub issue_gap_ns: Option<u64>,
+    pub completion_gap_ns: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedIo {
     pub insert: Option<BlockInsert>,
@@ -1736,6 +1745,8 @@ pub struct CompletedIo {
     pub device_latency_ns: Option<u64>,
     pub total_latency_ns: Option<u64>,
     pub queue_depth_after: Option<usize>,
+    #[serde(default)]
+    pub detail_timing: DetailTiming,
     pub access_pattern: AccessPattern,
     pub size_class: IoSizeClass,
     /// For observed completions, `issue` holds volume/address context. Its
@@ -1815,6 +1826,7 @@ struct PendingRequest {
     issue: BlockIssue,
     insert: Option<BlockInsert>,
     access_pattern: AccessPattern,
+    detail_timing: DetailTiming,
 }
 
 /// Correlates optional insert, issue and completion events while guarding ID reuse.
@@ -1823,6 +1835,9 @@ pub struct RequestCorrelator {
     ttl_ns: u64,
     inserted: HashMap<RequestKey, BlockInsert>,
     pending: HashMap<RequestKey, PendingRequest>,
+    device_pending: HashMap<(u32, u32), usize>,
+    last_issue: HashMap<(u32, u32), u64>,
+    last_completion: HashMap<(u32, u32), u64>,
     ambiguous: HashMap<RequestKey, u64>,
     expired: u64,
     replaced: u64,
@@ -1835,6 +1850,9 @@ impl RequestCorrelator {
             ttl_ns,
             inserted: HashMap::new(),
             pending: HashMap::new(),
+            device_pending: HashMap::new(),
+            last_issue: HashMap::new(),
+            last_completion: HashMap::new(),
             ambiguous: HashMap::new(),
             expired: 0,
             replaced: 0,
@@ -1862,18 +1880,35 @@ impl RequestCorrelator {
     ) -> usize {
         self.expire_before(issue.ts_ns);
         let key = RequestKey::issue(&issue);
+        let device = (issue.device_major, issue.device_minor);
+        let issue_gap_ns = self
+            .last_issue
+            .insert(device, issue.ts_ns)
+            .and_then(|t| issue.ts_ns.checked_sub(t));
         let insert = self.inserted.remove(&key);
-        let collision = self.ambiguous.contains_key(&key) || self.pending.remove(&key).is_some();
+        let removed = self.pending.remove(&key).is_some();
+        let depth = self.device_pending.entry(device).or_default();
+        if removed {
+            *depth = depth.saturating_sub(1);
+        }
+        let collision = self.ambiguous.contains_key(&key) || removed;
         if collision {
             self.replaced += 1;
             self.ambiguous.insert(key, issue.ts_ns);
         } else {
+            *depth += 1;
+            let detail_timing = DetailTiming {
+                issue_depth: Some(*depth),
+                issue_gap_ns,
+                completion_gap_ns: None,
+            };
             self.pending.insert(
                 key,
                 PendingRequest {
                     issue,
                     insert,
                     access_pattern,
+                    detail_timing,
                 },
             );
         }
@@ -1883,10 +1918,18 @@ impl RequestCorrelator {
     pub fn on_complete(&mut self, completion: BlockComplete) -> Option<CompletedIo> {
         self.expire_before(completion.ts_ns);
         let key = RequestKey::complete(&completion);
+        let device = (completion.device_major, completion.device_minor);
+        let completion_gap_ns = self
+            .last_completion
+            .insert(device, completion.ts_ns)
+            .and_then(|t| completion.ts_ns.checked_sub(t));
         if self.ambiguous.remove(&key).is_some() {
             return None;
         }
         let pending = self.pending.remove(&key)?;
+        if let Some(depth) = self.device_pending.get_mut(&device) {
+            *depth = depth.saturating_sub(1);
+        }
         let device_latency_ns = completion.ts_ns.checked_sub(pending.issue.ts_ns)?;
         let queue_latency_ns = pending
             .insert
@@ -1907,6 +1950,10 @@ impl RequestCorrelator {
             device_latency_ns: Some(device_latency_ns),
             total_latency_ns: Some(total_latency_ns),
             queue_depth_after: Some(self.pending.len()),
+            detail_timing: DetailTiming {
+                completion_gap_ns,
+                ..pending.detail_timing
+            },
             access_pattern: pending.access_pattern,
             size_class,
             evidence: None,
@@ -1934,6 +1981,13 @@ impl RequestCorrelator {
         self.pending.retain(|_, value| {
             let keep = now_ns.saturating_sub(value.issue.ts_ns) <= ttl;
             expired += u64::from(!keep);
+            if !keep
+                && let Some(depth) = self
+                    .device_pending
+                    .get_mut(&(value.issue.device_major, value.issue.device_minor))
+            {
+                *depth = depth.saturating_sub(1);
+            }
             keep
         });
         self.ambiguous.retain(|_, ts_ns| {

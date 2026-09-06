@@ -39,7 +39,8 @@ impl StudioApp {
 fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
     let Some(b)=&s.host_bw else {return;};
     ui.strong("Host BW · MiB/s");
-    ui.small("Completion-counted bytes from this graph cohort. Detail-based BW is not the unsampled kernel throughput.");
+    if b.estimated {ui.colored_label(amber(),"Reconstructed estimate · block trace, Probable request matching");}
+    ui.small("Completion-counted Read + Write payload from this graph cohort. Detail-based BW is not the unsampled kernel throughput.");
     egui::Grid::new("host-bw-rates").num_columns(3).striped(true).show(ui,|ui| {
         ui.label("");ui.strong("with Idle");ui.strong("w/o Idle");ui.end_row();
         for (i,label) in ["Total","Read","Write"].iter().enumerate() {
@@ -49,6 +50,7 @@ fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
         }
     });
     ui.label(format!("Bytes: Total {} · Read {} · Write {}",format_bytes(b.bytes.total()),format_bytes(b.bytes.read),format_bytes(b.bytes.write)));
+    if b.bytes.other>0 {ui.small(format!("Excluded non-R/W command extents: {} (for example, Discard ranges)",format_bytes(b.bytes.other)));}
     ui.label(format!("Analysis time: {}",format_latency(Some(b.duration_ns))));
     ui.label(format!("Active/Busy: {} · Idle: {}",format_latency(b.busy_ns),format_latency(b.idle_ns)));
     if b.busy_ns.is_none() {
@@ -57,7 +59,7 @@ fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
     }
     ui.collapsing("BW definitions & coverage",|ui| {
         ui.label(format!("Range: {}–{} ns",b.start_ns,b.end_ns));
-        ui.label("with Idle = bytes / analysis time. w/o Idle = same bytes / active time. Total, Read and Write use the same denominator; Total includes other commands' transferred bytes.");
+        ui.label("with Idle = bytes / analysis time. w/o Idle = same bytes / active time. Total = Read + Write payload. Discard/Flush/Other command extents are excluded from bytes; their observed execution still contributes to device active time. Total, Read and Write use the same denominator.");
         ui.label("Active time is the union of measured issue-to-completion intervals for all observed processes and operations on the selected devices. Process/FilePath filters change the numerator, never erase other processes' device activity.");
         ui.label("Completed requests in the inclusive analysis interval contribute their full bytes, even if issued before Start. Activity intervals are clipped to the interval; requests completing later still contribute activity. A point uses that request's observed span. Adjacent inclusive selections can share an endpoint request.");
         ui.label("Multiple devices: sum selected request bytes and use wall-clock union of activity (any device busy), not summed device-seconds. Stacked block-device observations may represent the same physical transfer; select one device to avoid that interpretation.");
