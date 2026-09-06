@@ -612,10 +612,10 @@
     "fields": [],
     "status": "pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "scheduler CPU IOWait source; inspect parser fields before extending capture",
+    "formula": "Scheduler delay event: trace delay ns /1000 -> us at relative timestamp; uPAS separate iowait_parsing_file (Parser1188-1236, Analyzer8120-8158). Not CPU iowait percentage or per-request block/device idle time.",
     "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
     "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "verification": "Further scheduler-event/configuration acquisition audit pending; parser pattern currently aaaddd placeholder, dispatch needs verification. See UPAS_ACQUISITION_AUDIT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -762,10 +762,10 @@
     ],
     "status": "pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "hardware command queue/blk-mq identity (send_db); not software in-flight QD",
+    "formula": "Separate send_hwq and complete_hwq at their respective timestamps (uPAS5062-5075); source-specific hardware/blk-mq queue identity, not send_db or software in-flight QD. Many parser paths use placeholder0; unavailable measurements must not be zero.",
     "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
     "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "verification": "Further acquisition audit pending; see UPAS_ACQUISITION_AUDIT.md. Actual source fields corrected from initial send_db assumption.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
