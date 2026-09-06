@@ -202,10 +202,15 @@ impl AnalysisFilter {
         {
             return false;
         }
-        let time = io.completion.ts_ns.saturating_sub(origin) as f64 / 1_000_000.0;
-        if time < self.start_ms
-            || (self.end_ms > 0.0 && time > self.end_ms)
-            || (self.pid != 0 && Some(self.pid) != io.issuer_pid())
+        if (self.start_ms > 0.0 || self.end_ms > 0.0)
+            && io.completion_timestamp().is_none_or(|ts| {
+                let time = ts.saturating_sub(origin) as f64 / 1_000_000.0;
+                time < self.start_ms || (self.end_ms > 0.0 && time > self.end_ms)
+            })
+        {
+            return false;
+        }
+        if (self.pid != 0 && Some(self.pid) != io.issuer_pid())
             || (self.tid != 0 && Some(self.tid) != io.issuer_tid())
             || self.operation.is_some_and(|v| v != io.issue.operation)
             || !io
@@ -360,11 +365,13 @@ impl StudioApp {
         self.filtered.as_ref().unwrap_or(&self.analyzer)
     }
 
-    fn time_origin(&self) -> u64 {
+    fn known_time_origin(&self) -> Option<u64> {
         self.reanalysis
             .source_start_ns
             .or(self.analyzer.session_start_ns())
-            .unwrap_or(0)
+    }
+    fn time_origin(&self) -> u64 {
+        self.known_time_origin().unwrap_or(0)
     }
 
     fn invalidate_query(&mut self) {
@@ -447,6 +454,16 @@ impl StudioApp {
                 },
             ));
         }
+        self.time_filter_scope_ui(ui);
+    }
+
+    fn time_filter_scope_ui(&self, ui: &mut egui::Ui) {
+        if self.query.start_ms > 0.0 || self.query.end_ms > 0.0 {
+            let count = self.analyzer.live_summary().unplaced_time_ios;
+            if count > 0 {
+                ui.label(format!("Time filter excludes unsupported-clock I/O ({count} in the loaded source). Clear the time filter to inspect their count, bytes and addresses."));
+            }
+        }
     }
 
     fn trends_ui(&mut self, ui: &mut egui::Ui) {
@@ -475,9 +492,13 @@ impl StudioApp {
             coverage,
             multi,
             targets,
+            unplaced_time_count,
             ..
         } = self.trend_view.as_ref().unwrap().1.clone();
         let total: u64 = coverage.iter().sum();
+        if unplaced_time_count > 0 {
+            ui.label(format!("{unplaced_time_count} / {total} I/O have no supported session clock. Time graphs and time filters exclude them; count, bytes, address and FilePath coverage retain them."));
+        }
         ui.label(format!("FilePath by request count (n={total}): Exact {:.1}% · Probable {:.1}% · Unresolved {:.1}% · multi-origin {multi}", ratio(coverage[0],total), ratio(coverage[1],total), ratio(coverage[2],total)));
         ui.label("FilePath confidence requires a path snapshot as well as identity evidence. Exact inode without a path remains FilePath Unresolved. This ratio describes retained detail, not bytes or suppressed/unpaired I/O.");
         if let Some(aggregate) = &self.latest_aggregate {
@@ -488,6 +509,12 @@ impl StudioApp {
             ("iops-timeline", "IOPS (requests / s)", 0),
             ("throughput-timeline", "Throughput (MiB / s)", 2),
         ] {
+            if bins.is_empty() {
+                ui.label(format!(
+                    "{title}: unavailable — no I/O can be placed on the session timeline."
+                ));
+                continue;
+            }
             studio_plot(id)
                 .height(170.0)
                 .legend(Legend::default())
@@ -822,6 +849,7 @@ struct TrendData {
     coverage: [u64; 3],
     multi: u64,
     targets: BTreeMap<String, (u64, u64)>,
+    unplaced_time_count: u64,
 }
 impl TrendData {
     fn build(engine: &AnalysisEngine, origin: u64) -> Self {
@@ -832,6 +860,7 @@ impl TrendData {
         let mut coverage = [0_u64; 3];
         let mut multi = 0;
         let mut targets = BTreeMap::<String, (u64, u64)>::new();
+        let mut unplaced_time_count = 0;
         for io in engine.completed_ios() {
             if io.total_latency_ns.is_some()
                 && slowest
@@ -847,12 +876,16 @@ impl TrendData {
                 issuer.1 += 1;
                 issuer.2 += io.issue.bytes as u64;
             }
-            let second = io.completion.ts_ns.saturating_sub(origin) / 1_000_000_000;
-            let bin = bins.entry(second).or_default();
-            let offset = usize::from(io.issue.operation == IoOperation::Write);
-            if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write) {
-                bin[offset] += 1.0;
-                bin[2 + offset] += io.issue.bytes as f64 / 1_048_576.0;
+            if let Some(timestamp) = io.completion_timestamp() {
+                let second = timestamp.saturating_sub(origin) / 1_000_000_000;
+                let bin = bins.entry(second).or_default();
+                let offset = usize::from(io.issue.operation == IoOperation::Write);
+                if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write) {
+                    bin[offset] += 1.0;
+                    bin[2 + offset] += io.issue.bytes as f64 / 1_048_576.0;
+                }
+            } else {
+                unplaced_time_count += 1;
             }
             if let Some(latency) = io.total_latency_ns {
                 let bucket = 63 - latency.max(1).leading_zeros();
@@ -885,6 +918,7 @@ impl TrendData {
             coverage,
             multi,
             targets,
+            unplaced_time_count,
         }
     }
 }

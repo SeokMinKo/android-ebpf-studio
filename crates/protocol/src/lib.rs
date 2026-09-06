@@ -1745,7 +1745,17 @@ pub struct CompletedIo {
 }
 
 impl CompletedIo {
+    /// Time in the session's normalized clock domain. Raw timestamps stay in
+    /// completion/evidence for inspection, but unsupported clocks cannot be
+    /// compared, filtered or aggregated against the session timeline.
+    pub fn completion_timestamp(&self) -> Option<u64> {
+        self.evidence
+            .as_ref()
+            .is_none_or(|e| e.clock == 0)
+            .then_some(self.completion.ts_ns)
+    }
     pub fn issue_timestamp(&self) -> Option<u64> {
+        self.completion_timestamp()?;
         self.evidence
             .as_ref()
             .map_or(Some(self.issue.ts_ns), |e| e.issue_timestamp_ns)
@@ -1770,12 +1780,15 @@ impl CompletedIo {
             .as_ref()
             .map_or(Some(self.completion.status), |e| e.completion_status)
     }
-    pub fn start_timestamp(&self) -> u64 {
-        self.insert
-            .as_ref()
-            .map(|i| i.ts_ns)
-            .or_else(|| self.issue_timestamp())
-            .unwrap_or(self.completion.ts_ns)
+    pub fn start_timestamp(&self) -> Option<u64> {
+        let completion = self.completion_timestamp()?;
+        Some(
+            self.insert
+                .as_ref()
+                .map(|i| i.ts_ns)
+                .or_else(|| self.issue_timestamp())
+                .unwrap_or(completion),
+        )
     }
     pub fn timing_confidence(&self) -> CorrelationConfidence {
         self.evidence
@@ -2018,10 +2031,13 @@ pub struct AnalysisSummary {
     pub max_queue_depth: Option<usize>,
     #[serde(default)]
     pub unmeasured_latency_ios: u64,
+    /// Completed I/O preserved outside temporal graphs and time-range filters.
+    #[serde(default)]
+    pub unplaced_time_ios: u64,
     pub p50_latency_ns: Option<u64>,
     pub p95_latency_ns: Option<u64>,
     pub p99_latency_ns: Option<u64>,
-    pub logging_ns: u64,
+    pub logging_ns: Option<u64>,
     pub busy_ns: Option<u64>,
     pub idle_ns: Option<u64>,
     pub file_ios: u64,
@@ -2079,6 +2095,9 @@ fn time_buckets(start_ts_ns: u64, end_ts_ns: u64) -> Vec<u64> {
 }
 
 fn request_time_buckets(io: &CompletedIo) -> Vec<u64> {
+    if io.completion_timestamp().is_none() {
+        return Vec::new();
+    }
     let start = io
         .insert
         .as_ref()
@@ -2348,8 +2367,7 @@ impl AnalysisEngine {
                 Some(completed)
             }
             StorageEvent::ObservedBlockCompletion(completed) => {
-                self.observe_ts(completed.start_timestamp());
-                self.observe_ts(completed.completion.ts_ns);
+                self.observe_request_time(&completed);
                 self.summary.issued_ios += u64::from(completed.issue_timestamp().is_some());
                 match completed.access_pattern {
                     AccessPattern::Sequential => self.summary.sequential_ios += 1,
@@ -2361,7 +2379,9 @@ impl AnalysisEngine {
                     IoSizeClass::Large => self.summary.large_ios += 1,
                 }
                 if self.completion_window.is_some_and(|(start, end)| {
-                    completed.completion.ts_ns < start || completed.completion.ts_ns > end
+                    completed
+                        .completion_timestamp()
+                        .is_none_or(|ts| ts < start || ts > end)
                 }) {
                     return Some(completed);
                 }
@@ -2551,24 +2571,27 @@ impl AnalysisEngine {
         if let Some(latency) = completed.total_latency_ns {
             self.latencies_ns.push(latency);
             self.live_latency_histogram.record(latency);
-            merge_interval(
-                &mut self.busy_intervals,
-                (completed.start_timestamp(), completed.completion.ts_ns),
-            );
+            if let Some(interval) = completed
+                .start_timestamp()
+                .zip(completed.completion_timestamp())
+            {
+                merge_interval(&mut self.busy_intervals, interval);
+            }
         } else {
             self.summary.unmeasured_latency_ios += 1;
         }
-        let bucket = self
-            .buckets
-            .entry(completed.completion.ts_ns / 1_000_000_000)
-            .or_default();
-        bucket.completed_ios += 1;
-        bucket.bytes += bytes;
-        if let Some(latency) = completed.total_latency_ns {
-            bucket.latency_sum_ns += latency as u128;
-            bucket.latency_samples += 1;
+        if let Some(timestamp) = completed.completion_timestamp() {
+            let bucket = self.buckets.entry(timestamp / 1_000_000_000).or_default();
+            bucket.completed_ios += 1;
+            bucket.bytes += bytes;
+            if let Some(latency) = completed.total_latency_ns {
+                bucket.latency_sum_ns += latency as u128;
+                bucket.latency_samples += 1;
+            }
+            bucket.max_queue_depth = bucket.max_queue_depth.max(completed.queue_depth_after);
+        } else {
+            self.summary.unplaced_time_ios += 1;
         }
-        bucket.max_queue_depth = bucket.max_queue_depth.max(completed.queue_depth_after);
         let category = self
             .categories
             .entry((
@@ -2590,6 +2613,21 @@ impl AnalysisEngine {
         self.last_ts_ns = Some(self.last_ts_ns.map_or(ts_ns, |value| value.max(ts_ns)));
     }
 
+    fn observe_request_time(&mut self, io: &CompletedIo) {
+        if let Some((start, end)) = io.start_timestamp().zip(io.completion_timestamp()) {
+            self.observe_ts(start);
+            self.observe_ts(end);
+        }
+    }
+
+    /// The span of events that can be placed on this session's clock. This is
+    /// useful for range controls, even when other preserved events lack a clock.
+    pub fn known_time_span_ns(&self) -> Option<u64> {
+        self.first_ts_ns
+            .zip(self.last_ts_ns)
+            .map(|(first, last)| last.saturating_sub(first))
+    }
+
     /// Stable timestamp across retention and filtered views.
     pub fn session_start_ns(&self) -> Option<u64> {
         self.first_ts_ns
@@ -2606,14 +2644,19 @@ impl AnalysisEngine {
         summary.p95_latency_ns = percentile(&values, 95);
         summary.p99_latency_ns = percentile(&values, 99);
         summary.logging_ns = self
-            .first_ts_ns
-            .zip(self.last_ts_ns)
-            .map_or(0, |(first, last)| last.saturating_sub(first));
+            .known_time_span_ns()
+            .filter(|_| summary.unplaced_time_ios == 0);
         summary.busy_ns = (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0)
-            .then(|| union_duration(&self.busy_intervals).min(summary.logging_ns));
+            .then(|| {
+                summary
+                    .logging_ns
+                    .map(|span| union_duration(&self.busy_intervals).min(span))
+            })
+            .flatten();
         summary.idle_ns = summary
             .busy_ns
-            .map(|busy| summary.logging_ns.saturating_sub(busy));
+            .zip(summary.logging_ns)
+            .map(|(busy, span)| span.saturating_sub(busy));
         summary.category_summaries = self
             .categories
             .iter()
@@ -2687,8 +2730,7 @@ impl AnalysisEngine {
     }
 
     fn observe_selected_request(&mut self, io: &CompletedIo) {
-        self.observe_ts(io.start_timestamp());
-        self.observe_ts(io.completion.ts_ns);
+        self.observe_request_time(io);
         self.record_completed(io);
         self.summary.issued_ios += u64::from(io.issue_timestamp().is_some());
         match io.access_pattern {
@@ -2712,20 +2754,23 @@ impl AnalysisEngine {
         summary.p95_latency_ns = histogram_percentile_upper(&self.live_latency_histogram, 95);
         summary.p99_latency_ns = histogram_percentile_upper(&self.live_latency_histogram, 99);
         summary.logging_ns = self
-            .first_ts_ns
-            .zip(self.last_ts_ns)
-            .map_or(0, |(first, last)| last.saturating_sub(first));
-        summary.busy_ns =
-            (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0).then(|| {
-                self.busy_intervals
-                    .iter()
-                    .map(|(start, end)| end.saturating_sub(*start))
-                    .sum::<u64>()
-                    .min(summary.logging_ns)
-            });
+            .known_time_span_ns()
+            .filter(|_| summary.unplaced_time_ios == 0);
+        summary.busy_ns = (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0)
+            .then(|| {
+                summary.logging_ns.map(|span| {
+                    self.busy_intervals
+                        .iter()
+                        .map(|(start, end)| end.saturating_sub(*start))
+                        .sum::<u64>()
+                        .min(span)
+                })
+            })
+            .flatten();
         summary.idle_ns = summary
             .busy_ns
-            .map(|busy| summary.logging_ns.saturating_sub(busy));
+            .zip(summary.logging_ns)
+            .map(|(busy, span)| span.saturating_sub(busy));
         summary.category_summaries = self
             .categories
             .iter()

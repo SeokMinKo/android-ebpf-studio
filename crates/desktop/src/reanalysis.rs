@@ -1,7 +1,7 @@
 #[derive(Default)]
 struct ReanalysisState {
     source_start_ns: Option<u64>,
-    source_end_ns: u64,
+    source_end_ns: Option<u64>,
     source_count: u64,
     window: Option<(u64, u64)>,
     elapsed_ms: f64,
@@ -116,11 +116,15 @@ impl StudioApp {
         }
         if !self.is_running() && self.reanalysis.source_start_ns.is_none() {
             let summary = self.analyzer.live_summary();
-            let origin = self.analyzer.session_start_ns().unwrap_or(0);
-            self.reanalysis.source_start_ns = Some(origin);
-            self.reanalysis.source_end_ns = origin.saturating_add(summary.logging_ns);
             self.reanalysis.source_count = summary.completed_ios;
-            self.reanalysis.draft = ["0".into(), (summary.logging_ns as f64 / 1e6).to_string()];
+            let Some(origin) = self.analyzer.session_start_ns() else {
+                ui.label("Time range unavailable: these I/O have no supported session clock. Counts, volume, address details and original data remain available.");
+                return;
+            };
+            self.reanalysis.source_start_ns = Some(origin);
+            let span = self.analyzer.known_time_span_ns().unwrap_or(0);
+            self.reanalysis.source_end_ns = Some(origin.saturating_add(span));
+            self.reanalysis.draft = ["0".into(), (span as f64 / 1e6).to_string()];
         }
         let Some(origin) = self.reanalysis.source_start_ns else {
             return;
@@ -143,7 +147,8 @@ impl StudioApp {
         egui::CollapsingHeader::new("Reanalyze time range · recover older detail from original session")
 .open((self.render_qa.output.is_some()&&std::env::var_os("ANDROID_EBPF_QA_REANALYSIS").is_some()).then_some(true))
             .show(ui,|ui| {
-                ui.label(format!("Source span: 0–{:.3} ms · maximum 100,000 I/O per detail window",self.reanalysis.source_end_ns.saturating_sub(origin)as f64/1e6));
+                ui.label(format!("Known-clock source span: 0–{} ms · maximum 100,000 I/O per detail window",self.reanalysis.source_end_ns.map_or("unavailable".into(), |end| format!("{:.3}",end.saturating_sub(origin)as f64/1e6))));
+                ui.small("Time-range reanalysis includes only I/O with a supported session clock. Other I/O remain in the original and full-session view.");
                 ui.horizontal_wrapped(|ui| {
                     for (i,label) in ["Start (ms)","End (ms)"].iter().enumerate() {
                         let response=ui.label(*label);

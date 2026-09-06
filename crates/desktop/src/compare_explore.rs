@@ -238,9 +238,13 @@ impl StudioApp {
     fn compare_qa_report(&self) -> serde_json::Value {
         let describe = |v: &StudioApp| {
             serde_json::json!({
-                "source":v.session_path,"origin_ns":v.time_origin(),"filter":v.query,
+                "source":v.session_path,"origin_ns":v.known_time_origin(),"filter":v.query,
                 "retained":v.analyzer.completed_ios().len(),"filtered":v.analysis().completed_ios().len(),
                 "selected":v.selection.summary.as_ref().map(|s|s.keys.len()),
+                "unplaced_time_count":v.selection.summary.as_ref().map(|s|s.unplaced_time_count),
+                "span_ns":v.selection.summary.as_ref().and_then(|s|s.duration_ns()),
+                "read_MiB_per_s":v.selection.summary.as_ref().and_then(|s|s.throughput(s.read.bytes)),
+                "write_MiB_per_s":v.selection.summary.as_ref().and_then(|s|s.throughput(s.write.bytes)),
                 "read_bytes":v.selection.summary.as_ref().map(|s|s.read.bytes),
                 "write_bytes":v.selection.summary.as_ref().map(|s|s.write.bytes),
                 "files":v.selection.summary.as_ref().map(|s|s.files.keys().collect::<Vec<_>>()),
@@ -268,7 +272,7 @@ impl StudioApp {
             page: Page::Explore,
             ..Default::default()
         };
-        view.reanalysis.source_start_ns = Some(self.time_origin());
+        view.reanalysis.source_start_ns = self.known_time_origin();
         view.reanalysis.source_end_ns = self.reanalysis.source_end_ns;
         view.reanalysis.source_count = self
             .reanalysis
@@ -658,7 +662,7 @@ fn compare_summary_ui(
     ui.collapsing("Source quality & comparison definitions", |ui| {
             for (label,v) in [("Baseline",&*baseline),("Current",&*current)] {
                 ui.strong(label); ui.label(format!("{} · {} rejected records",v.loss_status,v.rejected_records));
-                ui.label(format!("{} retained I/O / {} source completed I/O · origin {} ns · loaded window {:?}",v.analyzer.completed_ios().len(),v.reanalysis.source_count,v.time_origin(),v.reanalysis.window));
+                ui.label(format!("{} retained I/O / {} source completed I/O · origin {} · loaded window {:?}",v.analyzer.completed_ios().len(),v.reanalysis.source_count,v.known_time_origin().map_or("unavailable".into(),|t|format!("{t} ns")),v.reanalysis.window));
             }
             ui.label("Area selection includes all plottable requests under the applied filters, even if points are sampled. Unsupported axis values are excluded, never zero-filled. Access patterns retain original device/direction issue order. Candidate file bytes overlap and are not additive. Baseline is kept in memory; save sessions to reopen after app restart.");
         });
@@ -953,6 +957,7 @@ fn compare_pane(
 ) -> Option<SelectionRequest> {
     ui.push_id(("compare-pane", label), |ui| {
         ui.strong(label);
+        v.time_filter_scope_ui(ui);
         ui.add(
             egui::Label::new(
                 v.session_path
@@ -1063,6 +1068,9 @@ fn compare_pane(
 }
 
 fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary) {
+    if a.unplaced_time_count > 0 || b.unplaced_time_count > 0 {
+        ui.label(format!("Unsupported-clock I/O: Baseline {} · Current {}. Span/throughput are unavailable for an affected selection; count and volume remain complete.",a.unplaced_time_count,b.unplaced_time_count));
+    }
     egui::ScrollArea::horizontal()
         .id_salt("compare-metrics-scroll")
         .show(ui, |ui| {
@@ -1154,7 +1162,7 @@ fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary
                     });
             });
     });
-    ui.small("Latency: insert (or issue) to completion; exact nearest-rank percentiles. MiB/s uses each selection's earliest known insert/issue (completion if unavailable) to latest completion span. Unknown pre-completion time is excluded. Percentiles include valid timing samples only. Empty/zero-span values are unavailable (—). No event pairing or file identity equivalence is implied.");
+    ui.small("Latency: insert (or issue) to completion; exact nearest-rank percentiles. MiB/s uses each selection's earliest known insert/issue (completion if unavailable) to latest completion span. A selection containing unsupported-clock I/O has no span or throughput. Unknown pre-completion time is excluded. Percentiles include valid timing samples only. Empty/zero-span values are unavailable (—). No event pairing or file identity equivalence is implied.");
 }
 
 fn compare_export_payload(a: &StudioApp, b: &StudioApp) -> serde_json::Value {
@@ -1165,9 +1173,9 @@ fn compare_export_payload(a: &StudioApp, b: &StudioApp) -> serde_json::Value {
             .as_ref()
             .expect("selection required for export");
         let direction = |d: &DirectionSummary| serde_json::json!({"count":d.count,"bytes":d.bytes,"MiB_per_s":s.throughput(d.bytes),"chunk_counts":d.chunks,"valid_timing_samples":d.latency.len(),"unmeasured_timing_count":d.count-d.latency.len() as u64,"latency_ns": ([50,90,95,99,100].map(|p|serde_json::json!({"percentile":p,"value":d.percentile(p)})))});
-        serde_json::json!({"source":v.session_path,"origin_ns":v.time_origin(),"retained_source_window_ns":v.reanalysis.window,"filters":v.query,"axes":[v.x_axis.label(),v.y_axis.label()],"bounds":v.selection.current_bounds.map(|b|[b.min(),b.max()]),"count":s.keys.len(),"selected_request_keys":s.keys,"start_ns":s.start_ns,"end_ns":s.end_ns,"span_ns":s.duration_ns(),"read":direction(&s.read),"write":direction(&s.write),"other_count":s.other_count,"other_bytes":s.other_bytes,"access_counts_random_sequential_unknown":s.access,"multiple_candidate_requests":s.multiple_candidates,"files":s.files.iter().map(|((path,identity,confidence),r)|serde_json::json!({"path":path,"identity":identity,"confidence":confidence,"count":r.count,"read_bytes":r.read_bytes,"write_bytes":r.write_bytes,"processes":r.processes})).collect::<Vec<_>>(),"processes":s.processes.iter().map(|((pid,tid,name),r)|serde_json::json!({"pid":pid,"tid":tid,"name":name,"count":r.count,"read_bytes":r.read_bytes,"write_bytes":r.write_bytes,"files":r.files})).collect::<Vec<_>>(),"loss":v.loss_status,"rejected_records":v.rejected_records})
+        serde_json::json!({"source":v.session_path,"origin_ns":v.known_time_origin(),"retained_source_window_ns":v.reanalysis.window,"filters":v.query,"axes":[v.x_axis.label(),v.y_axis.label()],"bounds":v.selection.current_bounds.map(|b|[b.min(),b.max()]),"count":s.keys.len(),"selected_request_keys":s.keys,"start_ns":s.start_ns.filter(|_|s.unplaced_time_count==0),"end_ns":s.end_ns.filter(|_|s.unplaced_time_count==0),"unplaced_time_count":s.unplaced_time_count,"known_clock_subset_start_ns":s.start_ns,"known_clock_subset_end_ns":s.end_ns,"span_ns":s.duration_ns(),"read":direction(&s.read),"write":direction(&s.write),"other_count":s.other_count,"other_bytes":s.other_bytes,"access_counts_random_sequential_unknown":s.access,"multiple_candidate_requests":s.multiple_candidates,"files":s.files.iter().map(|((path,identity,confidence),r)|serde_json::json!({"path":path,"identity":identity,"confidence":confidence,"count":r.count,"read_bytes":r.read_bytes,"write_bytes":r.write_bytes,"processes":r.processes})).collect::<Vec<_>>(),"processes":s.processes.iter().map(|((pid,tid,name),r)|serde_json::json!({"pid":pid,"tid":tid,"name":name,"count":r.count,"read_bytes":r.read_bytes,"write_bytes":r.write_bytes,"files":r.files})).collect::<Vec<_>>(),"loss":v.loss_status,"rejected_records":v.rejected_records})
     };
-    serde_json::json!({"format":"android-ebpf-comparison","version":1,"scope":"independent exact selections from retained completed block I/O; graph sampling does not sample statistics","definitions":{"time":"completion relative to each source origin","latency":"insert or issue to completion; exact nearest-rank percentiles","throughput":"bytes divided by selected earliest known insert/issue (completion if unavailable) to latest completion span; MiB/s; unknown pre-completion time is excluded","missing":"null; no normal values inferred","files":"candidate bytes may overlap; identities are local to their source session","access":"original device/direction issue order"},"baseline":describe(a),"current":describe(b)})
+    serde_json::json!({"format":"android-ebpf-comparison","version":1,"scope":"independent exact selections from retained completed block I/O; graph sampling does not sample statistics","definitions":{"time":"completion relative to each source origin","latency":"insert or issue to completion; exact nearest-rank percentiles","throughput":"bytes divided by selected earliest known insert/issue (completion if unavailable) to latest completion span; MiB/s; unknown pre-completion time is excluded","missing":"null; no normal values inferred; selection time bounds, span and throughput unavailable if any selected I/O has an unsupported clock","files":"candidate bytes may overlap; identities are local to their source session","access":"original device/direction issue order"},"baseline":describe(a),"current":describe(b)})
 }
 
 fn write_compare_export(
@@ -1291,7 +1299,7 @@ fn compare_details(ui: &mut egui::Ui, a: &mut StudioApp, b: &mut StudioApp) {
                 let rows:Vec<_>=v.analysis().completed_ios().iter().filter(|io|s.keys.contains(&selection_key(io))).collect();
                 let page=target_page(ui,"compare-events",rows.len());
                 for io in rows.into_iter().skip(page*20).take(20) {
-                    ui.collapsing(format!("Request {} · {:.3} ms · {} · {} · PID {}/{}",io.issue.request_id,io.completion.ts_ns.saturating_sub(v.time_origin()) as f64/1e6,operation_label(io.issue.operation),format_bytes(io.issue.bytes as u64),identity_number(io.issuer_pid()),identity_number(io.issuer_tid())),|ui| {
+                    ui.collapsing(format!("Request {} · {} · {} · {} · PID {}/{}",io.issue.request_id,io.completion_timestamp().map_or("Time unavailable".into(),|t|format!("{:.3} ms",t.saturating_sub(v.time_origin()) as f64/1e6)),operation_label(io.issue.operation),format_bytes(io.issue.bytes as u64),identity_number(io.issuer_pid()),identity_number(io.issuer_tid())),|ui| {
                         ui.label(format!("{} · device {}:{} · sector {} · total {} · queue {} · issue-to-completion {}",io.issue.comm,io.issue.device_major,io.issue.device_minor,io.issue.sector,format_latency(io.total_latency_ns),format_latency(io.queue_latency_ns),format_latency(io.device_latency_ns)));
                         ui.label(file_origin_tooltip(&block_file_origins(&v.analysis().transaction_for(io))));
                     });
@@ -1488,64 +1496,108 @@ mod compare_explore_tests {
 
     #[test]
     fn compare_selection_preserves_unmeasured_perfetto_io_and_does_not_name_pid_zero() {
-        let mut a = fixture(0, "alpha", 11, 0, 4096);
-        let mut b = StudioApp::default();
-        let mut io = a.analyzer.completed_ios()[0].clone();
-        io.evidence = Some(Box::new(android_ebpf_protocol::CompletionEvidence {
-            source: "Perfetto".into(),
-            record_id: 1,
-            issue_record_candidates: vec![],
-            issue_timestamp_ns: None,
-            issuer_pid: None,
-            issuer_tid: None,
-            issuer_cpu: None,
-            completion_status: None,
-            process_name: None,
-            timing_confidence: android_ebpf_protocol::CorrelationConfidence::ContextOnly,
-            reason: "No unique issue".into(),
-            clock: 0,
-        }));
-        io.issue.pid = 0;
-        io.issue.tid = 0;
-        io.issue.comm = "<issuer unavailable>".into();
-        io.issue.ts_ns = io.completion.ts_ns;
-        io.total_latency_ns = None;
-        io.device_latency_ns = None;
-        io.latency_ns = None;
-        io.queue_depth_after = None;
-        io.access_pattern = android_ebpf_protocol::AccessPattern::Unknown;
-        b.analyzer.ingest(StorageEvent::ObservedBlockCompletion(io));
-        for app in [&mut a, &mut b] {
-            app.selection.summary = Some(compute_selection(
-                &app.analyzer,
-                all_plot_requests(),
-                AxisMetric::TimeMs,
-                AxisMetric::Sector,
-                app.time_origin(),
-            ));
+        for clock in [0, 99] {
+            let mut a = fixture(0, "alpha", 11, 0, 4096);
+            let mut b = StudioApp::default();
+            let mut io = a.analyzer.completed_ios()[0].clone();
+            io.evidence = Some(Box::new(android_ebpf_protocol::CompletionEvidence {
+                source: "Perfetto".into(),
+                record_id: 1,
+                issue_record_candidates: vec![],
+                issue_timestamp_ns: None,
+                issuer_pid: None,
+                issuer_tid: None,
+                issuer_cpu: None,
+                completion_status: None,
+                process_name: None,
+                timing_confidence: android_ebpf_protocol::CorrelationConfidence::ContextOnly,
+                reason: "No unique issue".into(),
+                clock,
+            }));
+            io.issue.pid = 0;
+            io.issue.tid = 0;
+            io.issue.comm = "<issuer unavailable>".into();
+            io.issue.ts_ns = io.completion.ts_ns;
+            io.total_latency_ns = None;
+            io.device_latency_ns = None;
+            io.latency_ns = None;
+            io.queue_depth_after = None;
+            io.access_pattern = android_ebpf_protocol::AccessPattern::Unknown;
+            assert_eq!(AxisMetric::TimeMs.value(&io, 0, None).is_none(), clock != 0);
+            assert!(AnalysisFilter::default().matches(&b.analyzer, &io, 0));
+            let time_filter = AnalysisFilter {
+                end_ms: 10.0,
+                ..Default::default()
+            };
+            assert_eq!(time_filter.matches(&b.analyzer, &io, 0), clock == 0);
+            b.analyzer.ingest(StorageEvent::ObservedBlockCompletion(io));
+            let trend = TrendData::build(&b.analyzer, 0);
+            assert_eq!(trend.coverage, [0, 0, 1]);
+            assert_eq!(trend.bins.is_empty(), clock != 0);
+            assert_eq!(trend.unplaced_time_count, u64::from(clock != 0));
+            for app in [&mut a, &mut b] {
+                app.x_axis = AxisMetric::Sector;
+                app.y_axis = AxisMetric::ChunkKiB;
+                app.selection.summary = Some(compute_selection(
+                    &app.analyzer,
+                    all_plot_requests(),
+                    AxisMetric::Sector,
+                    AxisMetric::ChunkKiB,
+                    app.time_origin(),
+                ));
+            }
+            let result = compare_export_payload(&a, &b);
+            assert_eq!(result["current"]["count"], 1);
+            assert_eq!(result["current"]["read"]["bytes"], 4096);
+            assert_eq!(result["current"]["origin_ns"].is_null(), clock != 0);
+            assert_eq!(result["current"]["start_ns"].is_null(), clock != 0);
+            assert_eq!(result["current"]["end_ns"].is_null(), clock != 0);
+            assert_eq!(result["current"]["span_ns"].is_null(), clock != 0);
+            assert_eq!(
+                result["current"]["unplaced_time_count"],
+                u64::from(clock != 0)
+            );
+            assert_eq!(result["current"]["read"]["valid_timing_samples"], 0);
+            assert_eq!(result["current"]["read"]["unmeasured_timing_count"], 1);
+            assert!(result["current"]["processes"][0]["pid"].is_null());
+            assert!(result["current"]["processes"][0]["tid"].is_null());
+            assert!(result["current"]["read"]["latency_ns"][0]["value"].is_null());
+            assert!(issuer_label(None, None, "unknown").contains("PID unavailable"));
+            assert!(issuer_label(Some(0), Some(0), "idle").contains("PID 0"));
+            assert_eq!(
+                b.selection
+                    .summary
+                    .as_ref()
+                    .unwrap()
+                    .files
+                    .values()
+                    .next()
+                    .unwrap()
+                    .count,
+                1
+            );
+            if clock != 0 {
+                // Combining known and unknown clocks must not divide all bytes by
+                // only the known subset's span.
+                b.analyzer.ingest(StorageEvent::ObservedBlockCompletion(
+                    a.analyzer.completed_ios()[1].clone(),
+                ));
+                b.selection.summary = Some(compute_selection(
+                    &b.analyzer,
+                    all_plot_requests(),
+                    AxisMetric::Sector,
+                    AxisMetric::ChunkKiB,
+                    b.time_origin(),
+                ));
+                let mixed = compare_export_payload(&a, &b);
+                assert_eq!(mixed["current"]["count"], 2);
+                assert_eq!(mixed["current"]["write"]["bytes"], 4096);
+                assert!(mixed["current"]["span_ns"].is_null());
+                assert!(mixed["current"]["read"]["MiB_per_s"].is_null());
+                assert!(mixed["current"]["write"]["MiB_per_s"].is_null());
+                assert!(mixed["current"]["known_clock_subset_start_ns"].is_number());
+            }
         }
-        let result = compare_export_payload(&a, &b);
-        assert_eq!(result["current"]["count"], 1);
-        assert_eq!(result["current"]["read"]["bytes"], 4096);
-        assert_eq!(result["current"]["read"]["valid_timing_samples"], 0);
-        assert_eq!(result["current"]["read"]["unmeasured_timing_count"], 1);
-        assert!(result["current"]["processes"][0]["pid"].is_null());
-        assert!(result["current"]["processes"][0]["tid"].is_null());
-        assert!(result["current"]["read"]["latency_ns"][0]["value"].is_null());
-        assert!(issuer_label(None, None, "unknown").contains("PID unavailable"));
-        assert!(issuer_label(Some(0), Some(0), "idle").contains("PID 0"));
-        assert_eq!(
-            b.selection
-                .summary
-                .as_ref()
-                .unwrap()
-                .files
-                .values()
-                .next()
-                .unwrap()
-                .count,
-            1
-        );
     }
 
     #[test]

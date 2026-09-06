@@ -178,7 +178,7 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
     drop(full);
     let view =
         load_analysis_window(&fixture.0, Some((1_010_000_100, 1_020_000_100)), None).unwrap();
-    assert_eq!(view.source_start_ns, 1_000_000_000);
+    assert_eq!(view.source_start_ns, Some(1_000_000_000));
     assert_eq!(view.engine.completed_ios().len(), 2);
     let io = &view.engine.completed_ios()[0];
     assert_eq!(io.issue.request_id, 1);
@@ -242,7 +242,7 @@ fn view_export_contains_only_selected_io_and_preserves_path_provenance() {
     let loaded =
         load_analysis_window(&fixture.0, Some((1_010_000_100, 1_020_000_100)), None).unwrap();
     let summary = loaded.engine.summary();
-    assert_eq!(summary.logging_ns, 10_000_100);
+    assert_eq!(summary.logging_ns, Some(10_000_100));
     let output = fixture.0.with_extension("view.ndjson");
     android_ebpf_studio::session::export_analysis_view(
         &output,
