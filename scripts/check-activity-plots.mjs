@@ -65,6 +65,7 @@ if (click) {
   checks.frame_budget = frame.samples >= 20 && frame.p95_ms <= 16.7;
   if (gesture === "activity-zoom") {
     checks.finer_display = a.width < a.initial_width / 10 && a.mean_spacing < a.initial_spacing;
+    checks.visible_marks = a.visible_points.some(n => n > 0);
     checks.response_budget = Number.isFinite(a.elapsed_ms) && a.elapsed_ms < 5000;
   }
 }

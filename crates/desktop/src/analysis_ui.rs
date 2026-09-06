@@ -548,6 +548,17 @@ impl StudioApp {
                         let samples = activity_points[offset + index]
                             .visible([bounds.min()[0], bounds.max()[0]], columns);
                         rendered[index] = samples.len();
+                        if qa_active {
+                            self.render_qa.activity.visible_points[index] = samples
+                                .iter()
+                                .filter(|p| {
+                                    p.x >= bounds.min()[0]
+                                        && p.x <= bounds.max()[0]
+                                        && p.y >= bounds.min()[1]
+                                        && p.y <= bounds.max()[1]
+                                })
+                                .count();
+                        }
                         if qa_active && index == 0 {
                             let qa = &mut self.render_qa.activity;
                             let rect = plot.response().rect;

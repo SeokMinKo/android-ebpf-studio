@@ -12,6 +12,7 @@ struct ActivityQa {
     origin_ns: u64,
     full_bins: usize,
     rendered_points: [usize; 2],
+    visible_points: [usize; 2],
     width: f64,
     initial_width: Option<f64>,
     mean_spacing: f64,
@@ -74,7 +75,14 @@ impl StudioApp {
         }
         if gesture == "activity-zoom" {
             if qa.input_step == 1 {
+                // Exercise the plot's horizontal-only zoom modifier so the
+                // constant-valued stress series remains inside the Y viewport.
+                raw.events
+                    .push(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
                 raw.events.push(egui::Event::Zoom(100.0));
+            } else if qa.input_step == 2 {
+                raw.events
+                    .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
             }
         } else if qa.input_step == 1 || qa.input_step == 3 {
             raw.events.push(egui::Event::PointerButton {
