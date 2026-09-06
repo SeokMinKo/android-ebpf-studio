@@ -13,12 +13,14 @@ const REMOTE_AGENT: &str = "/data/local/tmp/android-ebpf-studio/agent";
 const REMOTE_BPF: &str = "/data/local/tmp/android-ebpf-studio/storage-ebpf.o";
 
 fn adb_process(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    let mut command = Command::new(program);
+    let command = Command::new(program);
     #[cfg(windows)]
-    {
+    let command = {
+        let mut command = command;
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW: no flashing ADB consoles.
-    }
+        command
+    };
     command
 }
 
