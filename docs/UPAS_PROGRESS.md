@@ -1,5 +1,7 @@
 # Active goal checkpoint — not overall completion
 
+Latest linked Summary continuation (2026-09-07): [UPAS_CATEGORY_CHECKPOINT.md](UPAS_CATEGORY_CHECKPOINT.md). Exact Chunk-byte categories and joint Command/access/size counts/payload are connected to the existing Summary. Native8247-I/O categories, Read/Write/point/empty/scroll, full CSV and actual four-function uPAS AST comparison passed. Full Goal remains active; next hardware queue and remaining feature/full-matrix/performance/install work.
+
 Latest native collector continuation (2026-09-07): [UPAS_NATIVE_SCHEDULER_CHECKPOINT.md](UPAS_NATIVE_SCHEDULER_CHECKPOINT.md). Optional root I/O wait probe, runtime schedstats guard/restoration and acquisition metadata are implemented/build validated. 191 host tests passed; BPF/Android Release builds and native linked Summary fixture passed. No connected phone for physical acceptance. Full Goal remains active.
 
 Latest continuation (2026-09-07): see [UPAS_SCHEDULER_CHECKPOINT.md](UPAS_SCHEDULER_CHECKPOINT.md). Added schema8 scheduler I/O wait Perfetto decoding/projection/storage and Explore Trend with linked right Summary, cohort table/CSV, filtering, retention and original-window recovery. Native fixture/missing/large/filter tests and actual uPAS AST comparison passed. Root eBPF scheduler emission and physical acceptance remain pending. Previous CPU/Timeline checkpoints are retained. Goal remains active: remaining acquisition/features, full43 matrix/performance and Release installation/installed launch.

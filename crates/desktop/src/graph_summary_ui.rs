@@ -207,6 +207,8 @@ fn category_distribution_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
         ui.small(format!("Denominator: {total} {} across {} categories",if payload {"payload bytes"}else{"memberships"},values.len()));
         if dimension.contains("membership") {ui.colored_label(amber(),"One request can belong to multiple file candidates or layers. Shares use memberships, not unique global I/O; candidate payload is not exclusive attribution.");}
         else {ui.small("Each graph request belongs to one category. Payload excludes Discard/Flush/Other extents.");}
+        if dimension=="Chunk size" {ui.small("Exact request bytes, without size-class grouping or KiB rounding. Use the shared Read/Write filter for direction-specific shares.");}
+        if dimension=="Command / access / size" {let threshold=android_ebpf_protocol::LARGE_IO_BYTES/1024;ui.small(format!("Joint command, observed access pattern and size class. Small < {threshold} KiB; Large ≥ {threshold} KiB. Unknown access remains separate."));}
         if total==0 {ui.label("No values for this weighting.");return;}
         let mut pie:Vec<_>=values.iter().take(4).map(|(k,v)|((*k).clone(),*v)).collect();
         if values.len()>4 {pie.push((format!("Remaining {} categories",values.len()-4),values.iter().skip(4).map(|v|v.1).sum()));}
@@ -265,7 +267,7 @@ fn distribution_ui(ui:&mut egui::Ui,d:&crate::graph_summary::Distribution,unit:&
     let open=std::env::var("ANDROID_EBPF_QA_SUMMARY_CDF").is_ok();
     egui::CollapsingHeader::new("Cumulative distribution / sorted rank").default_open(open).show(ui,|ui| {
         let id=ui.id().with("cumulative-view");
-        let mut rank=ui.data_mut(|d|d.get_temp::<bool>(id).unwrap_or(false));
+        let mut rank=ui.data_mut(|d|d.get_temp::<bool>(id).unwrap_or_else(||std::env::var("ANDROID_EBPF_QA_SUMMARY_RANK").is_ok()));
         ui.horizontal(|ui| {ui.selectable_value(&mut rank,false,"CDF");ui.selectable_value(&mut rank,true,"Sorted rank");});
         ui.data_mut(|d|d.insert_temp(id,rank));
         let points=if rank {d.rank_points(512)}else{d.cdf_points(512)};

@@ -20,4 +20,4 @@ Next: read those parser regexes and corresponding collector tracepoint/BTF field
 
 ## Other remaining matrix items
 
-Reconcile existing implemented Summary category/rank functions with pending command-count/data-size, sequentiality ratio and latency sorting entries; exact chunk-size category pie may require a separate category from the current coarse Size class. Overall composite, custom categorical axes and raw-log navigation need actual source/UI audits. Then execute one full43-feature real/synthetic/empty/single/missing/large matrix and baseline/new load/filter/render/memory measurements before Release backup/install and installed launch.
+The category/rank reconciliation and exact Chunk-size/joint-command categories are now documented and verified in [UPAS_CATEGORY_CHECKPOINT.md](UPAS_CATEGORY_CHECKPOINT.md). Overall composite, custom categorical axes and raw-log navigation still need actual source/UI audits. Then execute one full43-feature real/synthetic/empty/single/missing/large matrix and baseline/new load/filter/render/memory measurements before Release backup/install and installed launch.

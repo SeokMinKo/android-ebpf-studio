@@ -267,12 +267,12 @@
       "cmd_category",
       "filename"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified retained graph-cohort slice; full43 matrix/performance/final installation pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "command category counts and transferred chunk_length sums",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Joint command/access-pattern/size-class leaf counts and R/W-only transferred payload. Flat labelled joint categories plus separate Command/Access/Size dimensions replace the uPAS sunburst; no hierarchy double counting. Existing Studio Small/Large threshold32KiB; uPAS default Trace_SR_Decider40KiB is a documented classification difference.",
+    "target_ui": "Existing linked Summary > Cohort categories > Command / access / size; I/O count and payload weighting, complete table/CSV.",
+    "capture_changes": "No new acquisition for these aggregates; exact retained CompletedIo cohort before display downsampling. Missing values and detail population limits preserved.",
+    "verification": "UPAS_CATEGORY_CHECKPOINT.md; actual uPAS plotting AST executed on equivalent8247-row input; independent raw-record and CSV category oracles; native Read7415/Write648/point1/empty0/scroll and latency-rank renders. Desktop92 passed/2ignored; compatible lint passed.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -284,12 +284,12 @@
     "fields": [
       "filename"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified retained graph-cohort slice; full43 matrix/performance/final installation pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "sequential/random count ratios",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Counts and R/W payload shares by observed Random/Sequential/Unknown. Studio adjacency is prior issue end==current start per device and operation; first event Unknown, classification retained before filters. uPAS parser uses its shared previous end and defaults first nonadjacency to Ran; equivalent grouped-input counts verified without claiming classifier identity.",
+    "target_ui": "Existing linked Summary > Cohort categories > Access pattern; shared Read/Write/process/file filters and selected graph cohort.",
+    "capture_changes": "No new acquisition for these aggregates; exact retained CompletedIo cohort before display downsampling. Missing values and detail population limits preserved.",
+    "verification": "UPAS_CATEGORY_CHECKPOINT.md; actual uPAS plotting AST executed on equivalent8247-row input; independent raw-record and CSV category oracles; native Read7415/Write648/point1/empty0/scroll and latency-rank renders. Desktop92 passed/2ignored; compatible lint passed.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -373,12 +373,12 @@
       "cmd_category",
       "filename"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified retained graph-cohort slice; full43 matrix/performance/final installation pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "request count/byte share by chunk_length",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Exact request-byte category count and R/W-only payload share. No rounding or coarse size-class coalescing; zero-byte commands remain counted. uPAS function actually draws count shares only.",
+    "target_ui": "Existing linked Summary > Cohort categories > Chunk size. Count/payload weighting, Top4+remaining pie, all-category pageable table and full CSV. Shared Read/Write filters select direction.",
+    "capture_changes": "No new acquisition for these aggregates; exact retained CompletedIo cohort before display downsampling. Missing values and detail population limits preserved.",
+    "verification": "UPAS_CATEGORY_CHECKPOINT.md; actual uPAS plotting AST executed on equivalent8247-row input; independent raw-record and CSV category oracles; native Read7415/Write648/point1/empty0/scroll and latency-rank renders. Desktop92 passed/2ignored; compatible lint passed.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -416,12 +416,12 @@
       "filename",
       "latency"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified retained graph-cohort slice; full43 matrix/performance/final installation pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "D2C values sorted ascending",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Measured D2C values sorted ascending. Studio1-based rank and exact tie-inclusive empirical CDF. uPAS zero-based index/length*100 never reaches100; retained raw values match after unit normalization. Missing duration excluded with missing count.",
+    "target_ui": "Device latency Trend > existing linked Summary > Cumulative distribution / sorted rank; all values/ranks/tie counts in Summary CSV.",
+    "capture_changes": "No new acquisition for these aggregates; exact retained CompletedIo cohort before display downsampling. Missing values and detail population limits preserved.",
+    "verification": "UPAS_CATEGORY_CHECKPOINT.md; actual uPAS plotting AST executed on equivalent8247-row input; independent raw-record and CSV category oracles; native Read7415/Write648/point1/empty0/scroll and latency-rank renders. Desktop92 passed/2ignored; compatible lint passed.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

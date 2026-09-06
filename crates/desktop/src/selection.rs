@@ -249,6 +249,8 @@ impl SelectionSummary {
             ("Command",format!("{:?}",io.issue.operation)),
             ("Access pattern",format!("{:?}",io.access_pattern)),
             ("Size class",format!("{:?}",io.size_class)),
+            ("Chunk size",format!("{} B",io.issue.bytes)),
+            ("Command / access / size",format!("{:?} / {:?} / {:?}",io.issue.operation,io.access_pattern,io.size_class)),
             ("Device",format!("{}:{}",io.issue.device_major,io.issue.device_minor)),
             ("Issue CPU",identity_number(io.issuer_cpu())),
             ("Completion CPU",identity_number(io.completion.cpu)),
@@ -648,6 +650,28 @@ mod selection_tests {
             }));
         }
         engine
+    }
+
+    #[test]
+    fn exact_chunk_categories_preserve_bytes_zero_non_payload_and_unique_cohort() {
+        let engine=fixture(1);
+        let mut io=engine.completed_ios()[0].clone();
+        let mut summary=SelectionSummary::default();
+        for (index,(bytes,op)) in [(1000,IoOperation::Read),(1001,IoOperation::Read),(1000,IoOperation::Write),(0,IoOperation::Flush),(1_073_741_824,IoOperation::Discard)].into_iter().enumerate() {
+            io.issue.bytes=bytes;io.issue.operation=op;io.issue.request_id=index as u64;
+            summary.observe(&io,[index as f64,bytes as f64/1024.]);
+        }
+        let sizes=&summary.categories["Chunk size"];
+        assert_eq!(sizes.len(),4);
+        assert_eq!(sizes["1000 B"],(2,2000));assert_eq!(sizes["1001 B"],(1,1001));
+        assert_eq!(sizes["0 B"],(1,0));assert_eq!(sizes["1073741824 B"],(1,0));
+        assert_eq!(sizes.values().map(|v|v.0).sum::<u64>(),5);
+        assert_eq!(sizes.values().map(|v|v.1).sum::<u64>(),3001);
+        let path=std::env::temp_dir().join(format!("chunk-categories-{}.csv",uuid::Uuid::new_v4()));
+        write_graph_summary_csv(&path,&summary).unwrap();
+        let records=csv::Reader::from_path(&path).unwrap().records().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(records.iter().any(|r|&r[0]=="category"&&&r[1]=="Chunk size"&&&r[2]=="1001 B"&&r[5]==*"1001"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
