@@ -14,6 +14,7 @@ pub enum WindowMetric {
     IdleMs,
     BusyRunMs,
     IdleGapMs,
+    BurstPayload,
 }
 impl WindowMetric {
     pub fn label(self) -> &'static str {
@@ -26,6 +27,7 @@ impl WindowMetric {
             Self::IdleMs => "Window idle time (ms)",
             Self::BusyRunMs => "Continuous busy duration (ms)",
             Self::IdleGapMs => "Continuous idle duration (ms)",
+            Self::BurstPayload => "Payload per burst (MiB)",
         }
     }
     pub fn device_activity(self) -> bool {
@@ -35,10 +37,12 @@ impl WindowMetric {
         )
     }
     pub fn intervals(self) -> bool {
-        matches!(self, Self::BusyRunMs | Self::IdleGapMs)
+        matches!(self, Self::BusyRunMs | Self::IdleGapMs | Self::BurstPayload)
     }
     pub fn population(self) -> &'static str {
-        if self.intervals() {
+        if self == Self::BurstPayload {
+            "activity bursts"
+        } else if self.intervals() {
             "continuous intervals"
         } else {
             "time windows"
@@ -53,6 +57,9 @@ pub struct WindowSample {
     pub requests: [u64; 3],
     pub payload: [u64; 3],
     pub values: [Option<f64>; 3],
+    /// Completion timestamp and cumulative Total/Read/Write payload within a burst.
+    /// Empty for fixed windows and duration intervals.
+    pub cumulative: Vec<(u64, [u64; 3])>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WindowSeries {
@@ -108,6 +115,7 @@ pub fn build(
                     requests: [0; 3],
                     payload: [0; 3],
                     values: [None; 3],
+                    cumulative: vec![],
                 }
             })
             .collect(),
@@ -202,9 +210,19 @@ fn build_intervals(
         }
     }
     let mut cursor = range.0;
-    let mut spans = vec![];
+    let mut spans: Vec<(u64, u64)> = vec![];
     for (a, b) in combined.clipped(range.0, range.1) {
-        if metric == WindowMetric::BusyRunMs {
+        if metric == WindowMetric::BurstPayload {
+            // Exactly0.5ms remains in the same burst; only a greater gap resets.
+            if let Some(previous) = spans
+                .last_mut()
+                .filter(|s| a.saturating_sub(s.1) <= 500_000)
+            {
+                previous.1 = b;
+            } else {
+                spans.push((a, b));
+            }
+        } else if metric == WindowMetric::BusyRunMs {
             spans.push((a, b));
         } else if cursor < a {
             spans.push((cursor, a));
@@ -222,9 +240,14 @@ fn build_intervals(
             requests: [0; 3],
             payload: [0; 3],
             values: [Some((b - a) as f64 / 1e6), None, None],
+            cumulative: vec![],
         })
         .collect();
-    for io in ios {
+    let mut ordered: Vec<_> = ios.iter().collect();
+    if metric == WindowMetric::BurstPayload {
+        ordered.sort_by_key(|io| (io.completion.ts_ns, io.issue.request_id));
+    }
+    for io in ordered {
         if let Some(index) = result.index_at(io.completion.ts_ns) {
             let sample = &mut result.samples[index];
             sample.requests[0] += 1;
@@ -238,6 +261,16 @@ fn build_intervals(
                 sample.payload[direction] += io.issue.bytes as u64;
                 sample.payload[0] += io.issue.bytes as u64;
             }
+            if metric == WindowMetric::BurstPayload {
+                sample
+                    .cumulative
+                    .push((io.completion.ts_ns, sample.payload));
+            }
+        }
+    }
+    if metric == WindowMetric::BurstPayload {
+        for sample in &mut result.samples {
+            sample.values = sample.payload.map(|bytes| Some(bytes as f64 / 1_048_576.));
         }
     }
     result
@@ -247,6 +280,99 @@ fn build_intervals(
 mod tests {
     use super::*;
     use android_ebpf_protocol::{AnalysisEngine, BlockComplete, BlockIssue, StorageEvent};
+    #[test]
+    fn burst_payload_includes_first_request_and_exact_threshold_stays_joined_before_filters() {
+        let mut engine = AnalysisEngine::new();
+        let mut activity = ActivityTimeline::default();
+        activity.verified_complete = true;
+        for (id, a, b, pid, bytes, op) in [
+            (1, 0, 1_000_000, 1, 1_048_576, IoOperation::Read),
+            (2, 1_500_000, 2_000_000, 2, 2_097_152, IoOperation::Write),
+            (3, 2_500_001, 3_000_000, 1, 4_194_304, IoOperation::Read),
+            (
+                4,
+                3_100_000,
+                3_200_000,
+                1,
+                1_073_741_824,
+                IoOperation::Discard,
+            ),
+        ] {
+            engine.ingest(StorageEvent::BlockIssue(BlockIssue {
+                ts_ns: a,
+                request_id: id,
+                device_major: 8,
+                device_minor: 0,
+                sector: id * 8,
+                sectors: bytes / 512,
+                bytes,
+                operation: op,
+                pid,
+                tid: pid,
+                cpu: 0,
+                comm: "fixture".into(),
+            }));
+            if let Some(io) = engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+                ts_ns: b,
+                request_id: id,
+                device_major: 8,
+                device_minor: 0,
+                status: 0,
+            })) {
+                activity.observe(&io);
+            }
+        }
+        let range = (0, 4_000_000);
+        let mut unordered = engine.completed_ios().to_vec();
+        unordered.reverse();
+        let series = build(
+            &unordered,
+            &activity,
+            &[(8, 0)],
+            range,
+            100,
+            WindowMetric::BurstPayload,
+        );
+        assert_eq!(series.samples.len(), 2);
+        let first = &series.samples[0];
+        let last = &series.samples[1];
+        assert_eq!((first.start_ns, first.end_ns), (0, 2_000_000));
+        assert_eq!(first.values, [Some(3.), Some(1.), Some(2.)]);
+        assert_eq!(
+            first.cumulative,
+            [
+                (1_000_000, [1_048_576, 1_048_576, 0]),
+                (2_000_000, [3_145_728, 1_048_576, 2_097_152])
+            ]
+        );
+        assert_eq!(last.values, [Some(4.), Some(4.), Some(0.)]);
+        assert_eq!(last.requests, [2, 1, 0]);
+        assert_eq!((last.start_ns, last.end_ns), (2_500_001, 3_200_000));
+        let filtered = engine.select_completed(|io| io.issue.pid == 2);
+        let filtered = build(
+            filtered.completed_ios(),
+            &activity,
+            &[(8, 0)],
+            range,
+            100,
+            WindowMetric::BurstPayload,
+        );
+        assert_eq!(filtered.samples.len(), 2);
+        assert_eq!(filtered.samples[0].values, [Some(2.), Some(0.), Some(2.)]);
+        assert_eq!(filtered.samples[1].values, [Some(0.); 3]);
+        assert_eq!(filtered.samples[1].start_ns, last.start_ns);
+        activity.verified_complete = false;
+        let unknown = build(
+            &unordered,
+            &activity,
+            &[(8, 0)],
+            range,
+            100,
+            WindowMetric::BurstPayload,
+        );
+        assert!(unknown.samples.is_empty());
+        assert!(!unknown.activity_known);
+    }
     #[test]
     fn continuous_intervals_merge_devices_clip_edges_and_never_invent_unknown_idle() {
         let mut activity = ActivityTimeline::default();

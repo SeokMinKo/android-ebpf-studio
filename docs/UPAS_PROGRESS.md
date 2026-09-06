@@ -1,6 +1,6 @@
 # Active goal checkpoint — not overall completion
 
-Latest continuation (2026-09-07): see [UPAS_INTERVAL_CHECKPOINT.md](UPAS_INTERVAL_CHECKPOINT.md). Continuous Busy/Idle trends and linked distributions are verified against original events and actual uPAS parsing/calculation. Rolling BW work was committed as92ef1dc; see [UPAS_ROLLING_CHECKPOINT.md](UPAS_ROLLING_CHECKPOINT.md). Goal remains active; full remaining scope and installation are pending.
+Latest continuation (2026-09-07): see [UPAS_BURST_CHECKPOINT.md](UPAS_BURST_CHECKPOINT.md). Idle-separated cumulative burst curves and linked final-total distributions are independently verified. Prior continuous activity commit90cc3c0 and rolling commit92ef1dc are retained. Goal remains active; Timeline/connected Footprint, acquisition audit, full matrix/performance and Release installation remain pending.
 
 Read the full objective at `C:/Users/AEBIZTRIP5.pub/.codex/attachments/700d9658-a88e-4c81-bb21-c455bd9eb2b2/goal-objective.md`. User subsequently clarified that Summary means the **existing Explore right-hand Summary inspector linked to the main graph**, not Overview or a separate histogram/pie catalogue. This supersedes the initial topology interpretation. Continue all remaining objective work autonomously. Goal remains active.
 

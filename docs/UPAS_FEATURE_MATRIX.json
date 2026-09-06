@@ -305,12 +305,12 @@
       "idle",
       "send_time"
     ],
-    "status": "partial: cumulative timeline implemented; idle-separated bursts pending",
+    "status": "implemented and independently verified cumulative-window and idle-separated burst slice; full sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "Read/Write completion payload cumulative from analysis start; empty windows carry forward and selection preserves drawn cumulative values. uPAS idle-separated0.5ms resets remain pending.",
-    "target_ui": "Explore Cumulative transferred data + linked Summary",
-    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
-    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
+    "formula": "Cumulative R/W completion payload resets after selected-device-wide Idle >0.5ms; exact0.5ms remains joined. First request after reset included. Shared device burst boundaries precede process/operation filters. Main curves show within-burst accumulation; linked distribution has one final payload total per burst, including zero filtered payload. Unknown activity cannot fabricate boundaries.",
+    "target_ui": "Explore Cumulative data within bursts (preset22) + linked burst payload histogram/percentiles/CDF and full curve/interval CSV; whole-range cumulative window trend retained",
+    "capture_changes": "Uses retained completed payload plus full-source ActivityTimeline and eligibility provenance. No new probe needed for eligible Perfetto.",
+    "verification": "Deterministic exact/above-threshold, first request, discard exclusion, unordered input, process filter, unknown coverage, selection and cumulative CSV. Native actual8247-I/O trace323 bursts; independent original-event oracle matches every cumulative point and final total, Read filter and point/area selection. Actual uPAS AST shows first-after-reset payload incorrectly zeroed. See UPAS_BURST_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

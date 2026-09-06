@@ -118,10 +118,11 @@ enum ExplorerPreset {
     RollingD2dBandwidth,
     BusyIntervals,
     IdleIntervals,
+    BurstPayload,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 22] = [
+    const ALL: [Self; 23] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -144,6 +145,7 @@ impl ExplorerPreset {
         Self::RollingD2dBandwidth,
         Self::BusyIntervals,
         Self::IdleIntervals,
+        Self::BurstPayload,
     ];
 
     fn label(self) -> &'static str {
@@ -170,6 +172,7 @@ impl ExplorerPreset {
             Self::RollingD2dBandwidth => "Rolling D2D bandwidth",
             Self::BusyIntervals => "Continuous busy intervals",
             Self::IdleIntervals => "Continuous idle intervals",
+            Self::BurstPayload => "Cumulative data within bursts",
         }
     }
 
@@ -232,6 +235,11 @@ impl ExplorerPreset {
             Self::RollingD2dBandwidth => Some((
                 AxisMetric::TimeMs,
                 AxisMetric::RollingD2dBandwidth,
+                GroupBy::Direction,
+            )),
+            Self::BurstPayload => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::BurstPayload),
                 GroupBy::Direction,
             )),
             Self::BusyIntervals => Some((
