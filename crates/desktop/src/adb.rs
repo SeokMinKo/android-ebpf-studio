@@ -282,6 +282,14 @@ impl Default for AdbClient {
 }
 
 impl AdbClient {
+    pub(crate) fn unprivileged_output(
+        &self,
+        serial: &str,
+        args: &[&str],
+    ) -> Result<Output, AdbError> {
+        let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
+        Ok(builder.root_shell(RootMethod::Shell, args).execute()?)
+    }
     pub(crate) fn unprivileged_text(
         &self,
         serial: &str,

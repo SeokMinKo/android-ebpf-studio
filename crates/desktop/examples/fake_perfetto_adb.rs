@@ -40,11 +40,36 @@ fn main() -> anyhow::Result<()> {
             }
         );
     } else if cmd.contains("/stat") {
+        if cfg["fail_first_stat"] == true && !home.join("stat-failed").exists() {
+            std::fs::write(home.join("stat-failed"), b"failed")?;
+            anyhow::bail!("fixture transient process lifetime read failure");
+        }
+        let count_path = home.join("stat-count");
+        let count = std::fs::read_to_string(&count_path)
+            .ok()
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0);
+        std::fs::write(count_path, (count + 1).to_string())?;
         let mut fields = vec!["0".to_owned(); 20];
-        fields[0] = "S".into();
+        fields[0] = if cfg["vary_state"] == true && count % 2 == 1 {
+            "R"
+        } else {
+            "S"
+        }
+        .into();
         fields[19] = cfg["ticks"].as_u64().unwrap().to_string();
         println!("42 (perfetto) {}", fields.join(" "));
     } else if cmd.contains("/cmdline") {
+        if cfg["fail_first_cmdline"] == true && !home.join("cmdline-failed").exists() {
+            std::fs::write(home.join("cmdline-failed"), b"failed")?;
+            anyhow::bail!("fixture transient process identity read failure");
+        }
+        if cfg["foreign_command"] == true {
+            print!(
+                "perfetto\0/data/misc/perfetto-configs/foreign.pbtxt\0/data/misc/perfetto-traces/foreign.pftrace\0"
+            );
+            return Ok(());
+        }
         print!(
             "perfetto\0{}\0{}\0",
             cfg["remote_config"].as_str().unwrap(),
@@ -67,7 +92,26 @@ fn capture_command(
     if args.get(2).is_some_and(|s| s == "push") {
         return Ok(true);
     }
-    if cmd.contains("'id' '-u'") {
+    if cmd.contains("'pidof' 'perfetto'") {
+        anyhow::ensure!(
+            cfg["fail_enumerate"] != true,
+            "fixture disconnected during process enumeration"
+        );
+        if cfg["remote_trace"].as_str().is_some() && !home.join("stopped").exists() {
+            println!(
+                "{}",
+                if cfg["ambiguous"] == true {
+                    "42 43"
+                } else {
+                    "42"
+                }
+            );
+        }
+    } else if cmd.contains("'test' '-f'") && cmd.contains("/data/misc/perfetto-traces/") {
+        if cfg["remote_trace"].as_str().is_none() {
+            std::process::exit(1);
+        }
+    } else if cmd.contains("'id' '-u'") {
         println!("0");
     } else if cmd.contains("--query") {
         anyhow::ensure!(cfg["perfetto"] == true, "Perfetto service unavailable");
@@ -182,7 +226,14 @@ fn capture_command(
         updated["remote_config"] = (*config).into();
         updated["remote_trace"] = (*trace).into();
         std::fs::write(home.join("fixture.json"), serde_json::to_vec(&updated)?)?;
-        println!("42");
+        if cfg["omit_pid"] != true {
+            println!("42");
+            std::io::stdout().flush()?;
+        }
+        anyhow::ensure!(
+            cfg["error_after_launch"] != true,
+            "fixture data source readiness timeout after launch"
+        );
     } else if cmd.contains("'stat' '-c'") {
         println!("1000");
     } else {

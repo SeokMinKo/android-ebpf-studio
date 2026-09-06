@@ -585,22 +585,78 @@ fn capture_perfetto(
         return Ok(());
     }
     let directory = agent_log.with_file_name("perfetto");
-    let capture =
-        match PerfettoCapture::start(client.clone(), &report.serial, &directory, 3_600_000) {
-            Ok(capture) => capture,
-            Err(error) => {
-                tx.send(HostMessage::Diagnostic(host_record(
-                    "perfetto",
-                    DiagnosticLevel::Warn,
-                    "capture.fallback",
-                    "PERFETTO_UNAVAILABLE",
-                    "degraded",
-                    Some(format!("{error}; trying accessible device counters")),
-                )))
+    let capture = match PerfettoCapture::start(
+        client.clone(),
+        &report.serial,
+        &directory,
+        3_600_000,
+    ) {
+        Ok(capture) => capture,
+        Err(error) => {
+            let detail = error.to_string();
+            if let Ok(mut failure) = error.downcast::<crate::perfetto_capture::StartupFailure>() {
+                tx.send(HostMessage::Status(
+                    "Perfetto startup failed; stopping the owned capture and recovering its data…"
+                        .into(),
+                ))
                 .ok();
-                return capture_diskstats(client, report, stop, tx);
+                match failure.capture.finish_failed_start() {
+                    Ok(Some(decoded)) => {
+                        tx.send(HostMessage::AnalysisStarted).ok();
+                        crate::perfetto_session::project_records(
+                            &decoded,
+                            "perfetto/capture.pftrace",
+                            |mut record| {
+                                if let WireRecord::SourceInfo {
+                                    status, metadata, ..
+                                } = &mut record
+                                {
+                                    *status = format!(
+                                        "Recovered partial capture after startup failure · {status}"
+                                    );
+                                    metadata["startup_error"] = detail.clone().into();
+                                    std::fs::write(
+                                        directory.join("analysis-quality.json"),
+                                        serde_json::to_vec_pretty(metadata)?,
+                                    )?;
+                                }
+                                tx.send(HostMessage::Record(record))
+                                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+                            },
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "{detail}; recovered raw trace retained but analysis failed: {e}"
+                            )
+                        })?;
+                        return Err(format!(
+                            "{detail}. Partial I/O recovered; no replacement collector started. Start again to retry; raw trace and recovery manifest preserved at {}",
+                            directory.display()
+                        ));
+                    }
+                    Ok(None) => {} // No owned process or accessible trace remains.
+                    Err(cleanup) => {
+                        return Err(format!(
+                            "{detail}. Recovery could not finish: {cleanup}. No replacement collector was started. Reconnect the original phone and use Recover from original phone; finite capture and manifest retained at {}",
+                            directory.display()
+                        ));
+                    }
+                }
             }
-        };
+            tx.send(HostMessage::Diagnostic(host_record(
+                "perfetto",
+                DiagnosticLevel::Warn,
+                "capture.fallback",
+                "PERFETTO_UNAVAILABLE",
+                "degraded",
+                Some(format!(
+                    "{detail}; no running capture to replace; trying accessible device counters"
+                )),
+            )))
+            .ok();
+            return capture_diskstats(client, report, stop, tx);
+        }
+    };
     tx.send(HostMessage::Record(WireRecord::Hello {
         schema_version: SCHEMA_VERSION,
         agent_version: format!("host-perfetto / {}", report.perfetto_version),
