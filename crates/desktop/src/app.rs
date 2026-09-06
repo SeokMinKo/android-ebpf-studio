@@ -18,7 +18,7 @@ use android_ebpf_protocol::{
 };
 use crossbeam_channel::{Receiver, Sender, bounded};
 use eframe::egui::{self, Color32, RichText, Stroke};
-use egui_plot::{Legend, Line, Plot, PlotPoints, Points};
+use egui_plot::{HoverPosition, Legend, Line, Plot, PlotPoints, Points};
 
 use crate::{
     adb::{AdbClient, AdbDevice, DeviceState, PreflightReport},
@@ -37,16 +37,49 @@ const MAX_EXPLORER_GROUPS: usize = 32;
 const MAX_MESSAGES_PER_FRAME: usize = 1_000;
 const LIVE_ANALYSIS_REFRESH: Duration = Duration::from_millis(250);
 const PERFORMANCE_WARNING_INTERVAL: Duration = Duration::from_secs(10);
-const BG: Color32 = Color32::from_rgb(12, 17, 27);
-const PANEL: Color32 = Color32::from_rgb(20, 27, 40);
-const PANEL_RAISED: Color32 = Color32::from_rgb(27, 36, 52);
-const BORDER: Color32 = Color32::from_rgb(48, 61, 82);
-const TEXT: Color32 = Color32::from_rgb(232, 238, 248);
-const MUTED: Color32 = Color32::from_rgb(145, 158, 181);
-const ACCENT: Color32 = Color32::from_rgb(74, 144, 245);
-const GREEN: Color32 = Color32::from_rgb(63, 201, 145);
-const AMBER: Color32 = Color32::from_rgb(245, 181, 65);
-const RED: Color32 = Color32::from_rgb(242, 102, 112);
+include!("analysis_ui.rs");
+include!("qa.rs");
+include!("selection.rs");
+include!("plot_style.rs");
+include!("axis_range.rs");
+include!("reanalysis.rs");
+include!("file_evidence.rs");
+include!("plot_sampling.rs");
+include!("view_export.rs");
+include!("ui_layout.rs");
+include!("page_purpose.rs");
+include!("compare_explore.rs");
+include!("perfetto_ui.rs");
+fn bg() -> Color32 {
+    palette_color(0, Color32::from_rgb(12, 17, 27))
+}
+fn panel() -> Color32 {
+    palette_color(1, Color32::from_rgb(20, 27, 40))
+}
+fn panel_raised() -> Color32 {
+    palette_color(2, Color32::from_rgb(27, 36, 52))
+}
+fn border() -> Color32 {
+    palette_color(3, Color32::from_rgb(48, 61, 82))
+}
+fn ink() -> Color32 {
+    palette_color(4, Color32::from_rgb(232, 238, 248))
+}
+fn muted() -> Color32 {
+    palette_color(5, Color32::from_rgb(145, 158, 181))
+}
+fn accent() -> Color32 {
+    palette_color(6, Color32::from_rgb(74, 144, 245))
+}
+fn green() -> Color32 {
+    palette_color(7, Color32::from_rgb(63, 201, 145))
+}
+fn amber() -> Color32 {
+    palette_color(8, Color32::from_rgb(245, 181, 65))
+}
+fn red() -> Color32 {
+    palette_color(9, Color32::from_rgb(242, 102, 112))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -119,6 +152,7 @@ impl ExplorerPreset {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum SetupStep {
     Connect,
     Verify,
@@ -192,11 +226,11 @@ impl AxisMetric {
             Self::Sector => Some(io.issue.sector as f64),
             Self::AddressKiB => Some(io.issue.sector as f64 / 2.0),
             Self::ChunkKiB => Some(io.issue.bytes as f64 / 1024.0),
-            Self::TotalLatencyMs => Some(io.total_latency_ns as f64 / 1e6),
+            Self::TotalLatencyMs => io.total_latency_ns.map(|n| n as f64 / 1e6),
             Self::QueueLatencyMs => io.queue_latency_ns.map(|value| value as f64 / 1e6),
-            Self::DeviceLatencyMs => Some(io.device_latency_ns as f64 / 1e6),
-            Self::Pid => Some(io.issue.pid as f64),
-            Self::QueueDepth => Some(io.queue_depth_after as f64),
+            Self::DeviceLatencyMs => io.device_latency_ns.map(|n| n as f64 / 1e6),
+            Self::Pid => io.issuer_pid().map(|pid| pid as f64),
+            Self::QueueDepth => io.queue_depth_after.map(|n| n as f64),
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
@@ -204,20 +238,35 @@ impl AxisMetric {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::UfsCommand))
             }
             Self::CriticalPathMs => {
-                graph.map(|graph| graph.metrics().critical_path_ns as f64 / 1e6)
+                if io.evidence.is_some() {
+                    None
+                } else {
+                    graph.map(|graph| graph.metrics().critical_path_ns as f64 / 1e6)
+                }
             }
         }
     }
 
-    fn requires_graph(self) -> bool {
-        matches!(
-            self,
-            Self::FilesystemLatencyMs | Self::UfsLatencyMs | Self::CriticalPathMs
-        )
+    fn is_storage_address(self) -> bool {
+        matches!(self, Self::Sector | Self::AddressKiB)
+    }
+
+    fn format_value(self, value: f64) -> String {
+        match self {
+            Self::Sector | Self::Pid | Self::QueueDepth => format!("{value:.0}"),
+            Self::AddressKiB | Self::ChunkKiB => format!("{value:.1}"),
+            Self::TimeMs
+            | Self::TotalLatencyMs
+            | Self::QueueLatencyMs
+            | Self::DeviceLatencyMs
+            | Self::FilesystemLatencyMs
+            | Self::UfsLatencyMs
+            | Self::CriticalPathMs => format!("{value:.3}"),
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum GroupBy {
     None,
     Direction,
@@ -262,7 +311,12 @@ impl GroupBy {
             Self::Direction => operation_label(io.issue.operation).into(),
             Self::AccessPattern => access_label(io.access_pattern).into(),
             Self::SizeClass => size_label(io.size_class).into(),
-            Self::Process => format!("{} ({})", io.issue.comm, io.issue.pid),
+            Self::Process => format!(
+                "{} ({})",
+                io.issue.comm,
+                io.issuer_pid()
+                    .map_or("PID unavailable".into(), |n| n.to_string())
+            ),
             Self::File | Self::Origin | Self::Confidence => {
                 let Some(graph) = graph else {
                     return "Unattributed".into();
@@ -286,19 +340,19 @@ impl GroupBy {
                             "File".into()
                         }
                     }
-                    Self::Confidence => origins.first().map_or_else(
-                        || "Unattributed".into(),
-                        |origin| edge_confidence_label(origin.confidence).into(),
-                    ),
+                    Self::Confidence => format!("{:?}", path_confidence(&origins)),
                     _ => unreachable!(),
                 }
             }
         }
     }
+}
 
-    fn requires_graph(self) -> bool {
-        matches!(self, Self::File | Self::Origin | Self::Confidence)
-    }
+#[derive(Debug, Clone)]
+struct ExplorerPoint {
+    coordinates: [f64; 2],
+    file_tooltip: Option<String>,
+    request: IoSelectionKey,
 }
 
 #[derive(Debug, Clone)]
@@ -307,7 +361,7 @@ struct ExplorerView {
     x_axis: AxisMetric,
     y_axis: AxisMetric,
     group_by: GroupBy,
-    groups: Vec<(String, Vec<[f64; 2]>)>,
+    groups: Vec<(String, Vec<ExplorerPoint>)>,
     available: usize,
     displayed: usize,
     built_at: Instant,
@@ -316,7 +370,6 @@ struct ExplorerView {
 #[derive(Debug, Clone)]
 struct PipelineView {
     generation: u64,
-    request_id: u64,
     io: CompletedIo,
     pipeline: IoPipeline,
     graph: IoTransactionGraph,
@@ -327,13 +380,61 @@ struct PipelineView {
 }
 
 struct ComparisonBaseline {
+    viewer: Box<StudioApp>,
     path: PathBuf,
     summary: AnalysisSummary,
     rejected_records: u64,
     capabilities: Option<ProbeCapabilities>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CapturePhase {
+    #[default]
+    Ready,
+    Preparing,
+    Recording,
+    Stopping,
+    Analyzing,
+    Complete,
+    Error,
+}
+impl CapturePhase {
+    fn busy(self) -> bool {
+        matches!(
+            self,
+            Self::Preparing | Self::Recording | Self::Stopping | Self::Analyzing
+        )
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::Preparing => "Preparing",
+            Self::Recording => "Recording",
+            Self::Stopping => "Stopping",
+            Self::Analyzing => "Analyzing",
+            Self::Complete => "Complete",
+            Self::Error => "Error",
+        }
+    }
+}
+
 pub struct StudioApp {
+    reanalysis: ReanalysisState,
+    file_evidence_positions: Option<Vec<usize>>,
+    selection: SelectionState,
+    plot_style: PlotStyle,
+    render_qa: RenderQa,
+    render_qa_scale: Option<f32>,
+    close_after_capture: bool,
+    phase: CapturePhase,
+    started_at: Option<Instant>,
+    capture_error: Option<String>,
+    loss_status: String,
+    source_info: Vec<WireRecord>,
+    raw_export_pending: bool,
+    discovery_pending: bool,
+    last_discovery: Option<Instant>,
+    theme: ThemeChoice,
     adb: AdbClient,
     tx: Sender<HostMessage>,
     rx: Receiver<HostMessage>,
@@ -343,6 +444,11 @@ pub struct StudioApp {
     status: String,
     diagnostics: VecDeque<DiagnosticRecord>,
     analyzer: AnalysisEngine,
+    query: AnalysisFilter,
+    disk_stats: Vec<WireRecord>,
+    filtered: Option<AnalysisEngine>,
+    filtered_generation: u64,
+    trend_view: Option<(u64, TrendData)>,
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
     simulator_stop: Option<Arc<AtomicBool>>,
@@ -365,12 +471,13 @@ pub struct StudioApp {
     y_axis: AxisMetric,
     group_by: GroupBy,
     explorer_preset: ExplorerPreset,
-    selected_pipeline_request: Option<u64>,
+    selected_pipeline_request: Option<IoSelectionKey>,
     analysis_generation: u64,
     explorer_view: Option<ExplorerView>,
     pipeline_view: Option<PipelineView>,
     summary_view: Option<(u64, Instant, AnalysisSummary)>,
     comparison: Option<ComparisonBaseline>,
+    compare_explore: CompareExplore,
     capture_mode: CaptureMode,
     filter_pid: u32,
     filter_operation: Option<IoOperation>,
@@ -391,6 +498,26 @@ impl Default for StudioApp {
     fn default() -> Self {
         let (tx, rx) = bounded(20_000);
         Self {
+            reanalysis: ReanalysisState::default(),
+            file_evidence_positions: None,
+            selection: SelectionState {
+                enabled: true,
+                auto_bounds: true,
+                ..Default::default()
+            },
+            plot_style: PlotStyle::default(),
+            render_qa: RenderQa::default(),
+            render_qa_scale: None,
+            close_after_capture: false,
+            phase: CapturePhase::Ready,
+            started_at: None,
+            capture_error: None,
+            loss_status: "Loss counters not reported".into(),
+            source_info: Vec::new(),
+            raw_export_pending: false,
+            discovery_pending: false,
+            last_discovery: None,
+            theme: ThemeChoice::System,
             adb: AdbClient::default(),
             tx,
             rx,
@@ -400,6 +527,11 @@ impl Default for StudioApp {
             status: "Ready".into(),
             diagnostics: VecDeque::new(),
             analyzer: AnalysisEngine::new(),
+            disk_stats: Vec::new(),
+            query: AnalysisFilter::default(),
+            filtered: None,
+            filtered_generation: u64::MAX,
+            trend_view: None,
             recent: VecDeque::new(),
             capture: None,
             simulator_stop: None,
@@ -428,13 +560,14 @@ impl Default for StudioApp {
             pipeline_view: None,
             summary_view: None,
             comparison: None,
-            capture_mode: CaptureMode::Balanced,
+            compare_explore: CompareExplore::default(),
+            capture_mode: CaptureMode::Deep,
             filter_pid: 0,
             filter_operation: None,
             filter_min_bytes: 0,
             slow_threshold_ms: 5.0,
             control_generation: 1,
-            control_status: "Balanced · generation 1".into(),
+            control_status: "Deep · automatic file attribution".into(),
             latest_aggregate: None,
             heavy_hitters: Vec::new(),
             triggers: VecDeque::new(),
@@ -447,10 +580,32 @@ impl Default for StudioApp {
 }
 
 impl StudioApp {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut app = Self::default();
+        if let Some(storage) = cc.storage {
+            app.theme = eframe::get_value(storage, "theme").unwrap_or_default();
+            app.plot_style = eframe::get_value(storage, "plot-style-v1").unwrap_or_default();
+            app.plot_style.normalize();
+            app.group_by =
+                eframe::get_value(storage, "plot-color-category-v1").unwrap_or(GroupBy::Direction);
+        }
+        if app.group_by != GroupBy::Direction {
+            app.explorer_preset = ExplorerPreset::Custom;
+        }
+        app.initialize_render_qa();
+        if app.render_qa.output.is_some() {
+            cc.egui_ctx
+                .memory_mut(|memory| *memory = egui::Memory::default());
+            app.plot_style = PlotStyle::default();
+            app.group_by = GroupBy::Direction;
+        }
+        app
+    }
     fn is_running(&self) -> bool {
-        self.capture.is_some() || self.simulator_stop.is_some()
+        self.phase.busy() || self.capture.is_some() || self.simulator_stop.is_some()
     }
 
+    #[allow(dead_code)]
     fn setup_step(&self) -> SetupStep {
         if self.is_running()
             || self
@@ -467,7 +622,11 @@ impl StudioApp {
     }
 
     fn refresh(&mut self) {
-        self.status = "Refreshing ADB devices…".into();
+        if self.discovery_pending || self.is_running() {
+            return;
+        }
+        self.discovery_pending = true;
+        self.last_discovery = Some(Instant::now());
         capture::refresh_devices(self.adb.clone(), self.tx.clone());
     }
 
@@ -485,6 +644,10 @@ impl StudioApp {
                 true
             }
             Err(error) => {
+                self.phase = CapturePhase::Error;
+                self.status = format!(
+                    "Cannot create session: {error}. Check free space and folder access, then retry Start."
+                );
                 self.push_diagnostic(error.to_string());
                 false
             }
@@ -492,18 +655,13 @@ impl StudioApp {
     }
 
     fn start_device(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let Some(serial) = self.selected_serial.clone() else {
             self.push_diagnostic("Select an authorized device first".into());
             return;
         };
-        if !self
-            .preflight
-            .as_ref()
-            .is_some_and(PreflightReport::full_ebpf_ready)
-        {
-            self.push_diagnostic("Full eBPF preflight has not passed".into());
-            return;
-        }
         let paths = match CapturePaths::discover() {
             Ok(paths) => paths,
             Err(error) => {
@@ -517,6 +675,10 @@ impl StudioApp {
         let host_writer = match RotatingJsonl::create(paths.host_log.clone()) {
             Ok(writer) => writer,
             Err(error) => {
+                self.phase = CapturePhase::Error;
+                self.status = format!(
+                    "Cannot create capture log: {error}. Check disk space and folder access, then retry."
+                );
                 self.push_diagnostic(format!("cannot create host diagnostic log: {error}"));
                 return;
             }
@@ -527,6 +689,9 @@ impl StudioApp {
             return;
         }
         self.reset_analysis();
+        self.preflight = None;
+        self.phase = CapturePhase::Preparing;
+        self.started_at = Some(Instant::now());
         self.capture = Some(capture::start_adb(
             self.adb.clone(),
             serial,
@@ -540,6 +705,9 @@ impl StudioApp {
     }
 
     fn start_simulator(&mut self) {
+        if self.is_running() {
+            return;
+        }
         self.session_id = None;
         self.log_directory = None;
         let path = match create_default_session_path() {
@@ -556,30 +724,37 @@ impl StudioApp {
         let stop = Arc::new(AtomicBool::new(false));
         simulator::start(self.tx.clone(), stop.clone());
         self.simulator_stop = Some(stop);
+        self.phase = CapturePhase::Recording;
+        self.started_at = Some(Instant::now());
     }
 
     fn stop(&mut self) {
-        let mut stopping = false;
-        if let Some(handle) = self.capture.take() {
+        if !matches!(
+            self.phase,
+            CapturePhase::Preparing | CapturePhase::Recording
+        ) {
+            return;
+        }
+        if let Some(handle) = &self.capture {
             handle.stop();
-            stopping = true;
         }
-        if let Some(stop) = self.simulator_stop.take() {
+        if let Some(stop) = &self.simulator_stop {
             stop.store(true, Ordering::Release);
-            stopping = true;
         }
-        if stopping {
-            // The reader thread owns stream completion. Keep the writer alive
-            // until its Ended message so records already in the pipes are not
-            // silently lost during a user-requested stop.
-            self.status = "Stopping capture…".into();
-        } else {
-            self.finish_session();
-            self.status = "Stopped".into();
-        }
+        self.phase = CapturePhase::Stopping;
+        self.status = "Stopping: draining collector output…".into();
     }
 
     fn apply_capture_control(&mut self) {
+        if self
+            .preflight
+            .as_ref()
+            .is_some_and(|r| r.perfetto && !r.full_ebpf_ready())
+        {
+            self.control_status =
+                "Perfetto: all available block events; apply analysis filters after Stop".into();
+            return;
+        }
         let Some(handle) = self.capture.clone() else {
             self.push_diagnostic("Start a device capture before applying a live filter".into());
             return;
@@ -629,19 +804,25 @@ impl StudioApp {
     }
 
     fn finish_session(&mut self) {
+        self.phase = CapturePhase::Analyzing;
         if let Some(writer) = self.writer.take() {
-            if let Err(error) = writer.finish(
-                self.received_events,
-                self.rejected_records,
-                self.agent_graceful == Some(true),
-            ) {
-                self.push_diagnostic(error.to_string());
-            }
+            let tx = self.tx.clone();
+            let seen = self.received_events;
+            let rejected = self.rejected_records;
+            let graceful = self.agent_graceful == Some(true) && self.capture_error.is_none();
+            std::thread::spawn(move || {
+                let result = writer
+                    .finish(seen, rejected, graceful)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(HostMessage::Finalized(result));
+            });
+        } else {
+            let _ = self.tx.try_send(HostMessage::Finalized(Ok(())));
         }
     }
 
     fn open_session(&mut self) {
-        if self.capture.is_some() || self.simulator_stop.is_some() {
+        if self.is_running() {
             self.stop();
             self.push_diagnostic_record(host_record(
                 self.session_id.as_deref().unwrap_or("session"),
@@ -659,6 +840,7 @@ impl StudioApp {
         else {
             return;
         };
+        self.phase = CapturePhase::Analyzing;
         self.status = "Loading session in background…".into();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -670,6 +852,18 @@ impl StudioApp {
     }
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
+        self.reanalysis.source_start_ns = Some(loaded.source_start_ns);
+        self.reanalysis.source_end_ns = loaded.source_end_ns;
+        self.reanalysis.source_count = loaded.source_completed_ios;
+        self.reanalysis.window = loaded.window_ns;
+        self.reanalysis.elapsed_ms = loaded.load_elapsed_ms;
+        let (a, b) = loaded
+            .window_ns
+            .unwrap_or((loaded.source_start_ns, loaded.source_end_ns));
+        self.reanalysis.draft = [
+            ((a - loaded.source_start_ns) as f64 / 1e6).to_string(),
+            ((b - loaded.source_start_ns) as f64 / 1e6).to_string(),
+        ];
         self.recent = loaded
             .engine
             .completed_ios()
@@ -681,6 +875,21 @@ impl StudioApp {
             .into_iter()
             .rev()
             .collect();
+        self.selection = SelectionState {
+            enabled: true,
+            auto_bounds: true,
+            ..Default::default()
+        };
+        self.query = AnalysisFilter::default();
+        self.filtered = None;
+        self.filtered_generation = u64::MAX;
+        self.file_evidence_positions = None;
+        self.trend_view = None;
+        self.phase = CapturePhase::Complete;
+        self.selected_pipeline_request = None;
+        self.loss_status = loaded.loss_status;
+        self.source_info = loaded.source_info;
+        self.disk_stats = loaded.disk_stats;
         self.analyzer = loaded.engine;
         self.analysis_generation = self.analysis_generation.wrapping_add(1);
         self.explorer_view = None;
@@ -713,21 +922,7 @@ impl StudioApp {
         else {
             return;
         };
-        match session::load_analysis(&path) {
-            Ok(loaded) => {
-                self.comparison = Some(ComparisonBaseline {
-                    path,
-                    summary: loaded.engine.summary(),
-                    rejected_records: loaded.rejected_lines,
-                    capabilities: loaded.capabilities,
-                });
-                self.status = "Comparison baseline loaded".into();
-            }
-            Err(error) => self.push_diagnostic(format!(
-                "cannot load comparison baseline {}: {error}",
-                path.display()
-            )),
-        }
+        self.start_comparison_load(path);
     }
 
     fn export_csv(&mut self) {
@@ -762,37 +957,104 @@ impl StudioApp {
             };
             match message {
                 HostMessage::Devices(Ok(devices)) => {
-                    self.devices = devices;
-                    self.selected_serial = self
-                        .devices
+                    self.discovery_pending = false;
+                    if self.is_running() {
+                        continue;
+                    }
+                    let previous = self.selected_serial.clone();
+                    let available: Vec<_> = devices
                         .iter()
-                        .find(|device| device.state == DeviceState::Device)
-                        .map(|device| device.serial.clone());
-                    self.status = format!("{} ADB device(s)", self.devices.len());
+                        .filter(|d| d.state == DeviceState::Device)
+                        .collect();
+                    self.selected_serial = previous
+                        .clone()
+                        .filter(|p| available.iter().any(|d| &d.serial == p))
+                        .or_else(|| (available.len() == 1).then(|| available[0].serial.clone()));
+                    if previous != self.selected_serial || self.devices != devices {
+                        self.preflight = None;
+                    }
+                    if self.phase == CapturePhase::Ready {
+                        self.status =
+                            if devices.iter().any(|d| d.state == DeviceState::Unauthorized) {
+                                "Approve USB debugging on the phone, then Start".into()
+                            } else if available.is_empty() {
+                                "Connect a rooted Android phone with USB debugging".into()
+                            } else if self.selected_serial.is_none() {
+                                "Select the phone to analyze".into()
+                            } else {
+                                "Ready: Start automatically prepares the phone".into()
+                            };
+                    }
+                    self.devices = devices;
                 }
                 HostMessage::Devices(Err(error)) | HostMessage::Preflight(Err(error)) => {
+                    self.discovery_pending = false;
+                    self.status = format!("Device check failed: {error}");
+                    self.preflight = None;
                     self.push_diagnostic(error)
                 }
                 HostMessage::Preflight(Ok(report)) => {
+                    if self.selected_serial.as_deref() != Some(report.serial.as_str()) {
+                        continue;
+                    }
                     self.status = if report.full_ebpf_ready() {
                         "Full eBPF preflight passed".into()
+                    } else if report.perfetto {
+                        "Perfetto available · FilePath unavailable · event support checked during capture".into()
+                    } else if !report.root {
+                        "Root unavailable · checking accessible device counters".into()
                     } else {
                         "Preflight incomplete — see capabilities".into()
                     };
                     self.preflight = Some(report);
                 }
                 HostMessage::Status(status) => self.status = status,
+                HostMessage::AnalysisStarted => {
+                    self.phase = CapturePhase::Analyzing;
+                    self.status = "Analyzing Perfetto block observations…".into();
+                }
                 HostMessage::Record(record) => self.ingest_record(record),
                 HostMessage::Diagnostic(value) => self.push_diagnostic_record(value),
                 HostMessage::SessionLoaded(path, Ok(loaded)) => {
                     self.apply_loaded_session(path, *loaded);
                 }
-                HostMessage::SessionLoaded(_, Err(error)) => self.push_diagnostic(error),
+                HostMessage::SessionLoaded(_, Err(error)) => {
+                    self.phase = CapturePhase::Error;
+                    self.status = error.clone();
+                    self.push_diagnostic(error);
+                }
+                HostMessage::ViewExported(result) => {
+                    self.status = match result {
+                        Ok(path) => format!("Analysis view exported → {}", path.display()),
+                        Err(error) => format!("View export failed: {error}"),
+                    };
+                }
                 HostMessage::Exported(Ok(summary)) => {
                     self.status = format!("Exported CSV and {}", summary.display());
                 }
+                HostMessage::RawTraceExported(result) => {
+                    self.raw_export_pending = false;
+                    let status = match result {
+                        Ok(path) => format!("Perfetto raw trace exported → {}", path.display()),
+                        Err(error) => format!("Raw trace export failed: {error}"),
+                    };
+                    if self.is_running() {
+                        self.push_diagnostic(status);
+                    } else {
+                        self.status = status;
+                    }
+                }
                 HostMessage::Exported(Err(error)) => self.push_diagnostic(error),
                 HostMessage::Ended(result) => {
+                    self.capture_error =
+                        result.as_ref().err().cloned().or(self.capture_error.take());
+                    self.status = match &result {
+                        Err(error) => format!("Capture failed: {error}"),
+                        Ok(()) if self.agent_footer_seen && self.agent_graceful == Some(true) => {
+                            "Capture completed".into()
+                        }
+                        Ok(()) => "Capture stopped (partial session)".into(),
+                    };
                     if let Err(error) = result {
                         self.push_diagnostic(error);
                     }
@@ -815,6 +1077,31 @@ impl StudioApp {
                     self.simulator_stop = None;
                     self.host_diagnostic_writer = None;
                 }
+                HostMessage::Finalized(result) => {
+                    if let Err(error) = result {
+                        self.capture_error = Some(error);
+                    }
+                    self.page = Page::Overview;
+                    self.phase = if self.capture_error.is_some() {
+                        CapturePhase::Error
+                    } else {
+                        CapturePhase::Complete
+                    };
+                    if let Some(error) = &self.capture_error {
+                        self.status = format!(
+                            "Partial data preserved: {error}. Free space/reconnect and retry Start."
+                        );
+                    } else {
+                        self.status = format!(
+                            "Analysis ready · {}",
+                            if self.agent_graceful == Some(true) {
+                                "session saved"
+                            } else {
+                                "partial session saved; footer absent"
+                            }
+                        );
+                    }
+                }
             }
         }
         self.performance
@@ -831,9 +1118,35 @@ impl StudioApp {
             && let Err(error) = writer.append(record.clone())
         {
             self.rejected_records += 1;
+            self.capture_error = Some(error.to_string());
             self.push_diagnostic(error.to_string());
+            self.stop();
         }
         match record {
+            value @ WireRecord::SourceInfo { .. } => {
+                let WireRecord::SourceInfo {
+                    status, metadata, ..
+                } = &value
+                else {
+                    unreachable!()
+                };
+                self.loss_status = status.clone();
+                if metadata.get("stage").and_then(|s| s.as_str()) == Some("recording")
+                    && self.phase == CapturePhase::Preparing
+                {
+                    self.phase = CapturePhase::Recording;
+                }
+                if metadata.get("stage").and_then(|s| s.as_str()) == Some("complete") {
+                    self.push_diagnostic(format!("Perfetto source quality: {metadata}"));
+                }
+                self.source_info.push(value);
+            }
+            value @ WireRecord::DiskStats { .. } => {
+                self.disk_stats.push(value);
+                if self.phase == CapturePhase::Preparing {
+                    self.phase = CapturePhase::Recording;
+                }
+            }
             WireRecord::Event {
                 sequence, event, ..
             } => {
@@ -871,6 +1184,10 @@ impl StudioApp {
                 key_reused,
                 ..
             } => {
+                self.loss_status = format!(
+                    "Kernel loss: {} · userspace loss: {userspace_drops} · ambiguous: {correlation_ambiguous} · expired: {correlation_expired}",
+                    kernel_drops.map_or_else(|| "not reported".into(), |v| v.to_string())
+                );
                 let mut record = host_record(
                     self.session_id.as_deref().unwrap_or("session"),
                     DiagnosticLevel::Info,
@@ -888,6 +1205,10 @@ impl StudioApp {
             }
             WireRecord::Capabilities { capabilities, .. } => {
                 self.capabilities = Some(capabilities);
+                if self.phase == CapturePhase::Preparing {
+                    self.phase = CapturePhase::Recording;
+                    self.apply_capture_control();
+                }
             }
             WireRecord::Control {
                 acknowledgement, ..
@@ -938,6 +1259,20 @@ impl StudioApp {
     }
 
     fn reset_analysis(&mut self) {
+        self.reanalysis = ReanalysisState::default();
+        self.file_evidence_positions = None;
+        self.selection = SelectionState {
+            enabled: true,
+            auto_bounds: true,
+            ..Default::default()
+        };
+        self.trend_view = None;
+        self.query = AnalysisFilter::default();
+        self.filtered = None;
+        self.capture_error = None;
+        self.loss_status = "Loss counters not reported".into();
+        self.source_info.clear();
+        self.disk_stats.clear();
         self.analyzer = AnalysisEngine::new();
         self.analysis_generation = self.analysis_generation.wrapping_add(1);
         self.explorer_view = None;
@@ -1093,7 +1428,20 @@ impl StudioApp {
             });
         if !cache_valid {
             let started = Instant::now();
-            let summary = self.analyzer.summary();
+            let mut summary = self.analysis().summary();
+            if let Some(positions) = &self.file_evidence_positions {
+                summary.file_ios = positions.len() as u64;
+                summary.attributed_file_ios = positions
+                    .iter()
+                    .filter(|&&i| {
+                        matches!(
+                            self.analysis().file_ios()[i].confidence,
+                            android_ebpf_protocol::AttributionConfidence::Attributed
+                                | android_ebpf_protocol::AttributionConfidence::Exact
+                        )
+                    })
+                    .count() as u64;
+            }
             self.performance.observe_summary_rebuild(started.elapsed());
             self.summary_view = Some((self.analysis_generation, Instant::now(), summary));
         }
@@ -1106,63 +1454,44 @@ impl StudioApp {
 
     fn metrics_ui(&mut self, ui: &mut egui::Ui) {
         let summary = self.analysis_summary();
-        let completed = self
-            .latest_aggregate
-            .as_ref()
-            .map_or(summary.completed_ios, |snapshot| snapshot.counters.observed);
-        let (bytes_label, bytes_value) = self.latest_aggregate.as_ref().map_or_else(
-            || {
-                (
-                    "READ / WRITE",
-                    format!(
-                        "{} / {}",
-                        format_bytes(summary.read_bytes),
-                        format_bytes(summary.write_bytes)
-                    ),
-                )
-            },
-            |snapshot| ("TOTAL BYTES", format_bytes(snapshot.counters.bytes)),
+        if summary.completed_ios == 0 {
+            ui.label("No retained completed I/O detail. Per-request volume and latency are unavailable; check the separate kernel snapshot or device counters.");
+            return;
+        }
+        ui.small("KPIs below use the same retained completed I/O and filters as the findings and graphs.");
+        let completed = summary.completed_ios;
+        let bytes_label = "READ / WRITE";
+        let bytes_value = format!(
+            "{} / {}",
+            format_bytes(summary.read_bytes),
+            format_bytes(summary.write_bytes)
         );
-        let p50 = self
-            .latest_aggregate
-            .as_ref()
-            .and_then(|snapshot| aggregate_percentile(snapshot, HistogramMetric::TotalLatency, 50))
-            .or(summary.p50_latency_ns);
-        let p95 = self
-            .latest_aggregate
-            .as_ref()
-            .and_then(|snapshot| aggregate_percentile(snapshot, HistogramMetric::TotalLatency, 95))
-            .or(summary.p95_latency_ns);
-        let p99 = self
-            .latest_aggregate
-            .as_ref()
-            .and_then(|snapshot| aggregate_percentile(snapshot, HistogramMetric::TotalLatency, 99))
-            .or(summary.p99_latency_ns);
+        let (p50, p95, p99) = (
+            summary.p50_latency_ns,
+            summary.p95_latency_ns,
+            summary.p99_latency_ns,
+        );
         ui.columns(3, |columns| {
             metric_card(
                 &mut columns[0],
                 "COMPLETED I/O",
                 completed.to_string(),
                 "requests",
-                ACCENT,
+                accent(),
             );
             metric_card(
                 &mut columns[1],
                 bytes_label,
                 bytes_value,
                 "transferred",
-                GREEN,
+                green(),
             );
             metric_card(
                 &mut columns[2],
                 "P95 LATENCY",
                 format_latency(p95),
-                if self.latest_aggregate.is_some() {
-                    "approximate bucket"
-                } else {
-                    "end-to-end"
-                },
-                AMBER,
+                "insert/issue to completion",
+                amber(),
             );
         });
         ui.add_space(8.0);
@@ -1171,50 +1500,48 @@ impl StudioApp {
                 &mut columns[0],
                 "P50 LATENCY",
                 format_latency(p50),
-                if self.latest_aggregate.is_some() {
-                    "approximate bucket"
-                } else {
-                    "median"
-                },
-                GREEN,
+                "median · retained detail",
+                green(),
             );
             metric_card(
                 &mut columns[1],
                 "P99 LATENCY",
                 format_latency(p99),
-                if self.latest_aggregate.is_some() {
-                    "approximate bucket"
-                } else {
-                    "tail"
-                },
-                RED,
+                "tail · retained detail",
+                red(),
             );
             metric_card(
                 &mut columns[2],
                 "MAX QUEUE DEPTH",
-                summary.max_queue_depth.to_string(),
+                summary
+                    .max_queue_depth
+                    .map_or("Not measured".into(), |n| n.to_string()),
                 "in-flight requests",
-                ACCENT,
+                accent(),
             );
         });
     }
 
     fn rebuild_explorer_view(&mut self) {
         let started = Instant::now();
-        let samples = self.analyzer.completed_ios();
+        let samples = self.analysis().completed_ios();
         let available = samples.len();
-        let origin_ns = samples.first().map_or(0, |io| io.completion.ts_ns);
-        let needs_graph =
-            self.x_axis.needs_graph() || self.y_axis.needs_graph() || self.group_by.needs_graph();
+        let origin_ns = self.time_origin();
+        let shows_storage_address =
+            self.x_axis.is_storage_address() || self.y_axis.is_storage_address();
+        let needs_graph = self.x_axis.needs_graph()
+            || self.y_axis.needs_graph()
+            || self.group_by.needs_graph()
+            || shows_storage_address;
         let limit = if needs_graph {
             MAX_GRAPH_EXPLORER_POINTS
         } else {
             MAX_EXPLORER_POINTS
         };
-        let mut groups: BTreeMap<String, Vec<[f64; 2]>> = BTreeMap::new();
-        for index in evenly_sample_indices(samples.len(), limit) {
+        let mut groups: BTreeMap<String, Vec<ExplorerPoint>> = BTreeMap::new();
+        for index in operation_sample_indices(samples, limit) {
             let io = &samples[index];
-            let graph = needs_graph.then(|| self.analyzer.transaction_for(io));
+            let graph = needs_graph.then(|| self.analysis().transaction_for(io));
             let graph = graph.as_ref();
             let (Some(x), Some(y)) = (
                 self.x_axis.value(io, origin_ns, graph),
@@ -1222,15 +1549,25 @@ impl StudioApp {
             ) else {
                 continue;
             };
+            let file_tooltip = Some({
+                graph.map_or_else(
+                    || "File: <unattributed>".into(),
+                    |graph| file_origin_tooltip(&block_file_origins(graph)),
+                )
+            });
             groups
                 .entry(self.group_by.key(io, graph))
                 .or_default()
-                .push([x, y]);
+                .push(ExplorerPoint {
+                    coordinates: [x, y],
+                    file_tooltip,
+                    request: selection_key(io),
+                });
         }
         let displayed = groups.values().map(Vec::len).sum();
         let mut groups: Vec<_> = groups.into_iter().collect();
         if groups.len() > MAX_EXPLORER_GROUPS {
-            groups.sort_by(|left, right| right.1.len().cmp(&left.1.len()));
+            groups.sort_by_key(|group| std::cmp::Reverse(group.1.len()));
             let overflow = groups.split_off(MAX_EXPLORER_GROUPS - 1);
             let mut other = Vec::new();
             for (_, mut values) in overflow {
@@ -1254,8 +1591,8 @@ impl StudioApp {
 
     fn rebuild_pipeline_view(&mut self, io: CompletedIo) {
         let started = Instant::now();
-        let pipeline = self.analyzer.pipeline_for(&io);
-        let graph = self.analyzer.transaction_for(&io);
+        let pipeline = self.analysis().pipeline_for(&io);
+        let graph = self.analysis().transaction_for(&io);
         let graph_metrics = graph.metrics();
         let origins = graph
             .nodes
@@ -1263,10 +1600,9 @@ impl StudioApp {
             .find(|node| node.kind == IoNodeKind::BlockRequest)
             .map(|node| graph.file_origins_for(node.node_id))
             .unwrap_or_default();
-        let slow_reason = self.analyzer.why_slow(&io);
+        let slow_reason = self.analysis().why_slow(&io);
         self.pipeline_view = Some(PipelineView {
             generation: self.analysis_generation,
-            request_id: io.issue.request_id,
             io,
             pipeline,
             graph,
@@ -1279,18 +1615,15 @@ impl StudioApp {
     }
 
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
-        section_header(
-            ui,
-            "Explore hypotheses",
-            "Start with a focused view, then use advanced axes when the question needs it.",
-        );
-        card_frame().show(ui, |ui| {
+        let previous_axes = (self.x_axis, self.y_axis);
+        ui.heading("Explore I/O");
+        ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("VIEW").size(10.0).strong().color(MUTED));
+                ui.label(RichText::new("VIEW").size(10.0).strong().color(muted()));
                 let previous = self.explorer_preset;
                 egui::ComboBox::from_id_salt("explorer-preset")
                     .selected_text(self.explorer_preset.label())
-                    .width(220.0)
+                    .width(175.0)
                     .show_ui(ui, |ui| {
                         for preset in ExplorerPreset::ALL {
                             ui.selectable_value(&mut self.explorer_preset, preset, preset.label());
@@ -1303,29 +1636,37 @@ impl StudioApp {
                     self.y_axis = y;
                     self.group_by = group;
                 }
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("Drag: pan  •  Wheel: zoom  •  Double-click: reset").color(MUTED),
+                ui.selectable_value(&mut self.selection.enabled, true, "Select");
+                ui.selectable_value(&mut self.selection.enabled, false, "Pan");
+                ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Color Category");
+                let previous_category = self.group_by;
+                egui::ComboBox::from_id_salt("color-category")
+                    .selected_text(self.group_by.label())
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        for group in GroupBy::ALL {
+                            ui.selectable_value(&mut self.group_by, group, group.label());
+                        }
+                    });
+                if previous_category != self.group_by {
+                    self.explorer_preset = ExplorerPreset::Custom;
+                }
+                ui.add(
+                    egui::Slider::new(&mut self.plot_style.point_diameter, 2.0..=20.0)
+                        .text("Point size (px)")
+                        .step_by(0.5),
                 );
             });
-            ui.collapsing("Advanced axes and grouping", |ui| {
+            ui.collapsing("Advanced axes", |ui| {
                 let before = (self.x_axis, self.y_axis, self.group_by);
                 ui.horizontal_wrapped(|ui| {
                     axis_combo(ui, "x-axis", "X AXIS", &mut self.x_axis);
                     ui.add_space(8.0);
                     axis_combo(ui, "y-axis", "Y AXIS", &mut self.y_axis);
                     ui.add_space(8.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("GROUP BY").size(10.0).color(MUTED));
-                        egui::ComboBox::from_id_salt("group-by")
-                            .selected_text(self.group_by.label())
-                            .width(180.0)
-                            .show_ui(ui, |ui| {
-                                for group in GroupBy::ALL {
-                                    ui.selectable_value(&mut self.group_by, group, group.label());
-                                }
-                            });
-                    });
                 });
                 if before != (self.x_axis, self.y_axis, self.group_by) {
                     self.explorer_preset = ExplorerPreset::Custom;
@@ -1334,6 +1675,17 @@ impl StudioApp {
         });
         ui.add_space(10.0);
 
+        if previous_axes != (self.x_axis, self.y_axis) {
+            self.selection = SelectionState {
+                enabled: true,
+                auto_bounds: true,
+                ..Default::default()
+            };
+        }
+        self.explorer_plot_ui(ui, false);
+    }
+
+    fn explorer_plot_ui(&mut self, ui: &mut egui::Ui, compact: bool) -> Option<SelectionRequest> {
         let cache_valid = self.explorer_view.as_ref().is_some_and(|view| {
             (view.generation == self.analysis_generation
                 || (self.is_running() && view.built_at.elapsed() < LIVE_ANALYSIS_REFRESH))
@@ -1344,60 +1696,257 @@ impl StudioApp {
         if !cache_valid {
             self.rebuild_explorer_view();
         }
+        let names = self
+            .explorer_view
+            .as_ref()
+            .expect("explorer view is rebuilt")
+            .groups
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        if !compact {
+            self.axis_ranges_ui(ui);
+            self.plot_colors_ui(ui, &names);
+        }
+        let legend_id = ui.make_persistent_id(("plot-legend", self.group_by.label()));
+        let mut show_legend = ui.ctx().data_mut(|d| {
+            d.get_temp::<bool>(legend_id).unwrap_or_else(|| {
+                names.len() <= 6 && names.iter().all(|n| n.chars().count() <= 28)
+            })
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut show_legend, "Plot legend");
+            if !show_legend {
+                ui.small(format!(
+                    "{} categories · full labels and colors in Colors above",
+                    names.len()
+                ));
+            }
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(legend_id, show_legend));
         let view = self
             .explorer_view
             .as_ref()
             .expect("explorer view is rebuilt");
-        let palette = [
-            Color32::LIGHT_BLUE,
-            Color32::LIGHT_GREEN,
-            Color32::LIGHT_RED,
-            Color32::YELLOW,
-            Color32::KHAKI,
-            Color32::LIGHT_GRAY,
-            Color32::from_rgb(200, 120, 255),
-            Color32::from_rgb(255, 150, 80),
-        ];
-        Plot::new("interactive-storage-explorer")
-            .height(ui.available_height().max(420.0) - 42.0)
+        let point_radius = self.plot_style.point_diameter * 0.5;
+        let x_axis = self.x_axis;
+        let y_axis = self.y_axis;
+        let mut selection_request = None;
+        let mut drag_start = self.selection.drag_start;
+        let selecting = self.selection.enabled;
+        let bounds_command = self.selection.bounds_command.take();
+        let auto_bounds = std::mem::take(&mut self.selection.auto_bounds);
+        if view.displayed == 0 && !compact {
+            ui.label("No plottable I/O for these axes and filters. Missing measurements are excluded; retained requests remain in the table below.");
+        }
+        let plot = studio_plot("interactive-storage-explorer");
+        let plot = if show_legend {
+            plot.legend(Legend::default())
+        } else {
+            plot
+        };
+        let plot_response = plot
+            .allow_drag(!selecting)
+            .allow_boxed_zoom(!selecting)
+            // Outer scrolling must not increase the plot height and continually
+            // push the event table farther away from the visible viewport.
+            .height(if compact {
+                220.0
+            } else {
+                (ui.ctx().content_rect().height() * 0.33).clamp(220.0, 500.0)
+            })
             .x_axis_label(self.x_axis.label())
             .y_axis_label(self.y_axis.label())
-            .legend(Legend::default())
+            .label_formatter(|hover| match hover {
+                HoverPosition::NearDataPoint {
+                    plot_name,
+                    position,
+                    index,
+                } => {
+                    let point = view
+                        .groups
+                        .iter()
+                        .find(|(name, _)| name == plot_name)
+                        .and_then(|(_, points)| points.get(*index));
+                    let mut label = format!(
+                        "{plot_name}\n{}: {}\n{}: {}",
+                        x_axis.label(),
+                        x_axis.format_value(position.x),
+                        y_axis.label(),
+                        y_axis.format_value(position.y),
+                    );
+                    if let Some(file_tooltip) = point.and_then(|point| point.file_tooltip.as_ref())
+                    {
+                        label.push('\n');
+                        label.push_str(file_tooltip);
+                    }
+                    Some(label)
+                }
+                HoverPosition::Elsewhere { .. } => None,
+            })
             .show(ui, |plot| {
-                for (index, (name, values)) in view.groups.iter().enumerate() {
-                    let points: PlotPoints = values.iter().copied().collect();
+                if auto_bounds {
+                    plot.set_auto_bounds(true);
+                }
+                if let Some(bounds) = bounds_command {
+                    plot.set_plot_bounds(bounds);
+                }
+                self.render_qa.plot_rect = Some(plot.response().rect);
+                self.render_qa.point_target = view
+                    .groups
+                    .iter()
+                    .flat_map(|(_, p)| p)
+                    .find(|p| {
+                        p.file_tooltip
+                            .as_ref()
+                            .is_some_and(|v| v.contains("final-A.bin"))
+                    })
+                    .or_else(|| view.groups.iter().flat_map(|(_, points)| points).next())
+                    .map(|p| {
+                        plot.screen_from_plot(egui_plot::PlotPoint::new(
+                            p.coordinates[0],
+                            p.coordinates[1],
+                        ))
+                    });
+                if selecting
+                    && plot.response().clicked()
+                    && let Some(pointer) = plot.pointer_coordinate()
+                {
+                    let screen = plot.screen_from_plot(pointer);
+                    selection_request = view
+                        .groups
+                        .iter()
+                        .flat_map(|(_, points)| points)
+                        .filter_map(|point| {
+                            let pos = plot.screen_from_plot(egui_plot::PlotPoint::new(
+                                point.coordinates[0],
+                                point.coordinates[1],
+                            ));
+                            let distance = pos.distance(screen);
+                            (distance < 16.0).then_some((distance, point.request))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|v| SelectionRequest::Point(v.1));
+                }
+                if selecting
+                    && plot.response().drag_started()
+                    && let Some(pos) = plot.response().interact_pointer_pos()
+                {
+                    let p = plot.plot_from_screen(pos - plot.response().drag_delta());
+                    drag_start = Some([p.x, p.y]);
+                }
+                if selecting
+                    && let Some(start) = drag_start
+                    && let Some(pos) = plot.response().interact_pointer_pos()
+                {
+                    let p = plot.plot_from_screen(pos);
+                    let min = [start[0].min(p.x), start[1].min(p.y)];
+                    let max = [start[0].max(p.x), start[1].max(p.y)];
+                    let rectangle: PlotPoints = vec![
+                        [min[0], min[1]],
+                        [max[0], min[1]],
+                        [max[0], max[1]],
+                        [min[0], max[1]],
+                    ]
+                    .into();
+                    plot.polygon(
+                        egui_plot::Polygon::new("Selection area", rectangle)
+                            .fill_color(accent().gamma_multiply(0.15))
+                            .stroke(Stroke::new(1.5, accent())),
+                    );
+                    if plot.response().drag_stopped() {
+                        selection_request = Some(SelectionRequest::Rectangle { min, max });
+                        drag_start = None;
+                    }
+                }
+                for (name, values) in &view.groups {
+                    let points: PlotPoints = values.iter().map(|point| point.coordinates).collect();
+                    if let Some(summary) = &self.selection.summary {
+                        let selected: PlotPoints = values
+                            .iter()
+                            .filter(|p| summary.keys.contains(&p.request))
+                            .map(|p| p.coordinates)
+                            .collect();
+                        plot.points(
+                            Points::new("Selected", selected)
+                                .filled(false)
+                                .allow_hover(false)
+                                .radius(point_radius + 2.5)
+                                .color(amber()),
+                        );
+                    }
                     plot.points(
                         Points::new(name.clone(), points)
-                            .radius(2.5)
-                            .color(palette[index % palette.len()]),
+                            .radius(point_radius)
+                            .color(self.plot_style.color(self.group_by, name)),
                     );
                 }
             });
+        self.selection.drag_start = drag_start;
+        self.selection.current_bounds = Some(*plot_response.transform.bounds());
+        // Comparison plots are peers: data-dependent status belongs after the
+        // plot so an empty population cannot shift only one graph down.
+        if view.displayed == 0 && compact {
+            ui.label("No plottable I/O for these axes and filters. Missing measurements are excluded; retained requests remain available in I/O details.");
+        }
+        if auto_bounds {
+            self.selection
+                .axis_range
+                .read_view(*plot_response.transform.bounds());
+        }
+        if !compact && (self.x_axis.is_storage_address() || self.y_axis.is_storage_address()) {
+            ui.label(
+                RichText::new(
+                    "Select a point or area for the right-hand summary. Hover reveals FilePath evidence; Investigate is available from the selection panel. The Completed I/O table provides the same file/LBA lookup without pointer hover.",
+                )
+                .small()
+                .color(muted()),
+            );
+        }
         ui.label(
             RichText::new(format!(
                 "Showing {} of {} completed I/O samples{}",
                 view.displayed,
                 view.available,
                 if view.available > view.displayed {
-                    " · evenly sampled for interactive rendering"
+                    " · sampled within each operation for interactive rendering"
                 } else {
                     ""
                 }
             ))
             .small()
-            .color(MUTED),
+            .color(muted()),
         );
-        ui.label(RichText::new("ⓘ Queue latency requires block_rq_insert. Missing values are excluded instead of displayed as zero.").small().color(MUTED));
+        if let Some(request) = selection_request {
+            self.begin_selection(request);
+        }
+        if self.render_qa.output.is_some()
+            && std::env::var_os("ANDROID_EBPF_QA_SMALL").is_some()
+            && std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref() == Ok("zoom-back")
+            && self.render_qa.input_step == 0
+        {
+            plot_response
+                .response
+                .scroll_to_me(Some(egui::Align::Center));
+        }
+        if !compact {
+            self.table_ui(ui);
+            ui.label(RichText::new("Queue latency requires block_rq_insert. Missing values are excluded instead of displayed as zero.").small().color(muted()));
+        }
+        selection_request
     }
 
-    fn summary_ui(&mut self, ui: &mut egui::Ui) {
+    fn summary_breakdown_ui(&mut self, ui: &mut egui::Ui) {
         let summary = self.analysis_summary();
+
         section_header(
             ui,
             "Overview",
             "What happened, how trustworthy the capture is, and where to investigate next.",
         );
-        if let Some(snapshot) = &self.latest_aggregate {
+        if let Some(snapshot) = &self.latest_aggregate
+            && !self.query.active()
+        {
             card_frame().show(ui, |ui| {
                 ui.label(
                     RichText::new(format!(
@@ -1406,14 +1955,14 @@ impl StudioApp {
                         snapshot.counters.detail_emitted,
                         snapshot.counters.suppressed_fast
                     ))
-                    .color(GREEN),
+                    .color(green()),
                 );
                 ui.label(
                     RichText::new(
                         "Top KPIs use approximate histogram buckets; tables below describe retained detail.",
                     )
                     .small()
-                    .color(MUTED),
+                    .color(muted()),
                 );
             });
             ui.add_space(10.0);
@@ -1427,20 +1976,24 @@ impl StudioApp {
             summary_card(
                 &mut columns[1],
                 "Busy time",
-                format!(
-                    "{} ({:.1}%)",
-                    format_duration(summary.busy_ns),
-                    ratio(summary.busy_ns, summary.logging_ns)
-                ),
+                summary.busy_ns.map_or("Not measured".into(), |busy| {
+                    format!(
+                        "{} ({:.1}%)",
+                        format_duration(busy),
+                        ratio(busy, summary.logging_ns)
+                    )
+                }),
             );
             summary_card(
                 &mut columns[2],
                 "Idle time",
-                format!(
-                    "{} ({:.1}%)",
-                    format_duration(summary.idle_ns),
-                    ratio(summary.idle_ns, summary.logging_ns)
-                ),
+                summary.idle_ns.map_or("Not measured".into(), |idle| {
+                    format!(
+                        "{} ({:.1}%)",
+                        format_duration(idle),
+                        ratio(idle, summary.logging_ns)
+                    )
+                }),
             );
             summary_card(
                 &mut columns[3],
@@ -1456,7 +2009,8 @@ impl StudioApp {
         );
         card_frame().show(ui, |ui| {
             if let Some(slowest) = self
-                .recent
+                .analysis()
+                .completed_ios()
                 .iter()
                 .max_by_key(|request| request.total_latency_ns)
                 .cloned()
@@ -1465,7 +2019,7 @@ impl StudioApp {
                     ui.label(
                         RichText::new("SLOWEST RECENT REQUEST")
                             .size(10.0)
-                            .color(MUTED),
+                            .color(muted()),
                     );
                     ui.label(
                         RichText::new(format!(
@@ -1473,17 +2027,17 @@ impl StudioApp {
                             slowest.issue.request_id,
                             operation_label(slowest.issue.operation),
                             format_bytes(slowest.issue.bytes as u64),
-                            format_duration(slowest.total_latency_ns)
+                            format_latency(slowest.total_latency_ns)
                         ))
                         .strong(),
                     );
                     if ui.button("Investigate").clicked() {
-                        self.selected_pipeline_request = Some(slowest.issue.request_id);
+                        self.selected_pipeline_request = Some(selection_key(&slowest));
                         self.page = Page::Investigate;
                     }
                 });
             } else {
-                ui.label(RichText::new("No completed requests yet").color(MUTED));
+                ui.label(RichText::new("No completed requests yet").color(muted()));
             }
         });
         ui.add_space(18.0);
@@ -1569,7 +2123,7 @@ impl StudioApp {
             );
         });
         ui.add_space(18.0);
-        if !self.heavy_hitters.is_empty() {
+        if !self.heavy_hitters.is_empty() && !self.query.active() {
             section_header(
                 ui,
                 "Live Top Offenders",
@@ -1586,11 +2140,11 @@ impl StudioApp {
                                 snapshot.evicted_keys
                             ))
                             .small()
-                            .color(MUTED),
+                            .color(muted()),
                         );
                         for entry in snapshot.entries.iter().take(10) {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(&entry.key).monospace().color(TEXT));
+                                ui.label(RichText::new(&entry.key).monospace().color(ink()));
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -1639,7 +2193,7 @@ impl StudioApp {
                             format_bytes(segment.retained_bytes),
                             segment.evicted_records
                         ))
-                        .color(TEXT),
+                        .color(ink()),
                     );
                     ui.label(
                         RichText::new(format!(
@@ -1656,7 +2210,7 @@ impl StudioApp {
                             )
                         ))
                         .small()
-                        .color(MUTED),
+                        .color(muted()),
                     );
                 });
             }
@@ -1713,20 +2267,17 @@ impl StudioApp {
             "Investigate one I/O",
             "Select a request, follow its critical path, and inspect file and raw correlation evidence.",
         );
-        info_banner(
-            ui,
-            "Exact = direct request/tag association. Probable = time + LBA/size/thread correlation. UIC is context-only and is never added as command latency.",
-        );
+        ui.small("Explain a selected request: queue wait, device time, and the evidence linking it to a file. Use Explore to compare many requests.");
         ui.add_space(10.0);
 
-        card_frame().show(ui, |ui| {
+        ui.collapsing("Choose another request · newest 500", |ui| {
             ui.label(
                 RichText::new("RECENT REQUESTS")
                     .size(10.0)
                     .strong()
-                    .color(MUTED),
+                    .color(muted()),
             );
-            let requests = self.analyzer.completed_ios();
+            let requests = self.analysis().completed_ios();
             let row_count = requests.len().min(500);
             let mut selection = self.selected_pipeline_request;
             egui::ScrollArea::vertical()
@@ -1746,16 +2297,16 @@ impl StudioApp {
                                 let request = &requests[requests.len() - 1 - position];
                                 if ui
                                     .selectable_label(
-                                        selection == Some(request.issue.request_id),
+                                        selection == Some(selection_key(request)),
                                         format!("#{}", request.issue.request_id),
                                     )
                                     .clicked()
                                 {
-                                    selection = Some(request.issue.request_id);
+                                    selection = Some(selection_key(request));
                                 }
                                 ui.label(operation_label(request.issue.operation));
                                 ui.label(format_bytes(request.issue.bytes as u64));
-                                ui.label(format_duration(request.total_latency_ns));
+                                ui.label(format_latency(request.total_latency_ns));
                                 ui.label(request.issue.pid.to_string());
                                 ui.label(&request.issue.comm);
                                 ui.end_row();
@@ -1769,7 +2320,7 @@ impl StudioApp {
                         requests.len()
                     ))
                     .small()
-                    .color(MUTED),
+                    .color(muted()),
                 );
             }
             self.selected_pipeline_request = selection;
@@ -1778,36 +2329,104 @@ impl StudioApp {
 
         let selected = self
             .selected_pipeline_request
-            .and_then(|request_id| {
-                self.analyzer
+            .and_then(|request_key| {
+                self.analysis()
                     .completed_ios()
                     .iter()
                     .rev()
-                    .find(|io| io.issue.request_id == request_id)
+                    .find(|io| selection_key(io) == request_key)
             })
             .cloned()
-            .or_else(|| self.analyzer.completed_ios().last().cloned());
+            .or_else(|| {
+                self.analysis()
+                    .completed_ios()
+                    .iter()
+                    .max_by_key(|io| io.total_latency_ns)
+                    .cloned()
+            });
         let Some(io) = selected else {
             card_frame().show(ui, |ui| {
                 ui.label(
                     RichText::new("No completed request yet")
                         .strong()
-                        .color(TEXT),
+                        .color(ink()),
                 );
                 ui.label(
                     RichText::new(
-                        "Start the simulator or an eBPF capture to populate the pipeline.",
+                        "Record a session, then choose Explain this I/O in Overview or Open I/O in Explore. Device-counter-only sessions cannot show individual requests.",
                     )
-                    .color(MUTED),
+                    .color(muted()),
                 );
             });
             return;
         };
-        self.selected_pipeline_request = Some(io.issue.request_id);
+        ui.label(format!(
+            "Focused I/O: {} · PID {} / TID {} · device {}:{}",
+            io.issue.comm,
+            identity_number(io.issuer_pid()),
+            identity_number(io.issuer_tid()),
+            io.issue.device_major,
+            io.issue.device_minor
+        ));
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("Total {}", format_latency(io.total_latency_ns)));
+            ui.label(format!(
+                "Queue wait {}",
+                format_latency(io.queue_latency_ns)
+            ));
+            ui.label(format!(
+                "Issue to completion {}",
+                format_latency(io.device_latency_ns)
+            ));
+        });
+        ui.small("Queue: insert to issue, when measured. The device/driver interval is issue to completion. No request chosen? This page starts with the slowest in the current filters.");
+        if let Some(evidence) = &io.evidence {
+            ui.heading("Perfetto block observation");
+            ui.label(format!(
+                "Timing: {:?} · {}",
+                evidence.timing_confidence, evidence.reason
+            ));
+            ui.label(format!(
+                "Raw completion record {} · issue candidates {:?}",
+                evidence.record_id, evidence.issue_record_candidates
+            ));
+            ui.label(format!(
+                "Issuer PID {} / TID {}",
+                io.issuer_pid()
+                    .map_or("unavailable".into(), |v| v.to_string()),
+                io.issuer_tid()
+                    .map_or("unavailable".into(), |v| v.to_string())
+            ));
+            if let Some(name) = &evidence.process_name {
+                ui.label(format!("Process metadata candidate: {name}"));
+            }
+            ui.label("FilePath: Unresolved. Perfetto block tracepoints provide device/sector identity, not a file or inode mapping. Kernel request IDs and lower-layer cause attribution are unavailable.");
+            ui.label(format!(
+                "Device {}:{} · sector {} · {} · {}",
+                io.issue.device_major,
+                io.issue.device_minor,
+                io.issue.sector,
+                operation_label(io.issue.operation),
+                format_bytes(io.issue.bytes as u64)
+            ));
+            if ui.button("Back to Explore").clicked() {
+                self.page = Page::Explore;
+            }
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Explore this issuer").clicked() {
+                self.open_finding(FindingAction::Issuer(io.issue.pid));
+            }
+            if ui.button("Back to Overview").clicked() {
+                self.page = Page::Overview;
+            }
+        });
+        self.selected_pipeline_request = Some(selection_key(&io));
         let cache_valid = self.pipeline_view.as_ref().is_some_and(|view| {
             (view.generation == self.analysis_generation
                 || (self.is_running() && view.built_at.elapsed() < LIVE_ANALYSIS_REFRESH))
-                && view.request_id == io.issue.request_id
+                && selection_key(&view.io) == selection_key(&io)
         });
         if !cache_valid {
             self.rebuild_pipeline_view(io);
@@ -1829,7 +2448,7 @@ impl StudioApp {
 
         card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("REQUEST").size(10.0).strong().color(MUTED));
+                ui.label(RichText::new("REQUEST").size(10.0).strong().color(muted()));
                 ui.label(
                     RichText::new(format!(
                         "#{} · {} · {} · sector {}",
@@ -1847,7 +2466,7 @@ impl StudioApp {
                         "Measured coverage {}",
                         format_duration(pipeline.accounted_ns)
                     ))
-                    .color(GREEN),
+                    .color(green()),
                 );
                 ui.label(
                     RichText::new(format!(
@@ -1855,13 +2474,13 @@ impl StudioApp {
                         format_duration(pipeline.unaccounted_ns)
                     ))
                     .color(if pipeline.unaccounted_ns == 0 {
-                        MUTED
+                        muted()
                     } else {
-                        AMBER
+                        amber()
                     }),
                 );
                 ui.label(format!(
-                    "Critical path {}",
+                    "Related graph critical path {} (can extend beyond this block request)",
                     format_duration(graph_metrics.critical_path_ns)
                 ));
                 if !graph_metrics.unaccounted.is_empty() {
@@ -1871,7 +2490,7 @@ impl StudioApp {
                             graph_metrics.unaccounted.len(),
                             graph_metrics.unaccounted[0].reason
                         ))
-                        .color(AMBER),
+                        .color(amber()),
                     );
                 }
             });
@@ -1882,10 +2501,10 @@ impl StudioApp {
                 RichText::new("FILE ORIGIN")
                     .size(10.0)
                     .strong()
-                    .color(MUTED),
+                    .color(muted()),
             );
             if origins.is_empty() {
-                ui.label(RichText::new("Unattributed — no unique evidence").color(AMBER));
+                ui.label(RichText::new("Unattributed — no unique evidence").color(amber()));
             } else {
                 for origin in &origins {
                     let label = origin
@@ -1894,14 +2513,17 @@ impl StudioApp {
                         .and_then(|path| path.path.clone())
                         .unwrap_or_else(|| origin.file.fallback_label());
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(label).monospace().color(TEXT));
+                        ui.label(RichText::new(label).monospace().color(ink()));
                         status_pill(
                             ui,
-                            edge_confidence_label(origin.confidence),
-                            match origin.confidence {
-                                EdgeConfidence::Exact => GREEN,
-                                EdgeConfidence::Probable | EdgeConfidence::ProbableAsync => AMBER,
-                                EdgeConfidence::ContextOnly => MUTED,
+                            match path_confidence(std::slice::from_ref(origin)) {
+                                PathConfidence::Exact => "Exact",
+                                PathConfidence::Probable => "Probable",
+                                PathConfidence::Unresolved => "Unresolved",
+                            },
+                            match path_confidence(std::slice::from_ref(origin)) {
+                                PathConfidence::Exact => green(),
+                                _ => amber(),
                             },
                         );
                     });
@@ -1909,7 +2531,12 @@ impl StudioApp {
             }
             if let Some(reason) = slow_reason {
                 ui.separator();
-                ui.label(RichText::new("WHY SLOW?").size(10.0).strong().color(MUTED));
+                ui.label(
+                    RichText::new("WHY SLOW?")
+                        .size(10.0)
+                        .strong()
+                        .color(muted()),
+                );
                 ui.label(format!(
                     "{} is {} above the cohort median ({} samples, {}).",
                     reason.stage,
@@ -1923,7 +2550,7 @@ impl StudioApp {
 
         let origin = pipeline.start_ts_ns;
         card_frame().show(ui, |ui| {
-            Plot::new("pipeline-waterfall")
+            studio_plot("pipeline-waterfall")
                 .height(390.0)
                 .x_axis_label("Time from pipeline start (ms)")
                 .y_axis_label("Layer (Syscall → UIC)")
@@ -1943,7 +2570,7 @@ impl StudioApp {
                         }
                     }
                 });
-            ui.label(RichText::new("Drag to pan · wheel to zoom · double-click to reset. Nested bars are not summed; coverage uses interval union.").small().color(MUTED));
+            ui.label(RichText::new("Drag to pan · wheel to zoom · double-click to reset. Nested bars are not summed; coverage uses interval union.").small().color(muted()));
         });
 
         ui.add_space(10.0);
@@ -1958,7 +2585,11 @@ impl StudioApp {
                     ui.end_row();
                     for span in &pipeline.spans {
                         ui.label(pipeline_layer_label(span.layer));
-                        ui.label(format_duration(span.duration_ns()));
+                        ui.label(if span.duration_observed {
+                            format_duration(span.duration_ns())
+                        } else {
+                            "Not measured".into()
+                        });
                         ui.label(confidence_label(span.confidence));
                         ui.label(&span.source);
                         let command = match (span.opcode, span.status) {
@@ -1989,13 +2620,20 @@ impl StudioApp {
                             ),
                             ("Sector", io.issue.sector.to_string()),
                             ("Bytes", io.issue.bytes.to_string()),
-                            ("PID / TID", format!("{} / {}", io.issue.pid, io.issue.tid)),
+                            (
+                                "PID / TID",
+                                format!(
+                                    "{} / {}",
+                                    identity_number(io.issuer_pid()),
+                                    identity_number(io.issuer_tid())
+                                ),
+                            ),
                             ("Process", io.issue.comm.clone()),
                             ("Queue latency", format_latency(io.queue_latency_ns)),
-                            ("Device latency", format_duration(io.device_latency_ns)),
-                            ("Total latency", format_duration(io.total_latency_ns)),
+                            ("Device latency", format_latency(io.device_latency_ns)),
+                            ("Total latency", format_latency(io.total_latency_ns)),
                         ] {
-                            ui.label(RichText::new(name).color(MUTED));
+                            ui.label(RichText::new(name).color(muted()));
                             ui.label(RichText::new(value).monospace());
                             ui.end_row();
                         }
@@ -2097,15 +2735,17 @@ impl StudioApp {
                     }
                     ui.end_row();
                 });
-            let files = self.analyzer.file_ios();
-            let row_count = files.len().min(1_000);
+            let files = self.analysis().file_ios();
+            let positions:Vec<usize>=self.file_evidence_positions.clone().unwrap_or_else(||(0..files.len()).collect());
+            let row_count = positions.len();
+            ui.label(format!("{} file-operation records · {}",row_count,if self.file_evidence_positions.is_some(){"evidence for current filtered block requests; identity/time candidates, not extra exact block links"}else{"session file operations"}));
             egui::ScrollArea::vertical().show_rows(ui, 27.0, row_count, |ui, range| {
                 egui::Grid::new("file-ios-rows")
                     .striped(true)
                     .spacing([16.0, 9.0])
                     .show(ui, |ui| {
                         for position in range {
-                            let file = &files[files.len() - 1 - position];
+                            let file = &files[positions[positions.len() - 1 - position]];
                             ui.label(file.end_ts_ns.to_string());
                             ui.label(operation_label(file.operation));
                             ui.label(format_bytes(file.requested_bytes));
@@ -2134,75 +2774,128 @@ impl StudioApp {
         });
     }
 
-    fn table_ui(&self, ui: &mut egui::Ui) {
+    fn table_ui(&mut self, ui: &mut egui::Ui) {
         section_header(
             ui,
             "Completed block I/O",
-            "Newest completed requests from the current or loaded session.",
+            "Current filters · all loaded detail rows · focus an Open button and press Enter for full I/O and FilePath evidence",
         );
+        let mut open = None;
+        let mut table_focused = false;
         card_frame().show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    egui::Grid::new("recent-ios")
-                        .striped(true)
-                        .spacing([15.0, 9.0])
-                        .show(ui, |ui| {
-                            for heading in [
-                                "Time ns",
-                                "Op",
-                                "Access",
-                                "Size",
-                                "Bytes",
-                                "Sector",
-                                "Queue",
-                                "Device",
-                                "Total",
-                                "File / Origin",
-                                "PID",
-                                "Comm",
-                            ] {
-                                ui.strong(heading);
+            let items = self.analysis().completed_ios();
+            let title = ui.label(format!(
+                "{} requests · newest first · rows render as you scroll",
+                items.len()
+            ));
+            if self.render_qa.output.is_some()
+                && std::env::var_os("ANDROID_EBPF_QA_TABLE_KEYBOARD").is_some()
+                && self.render_qa.input_step == 0
+            {
+                title.scroll_to_me(Some(egui::Align::Min));
+            }
+            egui::ScrollArea::both()
+                .id_salt("completed-io-table")
+                .max_height(320.0)
+                .show_rows(ui, 28.0, items.len() + 1, |ui, range| {
+                    for position in range {
+                        ui.horizontal(|ui| {
+                            if position == 0 {
+                                for (title, width) in [
+                                    ("Details", 85.0),
+                                    ("Time ns", 145.0),
+                                    ("Op", 65.0),
+                                    ("Access", 100.0),
+                                    ("Bytes", 80.0),
+                                    ("Sector", 110.0),
+                                    ("Device", 85.0),
+                                    ("Queue", 90.0),
+                                    ("Device latency", 110.0),
+                                    ("Total latency", 110.0),
+                                    ("File / Origin", 260.0),
+                                    ("Confidence", 100.0),
+                                    ("PID / TID", 115.0),
+                                    ("Process", 140.0),
+                                ] {
+                                    ui.add_sized(
+                                        [width, 25.0],
+                                        egui::Label::new(RichText::new(title).strong()),
+                                    );
+                                }
+                                return;
                             }
-                            ui.end_row();
-                            for io in self.recent.iter().rev().take(200) {
-                                ui.label(io.completion.ts_ns.to_string());
-                                ui.label(format!("{:?}", io.issue.operation));
-                                ui.label(access_label(io.access_pattern));
-                                ui.label(size_label(io.size_class));
-                                ui.label(io.issue.bytes.to_string());
-                                ui.label(io.issue.sector.to_string());
-                                ui.label(format_latency(io.queue_latency_ns));
-                                ui.label(format_latency(Some(io.device_latency_ns)));
-                                ui.label(format_latency(Some(io.total_latency_ns)));
-                                let graph = self.analyzer.transaction_for(io);
-                                let origins = graph
-                                    .nodes
-                                    .iter()
-                                    .find(|node| node.kind == IoNodeKind::BlockRequest)
-                                    .map(|node| graph.file_origins_for(node.node_id))
-                                    .unwrap_or_default();
-                                ui.label(if origins.is_empty() {
-                                    "Unattributed".into()
-                                } else if origins.len() > 1 {
-                                    format!("{} files", origins.len())
-                                } else {
-                                    origins[0]
-                                        .path
-                                        .as_ref()
-                                        .and_then(|path| path.path.clone())
-                                        .unwrap_or_else(|| origins[0].file.fallback_label())
-                                });
-                                ui.label(io.issue.pid.to_string());
-                                ui.label(&io.issue.comm);
-                                ui.end_row();
+                            let io = &items[items.len() - position];
+                            let key = selection_key(io);
+                            let response = ui
+                                .push_id(key, |ui| {
+                                    ui.add_sized([85.0, 25.0], egui::Button::new("Open I/O"))
+                                })
+                                .inner;
+                            if self.render_qa.output.is_some()
+                                && std::env::var_os("ANDROID_EBPF_QA_TABLE_KEYBOARD").is_some()
+                                && position == 1
+                                && self.render_qa.input_step == 0
+                            {
+                                response.request_focus();
+                                response.scroll_to_me(Some(egui::Align::Center));
+                                table_focused = response.has_focus();
+                            }
+                            if response.clicked() {
+                                open = Some(key);
+                            }
+                            let graph = self.analysis().transaction_for(io);
+                            let origins = block_file_origins(&graph);
+                            let file = if origins.is_empty() {
+                                "Unresolved · see I/O details".into()
+                            } else if origins.len() > 1 {
+                                format!("{} candidates · see I/O details", origins.len())
+                            } else {
+                                origins[0]
+                                    .path
+                                    .as_ref()
+                                    .and_then(|p| p.path.clone())
+                                    .unwrap_or_else(|| origins[0].file.fallback_label())
+                            };
+                            for (value, width) in [
+                                (io.completion.ts_ns.to_string(), 145.0),
+                                (operation_label(io.issue.operation).into(), 65.0),
+                                (access_label(io.access_pattern).into(), 100.0),
+                                (io.issue.bytes.to_string(), 80.0),
+                                (io.issue.sector.to_string(), 110.0),
+                                (
+                                    format!("{}:{}", io.issue.device_major, io.issue.device_minor),
+                                    85.0,
+                                ),
+                                (format_latency(io.queue_latency_ns), 90.0),
+                                (format_latency(io.device_latency_ns), 110.0),
+                                (format_latency(io.total_latency_ns), 110.0),
+                                (file, 260.0),
+                                (format!("{:?}", path_confidence(&origins)), 100.0),
+                                (
+                                    format!(
+                                        "{} / {}",
+                                        identity_number(io.issuer_pid()),
+                                        identity_number(io.issuer_tid())
+                                    ),
+                                    115.0,
+                                ),
+                                (io.issue.comm.clone(), 140.0),
+                            ] {
+                                ui.add_sized([width, 25.0], egui::Label::new(&value).truncate())
+                                    .on_hover_text(value);
                             }
                         });
+                    }
                 });
         });
+        self.render_qa.table_button_focused |= table_focused;
+        if let Some(key) = open {
+            self.selected_pipeline_request = Some(key);
+            self.page = Page::Investigate;
+        }
     }
 
-    fn compare_ui(&mut self, ui: &mut egui::Ui) {
+    fn compare_totals_ui(&mut self, ui: &mut egui::Ui) {
         section_header(
             ui,
             "Compare sessions",
@@ -2210,6 +2903,18 @@ impl StudioApp {
         );
         card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                let pin = ui.add_enabled(
+                    !self.is_running()
+                        && !self.query.active()
+                        && !self.analyzer.completed_ios().is_empty(),
+                    egui::Button::new("Keep current as baseline"),
+                );
+                self.render_qa
+                    .inspector_buttons
+                    .insert("Keep baseline".into(), pin.rect.center());
+                if pin.clicked() {
+                    self.pin_comparison();
+                }
                 if ui.button("Open baseline session").clicked() {
                     self.open_comparison_session();
                 }
@@ -2218,20 +2923,29 @@ impl StudioApp {
                 }
                 ui.label(
                     RichText::new("Delta = Current − Baseline; lower latency is normally better.")
-                        .color(MUTED),
+                        .color(muted()),
                 );
             });
         });
         ui.add_space(10.0);
 
+        if self.query.active() {
+            ui.label("Comparison uses complete retained session detail. Clear request filters before comparing with a whole-session baseline.");
+            if ui.button("Use full session for comparison").clicked() {
+                self.query = AnalysisFilter::default();
+                self.invalidate_query();
+                self.rebuild_filtered();
+            }
+            return;
+        }
         let Some(baseline) = self.comparison.as_ref() else {
             card_frame().show(ui, |ui| {
                 ui.label(RichText::new("No baseline loaded").strong());
                 ui.label(
                     RichText::new(
-                        "Open an earlier NDJSON session to compare workload, latency, queue pressure, and attribution.",
+                        "Keep this run as the baseline, then record or open your next run. Compare latency and transferred bytes to check a workload or configuration change. You can also open an earlier baseline file.",
                     )
-                    .color(MUTED),
+                    .color(muted()),
                 );
             });
             return;
@@ -2257,7 +2971,7 @@ impl StudioApp {
                     RichText::new(
                         "Choose a session containing completed block or file I/O events.",
                     )
-                    .color(MUTED),
+                    .color(muted()),
                 );
             });
             return;
@@ -2267,12 +2981,22 @@ impl StudioApp {
                 ui.label(RichText::new("Current session has no analyzable I/O").strong());
                 ui.label(
                     RichText::new("Open or record the current session before calculating deltas.")
-                        .color(MUTED),
+                        .color(muted()),
                 );
             });
             return;
         }
 
+        ui.label("Compare equivalent workloads and recording durations; a different request mix does not prove a device or app improvement.");
+        if let Some((before, after)) = baseline_summary.p95_latency_ns.zip(current.p95_latency_ns) {
+            ui.strong(format!(
+                "P95 latency: {}",
+                relative_delta_percent(before, after).map_or(
+                    "percentage unavailable (zero baseline)".into(),
+                    |v| format!("{v:+.1}% versus baseline")
+                )
+            ));
+        }
         info_banner(
             ui,
             &format!(
@@ -2330,13 +3054,19 @@ impl StudioApp {
                         baseline_summary.p99_latency_ns,
                         current.p99_latency_ns,
                     );
-                    comparison_row(
-                        ui,
-                        "Max queue depth",
-                        baseline_summary.max_queue_depth as u64,
-                        current.max_queue_depth as u64,
-                        |value| value.to_string(),
+                    ui.label("Max queue depth");
+                    for value in [baseline_summary.max_queue_depth, current.max_queue_depth] {
+                        ui.label(value.map_or("Not measured".into(), |n| n.to_string()));
+                    }
+                    ui.label(
+                        baseline_summary
+                            .max_queue_depth
+                            .zip(current.max_queue_depth)
+                            .map_or("—".into(), |(a, b)| {
+                                format!("{:+}", b as i128 - a as i128)
+                            }),
                     );
+                    ui.end_row();
                     comparison_ratio_row(
                         ui,
                         "File attribution",
@@ -2351,9 +3081,10 @@ impl StudioApp {
     }
 
     fn diagnostics_ui(&mut self, ui: &mut egui::Ui) {
+        self.capture_quality_ui(ui);
         section_header(
             ui,
-            "Structured diagnostics",
+            "Diagnostic records",
             "Capture, probe, decode and correlation records for the current session.",
         );
         card_frame().show(ui, |ui| {
@@ -2384,7 +3115,7 @@ impl StudioApp {
                     RichText::new("UI PERFORMANCE")
                         .size(10.0)
                         .strong()
-                        .color(MUTED),
+                        .color(muted()),
                 );
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
@@ -2400,7 +3131,7 @@ impl StudioApp {
                     "CPU time spent building each UI update; this excludes GPU presentation time.",
                 )
                 .small()
-                .color(MUTED),
+                .color(muted()),
             );
             ui.add_space(8.0);
             egui::Grid::new("ui-performance-grid")
@@ -2452,7 +3183,7 @@ impl StudioApp {
                     RichText::new("PROBE STATUS")
                         .size(10.0)
                         .strong()
-                        .color(MUTED),
+                        .color(muted()),
                 );
                 egui::Grid::new("probe-status")
                     .striped(true)
@@ -2518,344 +3249,322 @@ impl StudioApp {
 }
 
 impl eframe::App for StudioApp {
+    fn persist_egui_memory(&self) -> bool {
+        self.render_qa.output.is_none()
+    }
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.qa_input(raw);
+    }
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if self.render_qa.output.is_none() {
+            eframe::set_value(storage, "theme", &self.theme);
+            eframe::set_value(storage, "plot-style-v1", &self.plot_style);
+            eframe::set_value(storage, "plot-color-category-v1", &self.group_by);
+        }
+    }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ui_started = Instant::now();
         self.drain_messages();
+        if ui.ctx().input(|i| i.viewport().close_requested()) && self.is_running() {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_after_capture = true;
+            self.stop();
+        }
+        if self.close_after_capture && !self.is_running() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if self.is_running() || !self.rx.is_empty() {
             ui.ctx().request_repaint_after(Duration::from_millis(33));
         }
-        apply_theme(ui.ctx());
+        if !self.is_running()
+            && self
+                .last_discovery
+                .is_none_or(|v| v.elapsed() > Duration::from_secs(3))
+        {
+            self.refresh();
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(250));
+        apply_theme(ui.ctx(), self.theme);
+        let compact = ui.ctx().content_rect().width() < 1100.0;
 
-        egui::Panel::top("app-header")
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(22, 14))
-                    .stroke(Stroke::new(1.0, BORDER)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("◈").size(26.0).color(ACCENT));
-                    ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("ANDROID eBPF STUDIO")
-                                .size(18.0)
-                                .strong()
-                                .color(TEXT),
-                        );
-                        ui.label(
-                            RichText::new("Storage observability workspace")
-                                .size(11.0)
-                                .color(MUTED),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        status_pill(
-                            ui,
-                            &self.status,
-                            if self.is_running() { GREEN } else { ACCENT },
-                        );
-                        if ui
-                            .add_enabled(
-                                self.session_path.is_some(),
-                                egui::Button::new("Export CSV"),
-                            )
-                            .clicked()
-                        {
-                            self.export_csv();
-                        }
-                        if ui.button("Open session").clicked() {
-                            self.open_session();
-                        }
-                    });
-                });
-            });
+        self.render_qa.regions.clear();
+        self.header_ui(ui, compact);
 
-        egui::Panel::left("navigation")
-            .exact_size(244.0)
-            .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(egui::Margin::same(16))
-                    .stroke(Stroke::new(1.0, BORDER)),
-            )
-            .show(ui, |ui| {
-                ui.label(RichText::new("WORKFLOW").size(10.0).strong().color(MUTED));
-                ui.add_space(10.0);
-                workflow_step(
-                    ui,
-                    1,
-                    "Connect device",
-                    self.setup_step() == SetupStep::Connect,
-                    self.selected_serial.is_some(),
-                );
-                workflow_step(
-                    ui,
-                    2,
-                    "Verify capabilities",
-                    self.setup_step() == SetupStep::Verify,
-                    self.preflight
-                        .as_ref()
-                        .is_some_and(PreflightReport::full_ebpf_ready),
-                );
-                workflow_step(
-                    ui,
-                    3,
-                    "Capture & analyze",
-                    self.setup_step() == SetupStep::Capture,
-                    self.is_running(),
-                );
-                ui.add_space(18.0);
-
-                ui.label(
-                    RichText::new("TARGET DEVICE")
-                        .size(10.0)
-                        .strong()
-                        .color(MUTED),
-                );
-                ui.add_space(7.0);
-                egui::ComboBox::from_id_salt("device")
-                    .selected_text(
-                        self.selected_serial
-                            .as_deref()
-                            .unwrap_or("No device selected"),
-                    )
-                    .width(210.0)
-                    .show_ui(ui, |ui| {
-                        for device in &self.devices {
-                            ui.selectable_value(
-                                &mut self.selected_serial,
-                                Some(device.serial.clone()),
-                                format!(
-                                    "{} · {}",
-                                    device.model.as_deref().unwrap_or("Android"),
-                                    device.serial
-                                ),
+        if !compact {
+            egui::Panel::left("navigation")
+                .exact_size(244.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(panel())
+                        .inner_margin(egui::Margin::same(16))
+                        .stroke(Stroke::new(1.0, border())),
+                )
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("navigation-scroll")
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("TARGET DEVICE")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(muted()),
                             );
-                        }
-                    });
-                ui.add_space(8.0);
-                if ui
-                    .add_sized([210.0, 34.0], egui::Button::new("↻  Refresh ADB devices"))
-                    .clicked()
-                {
-                    self.refresh();
-                }
-                if ui
-                    .add_enabled(
-                        self.selected_serial.is_some(),
-                        egui::Button::new("✓  Run preflight").min_size(egui::vec2(210.0, 34.0)),
-                    )
-                    .clicked()
-                {
-                    self.preflight();
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("LOG LEVEL").size(10.0).color(MUTED));
-                    egui::ComboBox::from_id_salt("capture-log-level")
-                        .selected_text(diagnostic_level_arg(self.capture_log_level))
-                        .show_ui(ui, |ui| {
-                            for level in [
-                                DiagnosticLevel::Info,
-                                DiagnosticLevel::Debug,
-                                DiagnosticLevel::Trace,
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.capture_log_level,
-                                    level,
-                                    diagnostic_level_arg(level),
-                                );
+                            ui.add_space(7.0);
+                            ui.add_enabled_ui(!self.is_running(), |ui| {
+                                let before = self.selected_serial.clone();
+                                egui::ComboBox::from_id_salt("device")
+                                    .selected_text(
+                                        self.selected_serial
+                                            .as_deref()
+                                            .unwrap_or("No device selected"),
+                                    )
+                                    .width(210.0)
+                                    .show_ui(ui, |ui| {
+                                        for device in self
+                                            .devices
+                                            .iter()
+                                            .filter(|d| d.state == DeviceState::Device)
+                                        {
+                                            ui.selectable_value(
+                                                &mut self.selected_serial,
+                                                Some(device.serial.clone()),
+                                                format!(
+                                                    "{} · {}",
+                                                    device.model.as_deref().unwrap_or("Android"),
+                                                    device.serial
+                                                ),
+                                            );
+                                        }
+                                    });
+                                if before != self.selected_serial {
+                                    self.preflight = None;
+                                }
+                            });
+                            ui.add_space(8.0);
+                            if ui
+                                .add_sized(
+                                    [210.0, 34.0],
+                                    egui::Button::new("↻  Refresh ADB devices"),
+                                )
+                                .clicked()
+                            {
+                                self.refresh();
                             }
-                        });
-                });
-                ui.add_space(6.0);
-                ui.collapsing("LIVE FILTER & MODE", |ui| {
-                    egui::ComboBox::from_id_salt("capture-mode")
-                        .selected_text(capture_mode_label(self.capture_mode))
-                        .width(190.0)
-                        .show_ui(ui, |ui| {
-                            for mode in [
-                                CaptureMode::Basic,
-                                CaptureMode::Balanced,
-                                CaptureMode::Deep,
-                                CaptureMode::RawAll,
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.capture_mode,
-                                    mode,
-                                    capture_mode_label(mode),
-                                );
-                            }
-                        });
-                    ui.horizontal(|ui| {
-                        ui.label("PID (0 = all)");
-                        ui.add(egui::DragValue::new(&mut self.filter_pid).range(0..=u32::MAX));
-                    });
-                    egui::ComboBox::from_id_salt("filter-operation")
-                        .selected_text(
-                            self.filter_operation
-                                .map_or("All operations".into(), |value| format!("{value:?}")),
-                        )
-                        .width(190.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.filter_operation, None, "All operations");
-                            for operation in [IoOperation::Read, IoOperation::Write] {
-                                ui.selectable_value(
-                                    &mut self.filter_operation,
-                                    Some(operation),
-                                    format!("{operation:?}"),
-                                );
-                            }
-                        });
-                    ui.horizontal(|ui| {
-                        ui.label("Min bytes");
-                        ui.add(
-                            egui::DragValue::new(&mut self.filter_min_bytes).range(0..=u32::MAX),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Slow I/O ms");
-                        ui.add(
-                            egui::DragValue::new(&mut self.slow_threshold_ms)
-                                .speed(0.1)
-                                .range(0.001..=60_000.0),
-                        );
-                    });
-                    if ui
-                        .add_enabled(
-                            self.capture.is_some(),
-                            egui::Button::new("Apply live config")
-                                .min_size(egui::vec2(190.0, 30.0)),
-                        )
-                        .clicked()
-                    {
-                        self.apply_capture_control();
-                    }
-                    ui.label(RichText::new(&self.control_status).size(10.0).color(MUTED));
-                    if self.capture_mode == CaptureMode::RawAll {
-                        ui.label(
-                            RichText::new("RawAll can generate high event and UI load")
-                                .size(10.0)
-                                .color(AMBER),
-                        );
-                    }
-                });
-                let can_start = self
-                    .preflight
-                    .as_ref()
-                    .is_some_and(PreflightReport::full_ebpf_ready)
-                    && !self.is_running();
-                if ui
-                    .add_enabled(
-                        can_start,
-                        egui::Button::new(RichText::new("▶  Start eBPF capture").color(TEXT))
-                            .fill(ACCENT)
-                            .min_size(egui::vec2(210.0, 38.0)),
-                    )
-                    .clicked()
-                {
-                    self.start_device();
-                }
-                if ui
-                    .add_enabled(
-                        !self.is_running(),
-                        egui::Button::new("Run simulator").min_size(egui::vec2(210.0, 32.0)),
-                    )
-                    .clicked()
-                {
-                    self.start_simulator();
-                }
-                if ui
-                    .add_enabled(
-                        self.is_running(),
-                        egui::Button::new(RichText::new("■  Stop capture").color(RED))
-                            .min_size(egui::vec2(210.0, 34.0)),
-                    )
-                    .clicked()
-                {
-                    self.stop();
-                }
+                            ui.label("Start automatically detects root and tracking support.");
+                            ui.add_space(16.0);
+                            ui.label(RichText::new("ANALYSIS").size(10.0).strong().color(muted()));
+                            ui.add_space(6.0);
+                            nav_item(
+                                ui,
+                                &mut self.page,
+                                Page::Overview,
+                                "▦",
+                                "Overview",
+                                "What matters in this run",
+                            );
+                            nav_item(
+                                ui,
+                                &mut self.page,
+                                Page::Investigate,
+                                "⇢",
+                                "Investigate",
+                                "Explain one I/O",
+                            );
+                            nav_item(
+                                ui,
+                                &mut self.page,
+                                Page::Explore,
+                                "⌁",
+                                "Explore",
+                                "Narrow down patterns",
+                            );
+                            nav_item(
+                                ui,
+                                &mut self.page,
+                                Page::Compare,
+                                "⇄",
+                                "Compare",
+                                "Baseline vs current",
+                            );
+                            ui.add_space(12.0);
+                            ui.label(
+                                RichText::new("OPERATIONS")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(muted()),
+                            );
+                            ui.add_space(4.0);
+                            nav_item(
+                                ui,
+                                &mut self.page,
+                                Page::Diagnostics,
+                                "⚙",
+                                "Diagnostics",
+                                "Trust, loss and capture errors",
+                            );
 
-                ui.add_space(20.0);
-                ui.separator();
-                ui.add_space(12.0);
-                ui.label(RichText::new("ANALYSIS").size(10.0).strong().color(MUTED));
-                ui.add_space(6.0);
-                nav_item(
-                    ui,
-                    &mut self.page,
-                    Page::Overview,
-                    "▦",
-                    "Overview",
-                    "Findings and data quality",
-                );
-                nav_item(
-                    ui,
-                    &mut self.page,
-                    Page::Investigate,
-                    "⇢",
-                    "Investigate",
-                    "Request, file and pipeline",
-                );
-                nav_item(
-                    ui,
-                    &mut self.page,
-                    Page::Explore,
-                    "⌁",
-                    "Explore",
-                    "Presets, axes and groups",
-                );
-                nav_item(
-                    ui,
-                    &mut self.page,
-                    Page::Compare,
-                    "⇄",
-                    "Compare",
-                    "Baseline vs current",
-                );
-                ui.add_space(12.0);
-                ui.label(RichText::new("OPERATIONS").size(10.0).strong().color(MUTED));
-                ui.add_space(4.0);
-                nav_item(
-                    ui,
-                    &mut self.page,
-                    Page::Diagnostics,
-                    "⚙",
-                    "Diagnostics",
-                    "Probe and correlation logs",
-                );
+                            ui.add_space(12.0);
+                            ui.collapsing("Advanced capture settings", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("LOG LEVEL").size(10.0).color(muted()));
+                                    egui::ComboBox::from_id_salt("capture-log-level")
+                                        .selected_text(diagnostic_level_arg(self.capture_log_level))
+                                        .show_ui(ui, |ui| {
+                                            for level in [
+                                                DiagnosticLevel::Info,
+                                                DiagnosticLevel::Debug,
+                                                DiagnosticLevel::Trace,
+                                            ] {
+                                                ui.selectable_value(
+                                                    &mut self.capture_log_level,
+                                                    level,
+                                                    diagnostic_level_arg(level),
+                                                );
+                                            }
+                                        });
+                                });
+                                ui.add_space(6.0);
+                                ui.collapsing("LIVE FILTER & MODE", |ui| {
+                                    egui::ComboBox::from_id_salt("capture-mode")
+                                        .selected_text(capture_mode_label(self.capture_mode))
+                                        .width(190.0)
+                                        .show_ui(ui, |ui| {
+                                            for mode in [
+                                                CaptureMode::Basic,
+                                                CaptureMode::Balanced,
+                                                CaptureMode::Deep,
+                                                CaptureMode::RawAll,
+                                            ] {
+                                                ui.selectable_value(
+                                                    &mut self.capture_mode,
+                                                    mode,
+                                                    capture_mode_label(mode),
+                                                );
+                                            }
+                                        });
+                                    ui.horizontal(|ui| {
+                                        ui.label("PID (0 = all)");
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.filter_pid)
+                                                .range(0..=u32::MAX),
+                                        );
+                                    });
+                                    egui::ComboBox::from_id_salt("filter-operation")
+                                        .selected_text(
+                                            self.filter_operation
+                                                .map_or("All operations".into(), |value| {
+                                                    format!("{value:?}")
+                                                }),
+                                        )
+                                        .width(190.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.filter_operation,
+                                                None,
+                                                "All operations",
+                                            );
+                                            for operation in [IoOperation::Read, IoOperation::Write]
+                                            {
+                                                ui.selectable_value(
+                                                    &mut self.filter_operation,
+                                                    Some(operation),
+                                                    format!("{operation:?}"),
+                                                );
+                                            }
+                                        });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Min bytes");
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.filter_min_bytes)
+                                                .range(0..=u32::MAX),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Slow I/O ms");
+                                        ui.add(
+                                            egui::DragValue::new(&mut self.slow_threshold_ms)
+                                                .speed(0.1)
+                                                .range(0.001..=60_000.0),
+                                        );
+                                    });
+                                    if ui
+                                        .add_enabled(
+                                            self.capture.is_some(),
+                                            egui::Button::new("Apply live config")
+                                                .min_size(egui::vec2(190.0, 30.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.apply_capture_control();
+                                    }
+                                    ui.label(
+                                        RichText::new(&self.control_status)
+                                            .size(10.0)
+                                            .color(muted()),
+                                    );
+                                    if self.capture_mode == CaptureMode::RawAll {
+                                        ui.label(
+                                            RichText::new(
+                                                "RawAll can generate high event and UI load",
+                                            )
+                                            .size(10.0)
+                                            .color(amber()),
+                                        );
+                                    }
+                                });
 
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} received  •  {} rejected",
-                            self.received_events, self.rejected_records
-                        ))
-                        .size(10.0)
-                        .color(MUTED),
-                    );
-                    if let Some(path) = &self.session_path {
-                        ui.label(
-                            RichText::new(
-                                path.file_name()
-                                    .and_then(|v| v.to_str())
-                                    .unwrap_or("session.ndjson"),
-                            )
-                            .size(10.0)
-                            .color(MUTED),
-                        );
-                    }
+                                if ui
+                                    .add_enabled(
+                                        !self.is_running(),
+                                        egui::Button::new("Run simulator (synthetic)"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_simulator();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !self.is_running() && self.selected_serial.is_some(),
+                                        egui::Button::new("Inspect capabilities"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.preflight();
+                                }
+                            });
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} received  •  {} rejected",
+                                        self.received_events, self.rejected_records
+                                    ))
+                                    .size(10.0)
+                                    .color(muted()),
+                                );
+                                if let Some(path) = &self.session_path {
+                                    ui.label(
+                                        RichText::new(
+                                            path.file_name()
+                                                .and_then(|v| v.to_str())
+                                                .unwrap_or("session.ndjson"),
+                                        )
+                                        .size(10.0)
+                                        .color(muted()),
+                                    );
+                                }
+                            });
+                        });
                 });
-            });
+        }
 
         egui::Panel::bottom("diagnostics")
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL)
+                    .fill(panel())
                     .inner_margin(egui::Margin::symmetric(18, 8))
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .stroke(Stroke::new(1.0, border())),
             )
             .show(ui, |ui| {
                 ui.collapsing(format!("Diagnostics  ({})", self.diagnostics.len()), |ui| {
@@ -2875,9 +3584,9 @@ impl eframe::App for StudioApp {
                                     .size(10.0)
                                     .color(
                                         match value.level {
-                                            DiagnosticLevel::Error => RED,
-                                            DiagnosticLevel::Warn => AMBER,
-                                            _ => MUTED,
+                                            DiagnosticLevel::Error => red(),
+                                            DiagnosticLevel::Warn => amber(),
+                                            _ => muted(),
                                         },
                                     ),
                                 );
@@ -2886,31 +3595,50 @@ impl eframe::App for StudioApp {
                 });
             });
 
+        if self.page == Page::Explore {
+            self.selection_panel(ui);
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::same(22)),
+                    .fill(bg())
+                    .inner_margin(egui::Margin::same(14)),
             )
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.page == Page::Overview {
-                        self.metrics_ui(ui);
-                        ui.add_space(20.0);
+                egui::ScrollArea::vertical().id_salt(format!("analysis-page-{:?}-{:?}",self.page,if self.page == Page::Investigate {self.selected_pipeline_request} else {None})).show(ui, |ui| {
+                    if matches!(self.page,Page::Overview|Page::Explore|Page::Investigate){self.reanalysis_ui(ui);}
+                    if self.session_path.is_none() && self.analyzer.completed_ios().is_empty() && self.disk_stats.is_empty() && self.page == Page::Overview {
+                        section_header(ui, "Connect. Start. Stop. Analyze.", "Automatic storage tracing for your Android phone");
+                        ui.add_space(18.0);
+                        ui.label("1. Connect the phone with USB debugging enabled and approve the phone's authorization prompt.");
+                        ui.label("2. Select a target if more than one phone is connected, then choose Start analysis.");
+                        ui.label("3. Run the workload on your phone. Stop & analyze saves the session and opens the results.");
+                        ui.add_space(18.0);
+                        info_banner(ui, "Root and kernel capabilities are checked at every Start. The app prepares tracing automatically and explains FilePath confidence or unsupported metrics. No mapping file or kernel offset is required.");
+                        if self.is_running() { ui.spinner(); ui.label(&self.status); }
+                        return;
                     }
+                    if matches!(self.page,Page::Overview|Page::Explore|Page::Investigate){self.filter_ui(ui);}
+                    if self.phase==CapturePhase::Error && !self.is_running() {self.perfetto_recovery_ui(ui);}
+                    if !self.is_running() && self.source_info.iter().any(|r| matches!(r,WireRecord::SourceInfo{source,..} if source=="perfetto")) {
+                        ui.small("Perfetto block layer · timing matches are Probable; PID/name metadata are snapshot candidates. Missing timing stays unmeasured. FilePath is Unresolved. Device layers may count the same physical I/O more than once.");
+                    }
+                    self.rebuild_filtered();
+
                     match self.page {
-                        Page::Overview => self.summary_ui(ui),
+                        Page::Overview => { if !self.analyzer.completed_ios().is_empty() {self.summary_ui(ui);} else if self.perfetto_pending() { info_banner(ui,"Perfetto is recording. Individual I/O counts, latency and loss statistics will be available after Stop. Device counters below are a separate live source."); if !self.disk_stats.is_empty(){self.diskstats_ui(ui);} } else if self.disk_stats.is_empty() { self.summary_ui(ui); } else { self.diskstats_ui(ui); } },
                         Page::Investigate => self.investigate_ui(ui),
                         Page::Explore => self.explorer_ui(ui),
                         Page::Compare => self.compare_ui(ui),
-                        Page::Diagnostics => self.diagnostics_ui(ui),
+                        Page::Diagnostics => {self.diagnostics_ui(ui); ui.collapsing("Capture source & quality evidence",|ui| {for record in &self.source_info {ui.label(serde_json::to_string_pretty(record).unwrap_or_default());}});},
                     }
-                    if let Some(report) = &self.preflight {
+                    if self.page==Page::Diagnostics && let Some(report) = &self.preflight {
                         ui.add_space(14.0);
                         capability_panel(ui, report);
                     }
                 });
             });
+        self.render_qa_tick(ui.ctx());
         self.performance.observe_ui_update(ui_started.elapsed());
         self.maybe_emit_performance_warning();
     }
@@ -2938,46 +3666,102 @@ fn aggregate_percentile(
         .map(|(lower, upper)| upper.unwrap_or(lower))
 }
 
-fn apply_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = BG;
-    visuals.window_fill = PANEL;
-    visuals.extreme_bg_color = Color32::from_rgb(9, 13, 21);
-    visuals.faint_bg_color = Color32::from_rgb(24, 32, 47);
-    visuals.selection.bg_fill = ACCENT;
-    visuals.widgets.inactive.bg_fill = PANEL_RAISED;
-    visuals.widgets.inactive.weak_bg_fill = PANEL_RAISED;
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(38, 51, 73);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-    visuals.widgets.active.bg_fill = ACCENT;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+    HighContrast,
+}
+thread_local! { static ACTIVE_THEME: std::cell::Cell<ThemeChoice> = const { std::cell::Cell::new(ThemeChoice::Dark) }; }
+fn palette_color(index: usize, dark: Color32) -> Color32 {
+    ACTIVE_THEME.with(|theme| match theme.get() {
+        ThemeChoice::Light => [
+            Color32::from_rgb(246, 248, 251),
+            Color32::WHITE,
+            Color32::from_rgb(232, 237, 244),
+            Color32::from_rgb(172, 184, 203),
+            Color32::from_rgb(20, 30, 45),
+            Color32::from_rgb(68, 82, 104),
+            Color32::from_rgb(25, 86, 183),
+            Color32::from_rgb(0, 112, 72),
+            Color32::from_rgb(143, 82, 0),
+            Color32::from_rgb(180, 32, 51),
+        ][index],
+        ThemeChoice::HighContrast => [
+            Color32::BLACK,
+            Color32::BLACK,
+            Color32::BLACK,
+            Color32::WHITE,
+            Color32::WHITE,
+            Color32::WHITE,
+            Color32::from_rgb(90, 190, 255),
+            Color32::from_rgb(95, 255, 150),
+            Color32::YELLOW,
+            Color32::from_rgb(255, 130, 140),
+        ][index],
+        _ => dark,
+    })
+}
+fn apply_theme(ctx: &egui::Context, choice: ThemeChoice) {
+    let resolved = if choice == ThemeChoice::System {
+        if ctx.input(|i| i.raw.system_theme) == Some(egui::Theme::Light) {
+            ThemeChoice::Light
+        } else {
+            ThemeChoice::Dark
+        }
+    } else {
+        choice
+    };
+    ACTIVE_THEME.with(|theme| theme.set(resolved));
+    let mut visuals = if resolved == ThemeChoice::Light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    visuals.panel_fill = bg();
+    visuals.window_fill = panel();
+    visuals.extreme_bg_color = bg();
+    visuals.faint_bg_color = panel_raised();
+    visuals.override_text_color = Some(ink());
+    visuals.selection.bg_fill = panel_raised();
+    visuals.selection.stroke = Stroke::new(2.0, accent());
+    visuals.widgets.inactive.bg_fill = panel_raised();
+    visuals.widgets.inactive.weak_bg_fill = panel_raised();
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, ink());
+    visuals.widgets.hovered.bg_fill = panel_raised();
+    visuals.widgets.hovered.fg_stroke = Stroke::new(2.0, accent());
+    visuals.widgets.active.bg_fill = panel_raised();
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0, accent());
     ctx.set_visuals(visuals);
     ctx.global_style_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        style.spacing.button_padding = egui::vec2(9.0, 5.0);
+        style.spacing.interact_size.y = 26.0;
     });
 }
 
 fn card_frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(PANEL)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(panel())
+        .stroke(Stroke::new(1.0, border()))
         .corner_radius(10)
         .inner_margin(egui::Margin::same(16))
 }
 
 fn section_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-    ui.label(RichText::new(title).size(20.0).strong().color(TEXT));
-    ui.label(RichText::new(subtitle).size(11.0).color(MUTED));
+    ui.label(RichText::new(title).size(20.0).strong().color(ink()));
+    ui.label(RichText::new(subtitle).size(11.0).color(muted()));
     ui.add_space(10.0);
 }
 
 fn metric_card(ui: &mut egui::Ui, label: &str, value: String, hint: &str, color: Color32) {
     card_frame().show(ui, |ui| {
-        ui.label(RichText::new(label).size(10.0).strong().color(MUTED));
+        ui.label(RichText::new(label).size(10.0).strong().color(muted()));
         ui.add_space(5.0);
         ui.label(RichText::new(value).size(22.0).strong().color(color));
-        ui.label(RichText::new(hint).size(10.0).color(MUTED));
+        ui.label(RichText::new(hint).size(10.0).color(muted()));
     });
 }
 
@@ -2993,17 +3777,18 @@ fn status_pill(ui: &mut egui::Ui, text: &str, color: Color32) {
         .corner_radius(12)
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
-            ui.label(RichText::new(format!("●  {text}")).size(11.0).color(color));
+            ui.label(RichText::new(text).size(11.0).color(color));
         });
 }
 
+#[allow(dead_code)]
 fn workflow_step(ui: &mut egui::Ui, number: usize, label: &str, active: bool, done: bool) {
     let color = if done {
-        GREEN
+        green()
     } else if active {
-        ACCENT
+        accent()
     } else {
-        MUTED
+        muted()
     };
     ui.horizontal(|ui| {
         ui.label(
@@ -3018,7 +3803,7 @@ fn workflow_step(ui: &mut egui::Ui, number: usize, label: &str, active: bool, do
         ui.label(
             RichText::new(label)
                 .strong()
-                .color(if active || done { TEXT } else { MUTED }),
+                .color(if active || done { ink() } else { muted() }),
         );
     });
 }
@@ -3034,7 +3819,7 @@ fn nav_item(
     let selected = *page == value;
     let response = egui::Frame::new()
         .fill(if selected {
-            Color32::from_rgb(32, 57, 91)
+            panel_raised()
         } else {
             Color32::TRANSPARENT
         })
@@ -3044,17 +3829,17 @@ fn nav_item(
             ui.set_min_width(190.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(icon).size(18.0).color(if selected {
-                    ACCENT
+                    accent()
                 } else {
-                    MUTED
+                    muted()
                 }));
                 ui.vertical(|ui| {
                     ui.label(RichText::new(title).strong().color(if selected {
-                        TEXT
+                        ink()
                     } else {
-                        MUTED
+                        muted()
                     }));
-                    ui.label(RichText::new(detail).size(9.0).color(MUTED));
+                    ui.label(RichText::new(detail).size(9.0).color(muted()));
                 });
             });
         })
@@ -3067,16 +3852,12 @@ fn nav_item(
 
 fn info_banner(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
-        .fill(Color32::from_rgb(24, 43, 67))
-        .stroke(Stroke::new(1.0, ACCENT))
+        .fill(panel_raised())
+        .stroke(Stroke::new(1.0, accent()))
         .corner_radius(6)
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
-            ui.label(
-                RichText::new(format!("ⓘ  {text}"))
-                    .size(11.0)
-                    .color(Color32::from_rgb(174, 205, 248)),
-            );
+            ui.label(RichText::new(format!("ⓘ  {text}")).size(11.0).color(ink()));
         });
 }
 
@@ -3102,13 +3883,13 @@ fn capability_panel(ui: &mut egui::Ui, report: &PreflightReport) {
                 report.fs_events.len()
             ))
             .size(10.0)
-            .color(MUTED),
+            .color(muted()),
         );
     });
 }
 
 fn capability_badge(ui: &mut egui::Ui, label: &str, available: bool) {
-    let color = if available { GREEN } else { RED };
+    let color = if available { green() } else { red() };
     ui.label(RichText::new(format!("{} {label}", if available { "✓" } else { "×" })).color(color));
 }
 
@@ -3195,7 +3976,7 @@ fn comparison_optional_latency_row(
             ui.label(label);
             ui.label(format_latency(baseline));
             ui.label(format_latency(current));
-            ui.label(RichText::new("Unavailable").color(MUTED));
+            ui.label(RichText::new("Unavailable").color(muted()));
             ui.end_row();
         }
     }
@@ -3276,7 +4057,7 @@ fn pipeline_layer_y(value: PipelineLayer) -> f64 {
 }
 
 fn pipeline_layer_color(value: PipelineLayer) -> Color32 {
-    match value {
+    let color = match value {
         PipelineLayer::Syscall => Color32::from_rgb(108, 174, 255),
         PipelineLayer::Vfs => Color32::from_rgb(88, 211, 181),
         PipelineLayer::Filesystem => Color32::from_rgb(116, 220, 120),
@@ -3289,7 +4070,14 @@ fn pipeline_layer_color(value: PipelineLayer) -> Color32 {
         PipelineLayer::Ufs => Color32::from_rgb(190, 126, 255),
         PipelineLayer::SchedulerContext => Color32::from_rgb(120, 180, 205),
         PipelineLayer::UicContext => Color32::from_rgb(157, 166, 184),
-    }
+    };
+    ACTIVE_THEME.with(|theme| {
+        if theme.get() == ThemeChoice::Light {
+            Color32::from_rgb(color.r() / 2, color.g() / 2, color.b() / 2)
+        } else {
+            color
+        }
+    })
 }
 
 fn confidence_label(value: CorrelationConfidence) -> &'static str {
@@ -3323,17 +4111,62 @@ fn graph_kind_duration_ms(
     graph: &android_ebpf_protocol::IoTransactionGraph,
     kind: IoNodeKind,
 ) -> Option<f64> {
-    let mut found = false;
-    let duration = graph
+    let nodes: Vec<_> = graph
         .nodes
         .iter()
         .filter(|node| node.kind == kind)
-        .map(|node| {
-            found = true;
-            node.duration_ns()
-        })
-        .sum::<u64>();
-    found.then_some(duration as f64 / 1e6)
+        .collect();
+    if nodes.is_empty() {
+        return None;
+    }
+    let duration = nodes.iter().try_fold(0u64, |total, node| {
+        total.checked_add(node.end_ts_ns?.checked_sub(node.start_ts_ns)?)
+    })?;
+    Some(duration as f64 / 1e6)
+}
+
+fn block_file_origins(graph: &IoTransactionGraph) -> Vec<FileOriginView> {
+    graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == IoNodeKind::BlockRequest)
+        .map(|node| graph.file_origins_for(node.node_id))
+        .unwrap_or_default()
+}
+
+fn file_origin_tooltip(origins: &[FileOriginView]) -> String {
+    if origins.is_empty() {
+        return "File: <unattributed>\nReason: no observed file identity or defensible file correlation for this request".into();
+    }
+
+    let mut lines = Vec::with_capacity(origins.len().min(4) + 2);
+    lines.push(if origins.len() == 1 {
+        "File:".into()
+    } else {
+        format!("Files ({}):", origins.len())
+    });
+    for origin in origins.iter().take(4) {
+        let path = origin
+            .path
+            .as_ref()
+            .and_then(|snapshot| snapshot.path.as_deref())
+            .filter(|path| !path.is_empty())
+            .map(|path| path.replace(['\r', '\n'], " "))
+            .unwrap_or_else(|| {
+                format!(
+                    "<path unresolved> · {} · no matching path snapshot",
+                    origin.file.fallback_label()
+                )
+            });
+        lines.push(format!(
+            "  {path} [{}]",
+            edge_confidence_label(origin.confidence)
+        ));
+    }
+    if origins.len() > 4 {
+        lines.push(format!("  +{} more", origins.len() - 4));
+    }
+    lines.join("\n")
 }
 
 fn file_group_key(origins: &[FileOriginView]) -> String {
@@ -3350,7 +4183,7 @@ fn file_group_key(origins: &[FileOriginView]) -> String {
 
 fn axis_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut AxisMetric) {
     ui.vertical(|ui| {
-        ui.label(RichText::new(label).size(10.0).color(MUTED));
+        ui.label(RichText::new(label).size(10.0).color(muted()));
         egui::ComboBox::from_id_salt(id)
             .selected_text(value.label())
             .width(180.0)
@@ -3368,10 +4201,10 @@ fn summary_card(ui: &mut egui::Ui, label: &str, value: String) {
             RichText::new(label.to_uppercase())
                 .size(10.0)
                 .strong()
-                .color(MUTED),
+                .color(muted()),
         );
         ui.add_space(5.0);
-        ui.label(RichText::new(value).size(20.0).strong().color(TEXT));
+        ui.label(RichText::new(value).size(20.0).strong().color(ink()));
     });
 }
 
@@ -3389,6 +4222,85 @@ fn performance_metric_row(ui: &mut egui::Ui, label: &str, value: &LatencySnapsho
 mod ui_tests {
     use super::*;
     use android_ebpf_protocol::{FileIdentity, PathSnapshot, PathSource};
+
+    #[test]
+    fn failed_capture_does_not_leave_capturing_status() {
+        let mut app = StudioApp {
+            status: "Capturing eBPF storage events".into(),
+            ..StudioApp::default()
+        };
+        app.tx
+            .send(HostMessage::Ended(Err("root required".into())))
+            .unwrap();
+        app.drain_messages();
+        assert_eq!(app.phase, CapturePhase::Error);
+        assert!(app.status.contains("root required"));
+        assert!(app.capture.is_none());
+    }
+
+    #[test]
+    #[ignore = "requires ANDROID_EBPF_ACCEPTANCE_SESSION from the physical-device workload"]
+    fn device_capture_replays_into_correct_lba_file_tooltips() {
+        let path = std::env::var("ANDROID_EBPF_ACCEPTANCE_SESSION").expect("capture path");
+        let input = std::fs::read_to_string(path).unwrap();
+        let mut app = StudioApp::default();
+        let mut expected = BTreeMap::new();
+        for line in input.lines().filter(|line| !line.trim().is_empty()) {
+            let record: android_ebpf_protocol::WireRecord = serde_json::from_str(line).unwrap();
+            if let android_ebpf_protocol::WireRecord::Event { event, .. } = record {
+                if let android_ebpf_protocol::StorageEvent::RequestOrigin(origin) = &event
+                    && origin.operation == IoOperation::Read
+                    && let Some(path) = origin
+                        .path
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.path.as_ref())
+                    && (path.ends_with("/final-A.bin") || path.ends_with("/final-B.bin"))
+                {
+                    expected.insert(origin.request_id, path.clone());
+                }
+                app.analyzer.ingest(event);
+            }
+        }
+        assert_eq!(expected.len(), 128, "64 reads per known file");
+        let mut verified = 0;
+        for io in app.analyzer.completed_ios() {
+            if let Some(path) = expected.get(&io.issue.request_id) {
+                let graph = app.analyzer.transaction_for(io);
+                let origins = block_file_origins(&graph);
+                assert_eq!(origins.len(), 1, "one known file per read request");
+                assert_eq!(
+                    origins[0]
+                        .path
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.path.as_ref()),
+                    Some(path)
+                );
+                assert!(file_origin_tooltip(&origins).contains(path));
+                verified += 1;
+            }
+        }
+        assert_eq!(
+            verified, 128,
+            "every read is completed and has the correct tooltip"
+        );
+        app.x_axis = AxisMetric::TimeMs;
+        app.y_axis = AxisMetric::Sector;
+        app.rebuild_explorer_view();
+        let view = app.explorer_view.as_ref().unwrap();
+        for suffix in ["/final-A.bin", "/final-B.bin"] {
+            assert!(
+                view.groups
+                    .iter()
+                    .flat_map(|(_, points)| points)
+                    .filter(|point| point
+                        .file_tooltip
+                        .as_ref()
+                        .is_some_and(|tip| tip.contains(suffix)))
+                    .count()
+                    >= 64
+            );
+        }
+    }
 
     #[test]
     fn workflow_starts_with_connect_and_advances_after_device_selection() {
@@ -3436,6 +4348,44 @@ mod ui_tests {
             "Multiple files (2)"
         );
         assert_eq!(file_group_key(&[]), "Unattributed");
+    }
+
+    #[test]
+    fn lba_hover_tooltip_shows_path_confidence_and_identity_fallback() {
+        let attributed = FileOriginView {
+            file: FileIdentity {
+                fs_device_major: 254,
+                fs_device_minor: 11,
+                inode: 93844,
+                inode_generation: None,
+                mount_id: None,
+            },
+            path: Some(PathSnapshot {
+                path: Some("/data/local/tmp/test.bin".into()),
+                source: PathSource::ProcFd,
+                captured_ts_ns: 100,
+                deleted: false,
+            }),
+            confidence: EdgeConfidence::Exact,
+        };
+        assert_eq!(
+            file_origin_tooltip(std::slice::from_ref(&attributed)),
+            "File:\n  /data/local/tmp/test.bin [Exact]"
+        );
+
+        let unresolved = FileOriginView {
+            path: None,
+            confidence: EdgeConfidence::Probable,
+            ..attributed
+        };
+        let tooltip = file_origin_tooltip(&[unresolved]);
+        assert!(tooltip.contains("<path unresolved>"));
+        assert!(tooltip.contains("254:11"));
+        assert!(tooltip.contains("93844"));
+        assert!(tooltip.contains("[Probable]"));
+        assert!(AxisMetric::Sector.is_storage_address());
+        assert!(AxisMetric::AddressKiB.is_storage_address());
+        assert!(!AxisMetric::TimeMs.is_storage_address());
     }
 
     #[test]

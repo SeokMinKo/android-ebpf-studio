@@ -82,12 +82,10 @@ impl CapturePaths {
             .unwrap_or_default()
             .as_secs();
         let session_id = uuid::Uuid::new_v4().to_string();
-        let session = session_root.join(format!("android-storage-{timestamp}-{session_id}.ndjson"));
-        let log_directory = session_root
-            .parent()
-            .unwrap_or(session_root)
-            .join("logs")
-            .join(&session_id);
+        // A session owns its NDJSON, profile, logs and optional raw Perfetto
+        // trace together. Recovery/export must never search another run's logs.
+        let log_directory = session_root.join(format!("android-storage-{timestamp}-{session_id}"));
+        let session = log_directory.join("capture.ndjson");
         fs::create_dir_all(&log_directory).map_err(|source| {
             CapturePathError::SessionDirectory {
                 path: log_directory.display().to_string(),

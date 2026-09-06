@@ -109,6 +109,8 @@ fn request_origin_event_round_trips_without_raw_pointer_fields() {
             bytes: None,
             pid: 55,
             tid: 56,
+            file_origin_confidence: android_ebpf_protocol::EdgeConfidence::Exact,
+            request_lifetime_confidence: android_ebpf_protocol::EdgeConfidence::Exact,
             incomplete: true,
         }),
     };
@@ -134,6 +136,7 @@ fn footer_reports_integrity_and_partial_completion_without_inventing_success() {
         "\"events_rejected\":1,\"graceful\":false}\n"
     );
     let loaded = SessionReader::default().read(Cursor::new(input)).unwrap();
-    assert_eq!(loaded.integrity_ok, Some(true));
+    // Arithmetic matches, but the three claimed persisted events are absent.
+    assert_eq!(loaded.integrity_ok, Some(false));
     assert_eq!(loaded.graceful, Some(false));
 }

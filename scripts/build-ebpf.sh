@@ -13,4 +13,6 @@ cargo +nightly build \
   -Z build-std=core \
   --release
 
+node scripts/check-bpf-registers.mjs crates/android-ebpf/target/bpfel-unknown-none/release/android-storage-ebpf
+
 echo "Built crates/android-ebpf/target/bpfel-unknown-none/release/android-storage-ebpf"

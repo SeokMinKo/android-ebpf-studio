@@ -77,7 +77,13 @@ fn parse_file_identity_layout(bytes: &[u8]) -> Result<FileIdentityLayout> {
             let struct_name = string_at(name_offset)?;
             if matches!(
                 struct_name,
-                "file" | "inode" | "super_block" | "address_space"
+                "file"
+                    | "inode"
+                    | "super_block"
+                    | "address_space"
+                    | "task_struct"
+                    | "files_struct"
+                    | "fdtable"
             ) {
                 for member_index in 0..vlen {
                     let member = cursor + member_index * 12;
@@ -88,8 +94,11 @@ fn parse_file_identity_layout(bytes: &[u8]) -> Result<FileIdentityLayout> {
                     } else {
                         raw_offset
                     };
-                    if bit_offset % 8 != 0 || bit_offset / 8 > u16::MAX as u32 {
-                        bail!("unsupported BTF field offset {struct_name}.{member_name}");
+                    if (kind_flag && raw_offset >> 24 != 0)
+                        || bit_offset % 8 != 0
+                        || bit_offset / 8 > u16::MAX as u32
+                    {
+                        continue; // Unrelated task_struct bitfields are not byte-addressable.
                     }
                     fields.insert(
                         (struct_name.into(), member_name.into()),
@@ -107,6 +116,12 @@ fn parse_file_identity_layout(bytes: &[u8]) -> Result<FileIdentityLayout> {
             .copied()
             .ok_or_else(|| anyhow!("BTF field {owner}.{member} is missing"))
     };
+    let optional = |owner: &str, member: &str| -> u16 {
+        fields
+            .get(&(owner.into(), member.into()))
+            .copied()
+            .unwrap_or(OFFSET_MISSING)
+    };
     Ok(FileIdentityLayout {
         file_inode_offset: required("file", "f_inode")?,
         inode_superblock_offset: required("inode", "i_sb")?,
@@ -120,6 +135,12 @@ fn parse_file_identity_layout(bytes: &[u8]) -> Result<FileIdentityLayout> {
             .get(&("address_space".into(), "host".into()))
             .copied()
             .unwrap_or(OFFSET_MISSING),
+        task_files_offset: optional("task_struct", "files"),
+        files_fdt_offset: optional("files_struct", "fdt"),
+        fdtable_fd_offset: optional("fdtable", "fd"),
+        fdtable_max_fds_offset: optional("fdtable", "max_fds"),
+        file_flags_offset: optional("file", "f_flags"),
+        file_pos_offset: optional("file", "f_pos"),
         reserved: [0; 2],
     })
 }

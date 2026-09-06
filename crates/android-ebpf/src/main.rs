@@ -2,8 +2,9 @@
 #![no_main]
 
 use android_ebpf_types::{
-    BlockStart, FileIdentityLayout, FileStart, FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE,
-    KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN,
+    BioRemapLayout, BlockStart, F2fsFolioLayout, FileExtentLayout, FileIdentityLayout, FileStart,
+    FilterKey, HISTOGRAM_BUCKETS, KIND_BIO_REMAP, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT,
+    KIND_BLOCK_ISSUE, KIND_FILE_EXTENT, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN,
     KernelAggregate, KernelEvent, KernelFileOrigin, LAYER_FILESYSTEM, LAYER_SCHEDULER, LAYER_SCSI,
     LAYER_UFS, LAYER_UIC, MODE_BALANCED, MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OFFSET_MISSING,
     OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, ORIGIN_FILE, ORIGIN_INCOMPLETE,
@@ -37,6 +38,15 @@ static RAW_SYSCALL_LAYOUT: Array<RawSyscallLayout> = Array::with_max_entries(1, 
 
 #[map]
 static FILE_IDENTITY_LAYOUT: Array<FileIdentityLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static F2FS_EXTENT_LAYOUT: Array<FileExtentLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static F2FS_FOLIO_LAYOUT: Array<F2fsFolioLayout> = Array::with_max_entries(1, 0);
+
+#[map]
+static BIO_REMAP_LAYOUT: Array<BioRemapLayout> = Array::with_max_entries(1, 0);
 
 #[map]
 static EXACT_ATTRIBUTION_ENABLED: Array<u8> = Array::with_max_entries(1, 0);
@@ -114,6 +124,21 @@ pub fn block_rq_complete(ctx: TracePointContext) -> u32 {
 #[tracepoint]
 pub fn block_rq_insert(ctx: TracePointContext) -> u32 {
     handle_block(ctx, KIND_BLOCK_INSERT, &INSERT_LAYOUT).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn f2fs_file_extent(ctx: TracePointContext) -> u32 {
+    emit_f2fs_file_extent(ctx).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn f2fs_folio_extent(ctx: TracePointContext) -> u32 {
+    emit_f2fs_folio_extent(ctx).unwrap_or(0)
+}
+
+#[tracepoint]
+pub fn block_bio_remap(ctx: TracePointContext) -> u32 {
+    emit_bio_remap(ctx).unwrap_or(0)
 }
 
 #[tracepoint]
@@ -525,6 +550,152 @@ fn emit_pipeline_dynamic(
     emit_pipeline(ctx, layer, phase, layouts, exact)
 }
 
+fn emit_f2fs_file_extent(ctx: TracePointContext) -> Result<u32, i32> {
+    const F2FS_SECTORS_PER_BLOCK: u32 = 4096 / 512;
+
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    if config.mode < MODE_BALANCED {
+        return Ok(0);
+    }
+    let layout = F2FS_EXTENT_LAYOUT.get(0).ok_or(1_i32)?;
+    let device = read_u32(&ctx, layout.dev_offset)?;
+    let inode = read_u64(&ctx, layout.inode_offset)?;
+    let physical_block = if layout.physical_block_size == 8 {
+        read_u64(&ctx, layout.physical_block_offset)?
+    } else {
+        u64::from(read_u32(&ctx, layout.physical_block_offset)?)
+    };
+    let block_count = read_u32(&ctx, layout.block_count_offset)?;
+    let result = read_i32(&ctx, layout.result_offset)?;
+    if result != 0
+        || physical_block == 0
+        || physical_block == u64::MAX
+        || (layout.physical_block_size == 4 && physical_block >= u64::from(u32::MAX - 1))
+        || block_count == 0
+    {
+        return Ok(0);
+    }
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
+    let sectors = block_count.saturating_mul(F2FS_SECTORS_PER_BLOCK);
+    let bytes = sectors.saturating_mul(512);
+    let event = KernelEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        sector: physical_block.saturating_mul(u64::from(F2FS_SECTORS_PER_BLOCK)),
+        origin_id: physical_block,
+        inode,
+        device,
+        fs_device: device,
+        sectors,
+        bytes,
+        pid,
+        tid,
+        cpu: unsafe { bpf_get_smp_processor_id() },
+        fd: -1,
+        kind: KIND_FILE_EXTENT,
+        operation: OP_OTHER,
+        origin_flags: ORIGIN_FILE,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
+        comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        ..KernelEvent::default()
+    };
+    submit_event(event, config.generation)?;
+    Ok(0)
+}
+
+fn emit_f2fs_folio_extent(ctx: TracePointContext) -> Result<u32, i32> {
+    const F2FS_SECTORS_PER_BLOCK: u32 = 4096 / 512;
+    const F2FS_DATA_TYPE: i32 = 0;
+
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    if config.mode < MODE_BALANCED {
+        return Ok(0);
+    }
+    let layout = F2FS_FOLIO_LAYOUT.get(0).ok_or(1_i32)?;
+    let device = read_u32(&ctx, layout.dev_offset)?;
+    let inode = read_u64(&ctx, layout.inode_offset)?;
+    let physical_block = if layout.physical_block_size == 8 {
+        read_u64(&ctx, layout.physical_block_offset)?
+    } else {
+        u64::from(read_u32(&ctx, layout.physical_block_offset)?)
+    };
+    let data_type = read_i32(&ctx, layout.data_type_offset)?;
+    if data_type != F2FS_DATA_TYPE
+        || physical_block == 0
+        || physical_block == u64::MAX
+        || (layout.physical_block_size == 4 && physical_block >= u64::from(u32::MAX - 1))
+    {
+        return Ok(0);
+    }
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let event = KernelEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        sector: physical_block.saturating_mul(u64::from(F2FS_SECTORS_PER_BLOCK)),
+        origin_id: physical_block,
+        inode,
+        device,
+        fs_device: device,
+        sectors: F2FS_SECTORS_PER_BLOCK,
+        bytes: 4096,
+        pid: (pid_tgid >> 32) as u32,
+        tid: pid_tgid as u32,
+        cpu: unsafe { bpf_get_smp_processor_id() },
+        fd: -1,
+        kind: KIND_FILE_EXTENT,
+        operation: OP_WRITE,
+        origin_flags: ORIGIN_FILE,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
+        comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        ..KernelEvent::default()
+    };
+    submit_event(event, config.generation)?;
+    Ok(0)
+}
+
+fn emit_bio_remap(ctx: TracePointContext) -> Result<u32, i32> {
+    let config = active_filter().unwrap_or(RawFilterConfig {
+        mode: MODE_RAW_ALL,
+        match_all: 1,
+        ..RawFilterConfig::default()
+    });
+    if config.mode < MODE_BALANCED {
+        return Ok(0);
+    }
+    let layout = BIO_REMAP_LAYOUT.get(0).ok_or(1_i32)?;
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let event = KernelEvent {
+        ts_ns: unsafe { bpf_ktime_get_ns() },
+        sector: read_u64(&ctx, layout.sector_offset)?,
+        requested_bytes: read_u64(&ctx, layout.old_sector_offset)?,
+        device: read_u32(&ctx, layout.device_offset)?,
+        fs_device: read_u32(&ctx, layout.old_device_offset)?,
+        sectors: read_u32(&ctx, layout.sectors_offset)?,
+        pid: (pid_tgid >> 32) as u32,
+        tid: pid_tgid as u32,
+        cpu: unsafe { bpf_get_smp_processor_id() },
+        fd: -1,
+        kind: KIND_BIO_REMAP,
+        operation: OP_OTHER,
+        kernel_stack_id: STACK_ID_UNAVAILABLE,
+        user_stack_id: STACK_ID_UNAVAILABLE,
+        comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        ..KernelEvent::default()
+    };
+    submit_event(event, config.generation)?;
+    Ok(0)
+}
+
 fn emit_pipeline(
     ctx: TracePointContext,
     layer: u8,
@@ -913,6 +1084,9 @@ fn aggregate_detail(generation: u64, sampled: bool, forced_error: bool) {
     }
 }
 
+// Android kernels without BPF stack arguments only accept five register arguments.
+// LLVM 23 otherwise emits R11 stack accesses for this seven-argument call.
+#[inline(always)]
 fn aggregate_completion(
     generation: u64,
     ts_ns: u64,
@@ -941,6 +1115,9 @@ fn aggregate_completion(
     }
 }
 
+// Keep the explicit clamp at the BPF call boundary. Inlining for a u32
+// input lets LLVM erase it, but the verifier cannot infer ctlz/popcount bounds.
+#[inline(never)]
 fn histogram_index(value: u64) -> usize {
     let index = if value == 0 {
         0
@@ -979,9 +1156,18 @@ fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
     ) {
         return Ok(0);
     }
+    let (inode, fs_device, file_flags, mut file_offset) =
+        syscall_fd_identity(fd).unwrap_or_default();
+    if syscall == 67 || syscall == 68 {
+        file_offset = read_u64_at(&ctx, layout.enter_args_offset as usize + 24)?;
+    }
     let start = FileStart {
         start_ts_ns: unsafe { bpf_ktime_get_ns() },
         requested_bytes,
+        inode,
+        fs_device,
+        file_flags,
+        file_offset,
         fd,
         operation,
         reserved: [0; 3],
@@ -995,6 +1181,36 @@ fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
     Ok(0)
 }
 
+// Snapshot identity at syscall entry, before userspace can recycle the FD.
+// A later /proc path is accepted only if its device/inode matches this snapshot.
+fn syscall_fd_identity(fd: i32) -> Result<(u64, u32, u32, u64), i32> {
+    let layout = FILE_IDENTITY_LAYOUT.get(0).ok_or(1_i32)?;
+    if layout.reserved[0] == 0 || fd < 0 {
+        return Err(1);
+    }
+    let task = unsafe { aya_ebpf::helpers::bpf_get_current_task() };
+    let files = read_kernel_u64(task, layout.task_files_offset)?;
+    let fdt = read_kernel_u64(files, layout.files_fdt_offset)?;
+    let max_fds = read_kernel_u32(fdt, layout.fdtable_max_fds_offset)?;
+    if fd as u32 >= max_fds || fd as u32 >= 1_048_576 {
+        return Err(1);
+    }
+    let table = read_kernel_u64(fdt, layout.fdtable_fd_offset)?;
+    let file: u64 = unsafe { bpf_probe_read_kernel((table + (fd as u64) * 8) as *const u64) }
+        .map_err(|_| 1_i32)?;
+    if file == 0 {
+        return Err(1);
+    }
+    let inode = read_kernel_u64(file, layout.file_inode_offset)?;
+    let sb = read_kernel_u64(inode, layout.inode_superblock_offset)?;
+    Ok((
+        read_kernel_u64(inode, layout.inode_number_offset)?,
+        read_kernel_u32(sb, layout.superblock_device_offset)?,
+        read_kernel_u32(file, layout.file_flags_offset)?,
+        read_kernel_u64(file, layout.file_pos_offset)?,
+    ))
+}
+
 fn active_filter() -> Option<RawFilterConfig> {
     let generation = FILTER_ACTIVE.get(0).copied()?;
     if generation == 0 {
@@ -1003,10 +1219,15 @@ fn active_filter() -> Option<RawFilterConfig> {
     unsafe { FILTER_CONFIGS.get(&generation) }.copied()
 }
 
+// Keep the six-argument filter inside its caller (no unsupported R11 ABI).
+#[inline(always)]
 fn matches_filter(pid: u32, tid: u32, uid: u32, device: u32, bytes: u32, operation: u8) -> bool {
     let Some(config) = active_filter() else {
         return true;
     };
+    if config.collector_pid != 0 && pid == config.collector_pid {
+        return false;
+    }
     if config.min_bytes != 0 && bytes < config.min_bytes {
         return false;
     }
@@ -1073,6 +1294,10 @@ fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
     let event = KernelEvent {
         ts_ns,
         start_ts_ns: start.start_ts_ns,
+        inode: start.inode,
+        fs_device: start.fs_device,
+        origin_flags: start.file_flags,
+        origin_id: start.file_offset,
         request_id: pid_tgid,
         sector: 0,
         requested_bytes: start.requested_bytes,

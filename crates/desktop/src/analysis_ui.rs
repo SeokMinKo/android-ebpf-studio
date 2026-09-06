@@ -1,0 +1,647 @@
+// Shared query for all request-oriented analysis surfaces. Capture filters are
+// intentionally separate: these controls never discard incoming measurements.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+struct AnalysisFilter {
+    request_keys: Option<std::collections::HashSet<IoSelectionKey>>,
+    start_ms: f64,
+    end_ms: f64,
+    pid: u32,
+    tid: u32,
+    process: String,
+    file: String,
+    device: String,
+    operation: Option<IoOperation>,
+    confidence: Option<PathConfidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum PathConfidence {
+    Exact,
+    Probable,
+    Unresolved,
+}
+
+fn path_confidence(origins: &[FileOriginView]) -> PathConfidence {
+    if origins.is_empty()
+        || origins.iter().any(|v| {
+            v.path
+                .as_ref()
+                .and_then(|p| p.path.as_ref())
+                .is_none_or(|p| p.is_empty())
+        })
+    {
+        PathConfidence::Unresolved
+    } else if origins
+        .iter()
+        .all(|v| v.confidence == EdgeConfidence::Exact)
+    {
+        PathConfidence::Exact
+    } else if origins.iter().any(|v| {
+        matches!(
+            v.confidence,
+            EdgeConfidence::Probable | EdgeConfidence::ProbableAsync
+        )
+    }) {
+        PathConfidence::Probable
+    } else {
+        PathConfidence::Unresolved
+    }
+}
+
+impl AnalysisFilter {
+    fn active(&self) -> bool {
+        self != &Self::default()
+    }
+    fn matches(&self, engine: &AnalysisEngine, io: &CompletedIo, origin: u64) -> bool {
+        if self
+            .request_keys
+            .as_ref()
+            .is_some_and(|keys| !keys.contains(&selection_key(io)))
+        {
+            return false;
+        }
+        let time = io.completion.ts_ns.saturating_sub(origin) as f64 / 1_000_000.0;
+        if time < self.start_ms
+            || (self.end_ms > 0.0 && time > self.end_ms)
+            || (self.pid != 0 && Some(self.pid) != io.issuer_pid())
+            || (self.tid != 0 && Some(self.tid) != io.issuer_tid())
+            || self.operation.is_some_and(|v| v != io.issue.operation)
+            || !io
+                .issue
+                .comm
+                .to_lowercase()
+                .contains(&self.process.to_lowercase())
+            || (!self.device.is_empty()
+                && self.device != format!("{}:{}", io.issue.device_major, io.issue.device_minor))
+        {
+            return false;
+        }
+        if self.file.is_empty() && self.confidence.is_none() {
+            return true;
+        }
+        let origins = block_file_origins(&engine.transaction_for(io));
+        self.confidence
+            .is_none_or(|v| path_confidence(&origins) == v)
+            && (self.file.is_empty()
+                || origins.iter().any(|v| {
+                    v.path
+                        .as_ref()
+                        .and_then(|p| p.path.as_ref())
+                        .is_some_and(|p| p.to_lowercase().contains(&self.file.to_lowercase()))
+                        || v.file.fallback_label().contains(&self.file)
+                }))
+    }
+}
+
+impl StudioApp {
+    fn perfetto_pending(&self) -> bool {
+        self.is_running() && self.source_info.last().is_some_and(|r| matches!(r, WireRecord::SourceInfo {source, metadata,..} if source=="perfetto" && metadata.get("stage").and_then(|s|s.as_str())==Some("recording")))
+    }
+    fn diskstats_ui(&self, ui: &mut egui::Ui) {
+        section_header(
+            ui,
+            "Device counter analysis",
+            "Fallback source: /proc/diskstats · cumulative block-device counters sampled approximately every second",
+        );
+        info_banner(
+            ui,
+            "These counters do not provide individual I/O, FilePath, PID/TID, latency percentiles or LBA. Device-mapper and partition rows can represent the same I/O; rows are never summed across devices.",
+        );
+        let mut previous: Option<(u64, BTreeMap<String, [u64; 4]>)> = None;
+        let mut totals = BTreeMap::<String, [u64; 4]>::new();
+        let mut samples = BTreeMap::<String, Vec<[f64; 2]>>::new();
+        let mut reset_intervals = 0;
+        for record in &self.disk_stats {
+            let WireRecord::DiskStats {
+                elapsed_ms, raw, ..
+            } = record
+            else {
+                continue;
+            };
+            let current = parse_diskstats(raw);
+            if let Some((time, old)) = previous.as_ref() {
+                let interval = elapsed_ms.saturating_sub(*time) as f64 / 1000.0;
+                if interval > 0.0 {
+                    for (key, counters) in &current {
+                        if let Some(before) = old.get(key) {
+                            if let Some(delta) = disk_delta(before, counters) {
+                                let sum = totals.entry(key.clone()).or_default();
+                                for i in 0..4 {
+                                    sum[i] = sum[i].saturating_add(delta[i]);
+                                }
+                                samples.entry(key.clone()).or_default().push([
+                                    *elapsed_ms as f64 / 1000.0,
+                                    (delta[1] + delta[3]) as f64 * 512.0 / 1_048_576.0 / interval,
+                                ]);
+                            } else {
+                                reset_intervals += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            previous = Some((*elapsed_ms, current));
+        }
+        ui.label(format!("{} snapshots · {} counter-reset intervals excluded; new/disappearing devices have no inferred delta", self.disk_stats.len(), reset_intervals));
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            egui::Grid::new("diskstats-summary")
+                .striped(true)
+                .show(ui, |ui| {
+                    for label in [
+                        "Device",
+                        "Read requests",
+                        "Read bytes",
+                        "Write requests",
+                        "Write bytes",
+                    ] {
+                        ui.strong(label);
+                    }
+                    ui.end_row();
+                    for (name, values) in totals {
+                        ui.label(name);
+                        ui.label(values[0].to_string());
+                        ui.label(format_bytes(values[1].saturating_mul(512)));
+                        ui.label(values[2].to_string());
+                        ui.label(format_bytes(values[3].saturating_mul(512)));
+                        ui.end_row();
+                    }
+                });
+        });
+        studio_plot("device-counter-throughput")
+            .height(260.0)
+            .legend(Legend::default())
+            .x_axis_label("Host elapsed seconds")
+            .y_axis_label("MiB/s · per device")
+            .show(ui, |plot| {
+                for (i, (name, points)) in samples.into_iter().enumerate() {
+                    plot.line(
+                        Line::new(name, points).color([accent(), green(), amber(), red()][i % 4]),
+                    );
+                }
+            });
+    }
+
+    fn analysis(&self) -> &AnalysisEngine {
+        self.filtered.as_ref().unwrap_or(&self.analyzer)
+    }
+
+    fn time_origin(&self) -> u64 {
+        self.reanalysis
+            .source_start_ns
+            .or(self.analyzer.session_start_ns())
+            .unwrap_or(0)
+    }
+
+    fn invalidate_query(&mut self) {
+        self.trend_view = None;
+        self.selection = SelectionState {
+            enabled: true,
+            auto_bounds: true,
+            ..Default::default()
+        };
+        self.filtered_generation = u64::MAX;
+        self.summary_view = None;
+        self.explorer_view = None;
+        self.pipeline_view = None;
+        self.selected_pipeline_request = None;
+    }
+
+    fn rebuild_filtered(&mut self) {
+        if !self.query.active() {
+            self.filtered = None;
+            if self.filtered_generation != self.analysis_generation {
+                self.update_file_evidence_scope();
+                self.filtered_generation = self.analysis_generation;
+            }
+            return;
+        }
+        if self.filtered_generation == self.analysis_generation {
+            return;
+        }
+        let origin = self.time_origin();
+        self.filtered = Some(
+            self.analyzer
+                .select_completed(|io| self.query.matches(&self.analyzer, io, origin)),
+        );
+        self.update_file_evidence_scope();
+        self.filtered_generation = self.analysis_generation;
+    }
+
+    fn filter_ui(&mut self, ui: &mut egui::Ui) {
+        if self.analyzer.completed_ios().is_empty() {
+            return;
+        }
+        let previous = self.query.clone();
+        ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Completion time (ms)");
+                ui.add(egui::DragValue::new(&mut self.query.start_ms).prefix("From ").range(0.0..=f64::MAX));
+                ui.add(egui::DragValue::new(&mut self.query.end_ms).prefix("To ").range(0.0..=f64::MAX));
+                ui.label("To 0 = session end");
+                ui.add(egui::DragValue::new(&mut self.query.pid).prefix("PID "));
+                ui.add(egui::DragValue::new(&mut self.query.tid).prefix("TID "));
+                ui.label("0 = all");
+                egui::ComboBox::from_id_salt("analysis-op").selected_text(self.query.operation.map_or("All operations", operation_label)).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.query.operation, None, "All operations");
+                    for op in [IoOperation::Read, IoOperation::Write] { ui.selectable_value(&mut self.query.operation, Some(op), operation_label(op)); }
+                });
+                egui::ComboBox::from_id_salt("analysis-confidence").selected_text(self.query.confidence.map_or("All FilePath confidence".into(), |v| format!("{v:?}"))).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.query.confidence, None, "All FilePath confidence");
+                    for value in [PathConfidence::Exact, PathConfidence::Probable, PathConfidence::Unresolved] { ui.selectable_value(&mut self.query.confidence, Some(value), format!("{value:?}")); }
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Process"); ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
+                ui.label("FilePath / inode"); ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
+                ui.label("Device major:minor"); ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
+                if ui.button("Clear filters").clicked() { self.query = AnalysisFilter::default(); }
+            });
+            ui.label("Selection uses the loaded completed-request window; file-operation evidence follows that cohort. Capture diagnostics and Compare baseline remain session-wide. File candidates are preserved together. Sequential/random classification remains from the original device/direction stream.");
+        });
+        if previous != self.query {
+            self.invalidate_query();
+        }
+        if self.query.active() {
+            ui.label(self.query.request_keys.as_ref().map_or_else(
+                || "Filters active".to_string(),
+                |keys| {
+                    format!(
+                        "Filters active · {} explicitly selected request identities",
+                        keys.len()
+                    )
+                },
+            ));
+        }
+    }
+
+    fn trends_ui(&mut self, ui: &mut egui::Ui) {
+        if self.analysis().completed_ios().is_empty() {
+            return;
+        }
+        section_header(
+            ui,
+            "I/O activity",
+            "Retained completed requests · fixed 1 s bins by completion time · click a time bin to inspect that interval",
+        );
+        let origin = self.time_origin();
+        if self
+            .trend_view
+            .as_ref()
+            .is_none_or(|(generation, _)| *generation != self.analysis_generation)
+        {
+            self.trend_view = Some((
+                self.analysis_generation,
+                TrendData::build(self.analysis(), origin),
+            ));
+        }
+        let TrendData {
+            bins,
+            histogram,
+            coverage,
+            multi,
+            targets,
+            ..
+        } = self.trend_view.as_ref().unwrap().1.clone();
+        let total: u64 = coverage.iter().sum();
+        ui.label(format!("FilePath by request count (n={total}): Exact {:.1}% · Probable {:.1}% · Unresolved {:.1}% · multi-origin {multi}", ratio(coverage[0],total), ratio(coverage[1],total), ratio(coverage[2],total)));
+        ui.label("FilePath confidence requires a path snapshot as well as identity evidence. Exact inode without a path remains FilePath Unresolved. This ratio describes retained detail, not bytes or suppressed/unpaired I/O.");
+        if let Some(aggregate) = &self.latest_aggregate {
+            ui.label(format!("Session-wide kernel observed: {} · retained completed: {} · remaining I/O cannot be assigned a FilePath coverage claim", aggregate.counters.observed, self.analyzer.completed_ios().len()));
+        }
+        let mut selected_bin = None;
+        for (id, title, offset) in [
+            ("iops-timeline", "IOPS (requests / s)", 0),
+            ("throughput-timeline", "Throughput (MiB / s)", 2),
+        ] {
+            studio_plot(id)
+                .height(170.0)
+                .legend(Legend::default())
+                .x_axis_label("Seconds since session start")
+                .y_axis_label(title)
+                .show(ui, |plot| {
+                    for (index, label, color) in
+                        [(0, "Read / other", accent()), (1, "Write", green())]
+                    {
+                        let points: PlotPoints = bins
+                            .iter()
+                            .map(|(second, v)| [*second as f64 + 0.5, v[offset + index]])
+                            .collect();
+                        plot.points(Points::new(label, points).radius(4.0).color(color));
+                    }
+                    if plot.response().clicked()
+                        && let Some(point) = plot.pointer_coordinate()
+                        && point.x >= 0.0
+                    {
+                        selected_bin = Some(point.x.floor());
+                    }
+                });
+        }
+        if let Some(second) = selected_bin {
+            self.query.start_ms = second * 1000.0;
+            self.query.end_ms = (second + 1.0) * 1000.0 - 0.000001;
+            self.invalidate_query();
+            self.rebuild_filtered();
+            self.page = Page::Explore;
+        }
+        studio_plot("latency-distribution")
+            .height(160.0)
+            .x_axis_label("Total latency log2(ns), bin [2^x, 2^(x+1))")
+            .y_axis_label("Requests")
+            .show(ui, |plot| {
+                let bars = histogram
+                    .iter()
+                    .map(|(bucket, count)| {
+                        egui_plot::Bar::new(*bucket as f64, *count as f64).width(0.8)
+                    })
+                    .collect();
+                plot.bar_chart(
+                    egui_plot::BarChart::new("Retained total latency", bars).color(amber()),
+                );
+            });
+        ui.label("Total latency: insert→complete when insert exists, otherwise issue→complete. Queue: insert→issue (unavailable without insert). Device: issue→complete. Queue depth is observed block in-flight depth; missing/suppressed events can reduce it. Sequential: previous sector + sectors equals current sector, within the same device and direction, at the block issue layer.");
+        ui.collapsing("Processes ranked by transferred bytes in selection", |ui| {
+            let mut rows: Vec<_> = targets.into_iter().collect();
+            rows.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
+            for (name, (count, bytes)) in rows.into_iter().take(30) {
+                ui.label(format!(
+                    "{name} · {count} requests · {}",
+                    format_bytes(bytes)
+                ));
+            }
+        });
+    }
+}
+
+fn parse_diskstats(raw: &str) -> BTreeMap<String, [u64; 4]> {
+    raw.lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 14 {
+                return None;
+            }
+            Some((
+                format!("{}:{} {}", fields[0], fields[1], fields[2]),
+                [
+                    fields[3].parse().ok()?,
+                    fields[5].parse().ok()?,
+                    fields[7].parse().ok()?,
+                    fields[9].parse().ok()?,
+                ],
+            ))
+        })
+        .collect()
+}
+
+fn disk_delta(before: &[u64; 4], after: &[u64; 4]) -> Option<[u64; 4]> {
+    Some([
+        after[0].checked_sub(before[0])?,
+        after[1].checked_sub(before[1])?,
+        after[2].checked_sub(before[2])?,
+        after[3].checked_sub(before[3])?,
+    ])
+}
+
+#[cfg(test)]
+mod query_regressions {
+    use super::*;
+
+    #[test]
+    fn unwritable_session_target_enters_error_without_starting_capture() {
+        let mut app = StudioApp::default();
+        assert!(!app.create_session_at(std::env::temp_dir()));
+        assert_eq!(app.phase, CapturePhase::Error);
+        assert!(app.writer.is_none());
+        assert!(app.capture.is_none());
+        assert!(app.status.contains("retry Start"));
+    }
+    use android_ebpf_protocol::{
+        BlockComplete, BlockIssue, FileIdentity, PathSnapshot, PathSource, StorageEvent,
+    };
+
+    fn engine() -> AnalysisEngine {
+        let mut engine = AnalysisEngine::new();
+        for id in 1..=3 {
+            engine.ingest(StorageEvent::BlockIssue(BlockIssue {
+                ts_ns: id * 1_000_000,
+                request_id: id,
+                device_major: 8,
+                device_minor: 0,
+                sector: id * 8,
+                sectors: 8,
+                bytes: 4096,
+                operation: IoOperation::Read,
+                pid: id as u32,
+                tid: 10 + id as u32,
+                cpu: 0,
+                comm: format!("worker{id}"),
+            }));
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+                ts_ns: id * 1_000_000 + 100_000,
+                request_id: id,
+                device_major: 8,
+                device_minor: 0,
+                status: 0,
+            }));
+        }
+        engine
+    }
+
+    #[test]
+    fn projection_preserves_original_sequential_classification_and_latency() {
+        let engine = engine();
+        let selected = engine.select_completed(|io| io.issue.pid == 2);
+        assert_eq!(selected.completed_ios().len(), 1);
+        assert_eq!(
+            selected.completed_ios()[0].access_pattern,
+            AccessPattern::Sequential
+        );
+        assert_eq!(selected.summary().read_bytes, 4096);
+        assert_eq!(selected.summary().p95_latency_ns, Some(100_000));
+        assert_eq!(engine.completed_ios().len(), 3);
+    }
+
+    #[test]
+    fn common_filter_conjoins_time_thread_process_device_operation_and_confidence() {
+        let engine = engine();
+        let query = AnalysisFilter {
+            start_ms: 1.0,
+            end_ms: 1.1,
+            pid: 2,
+            tid: 12,
+            process: "WORKER2".into(),
+            device: "8:0".into(),
+            operation: Some(IoOperation::Read),
+            confidence: Some(PathConfidence::Unresolved),
+            ..Default::default()
+        };
+        let selected = engine.select_completed(|io| query.matches(&engine, io, 1_100_000));
+        assert_eq!(selected.completed_ios().len(), 1);
+        assert_eq!(selected.completed_ios()[0].issue.request_id, 2);
+        let mut wrong = query;
+        wrong.file = "/wrong-phone-file".into();
+        assert!(
+            engine
+                .completed_ios()
+                .iter()
+                .all(|io| !wrong.matches(&engine, io, 1_100_000))
+        );
+    }
+
+    #[test]
+    fn exact_identity_without_path_is_unresolved_and_mixed_candidates_stay_uncertain() {
+        let identity = FileIdentity {
+            fs_device_major: 8,
+            fs_device_minor: 1,
+            inode: 42,
+            inode_generation: None,
+            mount_id: None,
+        };
+        let mut origin = FileOriginView {
+            file: identity,
+            path: None,
+            confidence: EdgeConfidence::Exact,
+        };
+        assert_eq!(
+            path_confidence(&[origin.clone()]),
+            PathConfidence::Unresolved
+        );
+        origin.path = Some(PathSnapshot {
+            path: Some("/known".into()),
+            captured_ts_ns: 1,
+            source: PathSource::ProcFd,
+            deleted: false,
+        });
+        assert_eq!(path_confidence(&[origin.clone()]), PathConfidence::Exact);
+        let mut uncertain = origin.clone();
+        uncertain.confidence = EdgeConfidence::Probable;
+        assert_eq!(
+            path_confidence(&[origin, uncertain]),
+            PathConfidence::Probable
+        );
+    }
+
+    #[test]
+    fn diskstats_uses_sector_counters_and_rejects_resets_instead_of_false_zero() {
+        let parsed = parse_diskstats("8 0 sda 10 0 80 1 20 0 160 2 0 3 4\nmalformed");
+        assert_eq!(parsed["8:0 sda"], [10, 80, 20, 160]);
+        assert_eq!(
+            disk_delta(&[10, 80, 20, 160], &[12, 96, 21, 168]),
+            Some([2, 16, 1, 8])
+        );
+        assert_eq!(disk_delta(&[10, 80, 20, 160], &[1, 8, 1, 8]), None);
+    }
+
+    #[test]
+    fn stop_remains_busy_until_writer_finalizes_and_duplicate_start_is_ignored() {
+        let mut app = StudioApp {
+            phase: CapturePhase::Recording,
+            ..Default::default()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        app.simulator_stop = Some(stop.clone());
+        app.stop();
+        assert_eq!(app.phase, CapturePhase::Stopping);
+        assert!(app.is_running());
+        app.start_simulator();
+        assert!(Arc::ptr_eq(app.simulator_stop.as_ref().unwrap(), &stop));
+        app.stop();
+        assert_eq!(app.phase, CapturePhase::Stopping);
+        app.tx.send(HostMessage::Ended(Ok(()))).unwrap();
+        app.drain_messages();
+        assert!(!app.is_running());
+        assert_eq!(app.page, Page::Overview);
+    }
+
+    #[test]
+    fn reset_clears_phone_specific_paths_and_filter_state() {
+        let mut app = StudioApp {
+            analyzer: engine(),
+            query: AnalysisFilter {
+                file: "old-phone".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app.rebuild_filtered();
+        app.reset_analysis();
+        assert!(app.analyzer.completed_ios().is_empty());
+        assert!(!app.query.active());
+        assert!(app.filtered.is_none());
+    }
+}
+
+#[derive(Clone)]
+struct TrendData {
+    slowest: Option<CompletedIo>,
+    top_issuer: Option<(u32, String, u64, u64)>,
+    bins: BTreeMap<u64, [f64; 4]>,
+    histogram: BTreeMap<u32, u64>,
+    coverage: [u64; 3],
+    multi: u64,
+    targets: BTreeMap<String, (u64, u64)>,
+}
+impl TrendData {
+    fn build(engine: &AnalysisEngine, origin: u64) -> Self {
+        let mut slowest: Option<CompletedIo> = None;
+        let mut issuers = BTreeMap::<u32, (String, u64, u64)>::new();
+        let mut bins = BTreeMap::<u64, [f64; 4]>::new();
+        let mut histogram = BTreeMap::<u32, u64>::new();
+        let mut coverage = [0_u64; 3];
+        let mut multi = 0;
+        let mut targets = BTreeMap::<String, (u64, u64)>::new();
+        for io in engine.completed_ios() {
+            if io.total_latency_ns.is_some()
+                && slowest
+                    .as_ref()
+                    .is_none_or(|s| s.total_latency_ns < io.total_latency_ns)
+            {
+                slowest = Some(io.clone());
+            }
+            if let Some(pid) = io.issuer_pid() {
+                let issuer = issuers
+                    .entry(pid)
+                    .or_insert_with(|| (io.issue.comm.clone(), 0, 0));
+                issuer.1 += 1;
+                issuer.2 += io.issue.bytes as u64;
+            }
+            let second = io.completion.ts_ns.saturating_sub(origin) / 1_000_000_000;
+            let bin = bins.entry(second).or_default();
+            let offset = usize::from(io.issue.operation == IoOperation::Write);
+            if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write) {
+                bin[offset] += 1.0;
+                bin[2 + offset] += io.issue.bytes as f64 / 1_048_576.0;
+            }
+            if let Some(latency) = io.total_latency_ns {
+                let bucket = 63 - latency.max(1).leading_zeros();
+                *histogram.entry(bucket).or_default() += 1;
+            }
+            let origins = block_file_origins(&engine.transaction_for(io));
+            let idx = match path_confidence(&origins) {
+                PathConfidence::Exact => 0,
+                PathConfidence::Probable => 1,
+                PathConfidence::Unresolved => 2,
+            };
+            coverage[idx] += 1;
+            if origins.len() > 1 {
+                multi += 1;
+            }
+            let name = issuer_label(io.issuer_pid(), io.issuer_tid(), &io.issue.comm);
+            let target = targets.entry(name).or_default();
+            target.0 += 1;
+            target.1 += io.issue.bytes as u64;
+        }
+
+        Self {
+            slowest,
+            top_issuer: issuers
+                .into_iter()
+                .max_by_key(|(_, v)| v.2)
+                .map(|(pid, (name, count, bytes))| (pid, name, count, bytes)),
+            bins,
+            histogram,
+            coverage,
+            multi,
+            targets,
+        }
+    }
+}

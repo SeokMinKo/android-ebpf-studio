@@ -71,6 +71,7 @@ dependencies = [
  "aya",
  "clap",
  "ctrlc",
+ "libc",
  "serde_json",
  "tracing",
 ]
@@ -97,6 +98,7 @@ dependencies = [
  "csv",
  "eframe",
  "egui_plot",
+ "image",
  "rfd",
  "serde",
  "serde_json",

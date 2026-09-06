@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
@@ -15,21 +15,24 @@ use std::{
 mod btf_layout;
 
 use android_ebpf_agent::trace_format::{
-    parse_layout, parse_pipeline_layout, parse_raw_syscall_layout, validate_pair,
+    parse_bio_remap_layout, parse_f2fs_extent_layout, parse_f2fs_folio_layout, parse_layout,
+    parse_pipeline_layout, parse_raw_syscall_layout, validate_pair,
 };
 use android_ebpf_protocol::{
     AdaptiveController, AggregateCounters, AggregateSnapshot, AttributionConfidence, BlockComplete,
     BlockInsert, BlockIssue, CapabilityState, CaptureConfig, CaptureControlAck,
     CaptureControlCommand, CaptureFilter, CaptureMode, CaptureState, ControlOutcome,
-    CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence, FileIo,
-    HeavyHitterDimension, HeavyHitterEntry, HeavyHitterMetric, HeavyHitterSnapshot, Histogram,
-    HistogramMetric, IoOperation, IoOrigin, PipelineLayer, PipelineObservation, PipelinePhase,
-    ProbeCapabilities, ProbePlan, RequestOrigin, SCHEMA_VERSION, SegmentRecord,
-    StackFingerprintRecord, StackKind, StorageEvent, WireRecord, write_record,
+    CorrelationConfidence, DetailPolicy, DiagnosticLevel, DiagnosticRecord, EdgeConfidence,
+    FileIdentity, FileIo, HeavyHitterDimension, HeavyHitterEntry, HeavyHitterMetric,
+    HeavyHitterSnapshot, Histogram, HistogramMetric, IoOperation, IoOrigin, PipelineLayer,
+    PipelineObservation, PipelinePhase, ProbeCapabilities, ProbePlan, RequestOrigin,
+    SCHEMA_VERSION, SegmentRecord, StackFingerprintRecord, StackKind, StorageEvent, WireRecord,
+    write_record,
 };
 use android_ebpf_types::{
-    FileIdentityLayout, FilterKey, HISTOGRAM_BUCKETS, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT,
-    KIND_BLOCK_ISSUE, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN, KernelAggregate,
+    BioRemapLayout, F2fsFolioLayout, FileExtentLayout, FileIdentityLayout, FilterKey,
+    HISTOGRAM_BUCKETS, KIND_BIO_REMAP, KIND_BLOCK_COMPLETE, KIND_BLOCK_INSERT, KIND_BLOCK_ISSUE,
+    KIND_FILE_EXTENT, KIND_FILE_IO, KIND_PIPELINE, KIND_REQUEST_ORIGIN, KernelAggregate,
     KernelEvent, LAYER_FILESYSTEM, LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS, MODE_BALANCED,
     MODE_BASIC, MODE_DEEP, MODE_RAW_ALL, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE,
     ORIGIN_CHECKPOINT, ORIGIN_FILE, ORIGIN_FILESYSTEM_METADATA, ORIGIN_GARBAGE_COLLECTION,
@@ -49,6 +52,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 const ISSUE_FORMAT: &str = "/sys/kernel/tracing/events/block/block_rq_issue/format";
 const COMPLETE_FORMAT: &str = "/sys/kernel/tracing/events/block/block_rq_complete/format";
 const INSERT_FORMAT: &str = "/sys/kernel/tracing/events/block/block_rq_insert/format";
+const BIO_REMAP_FORMAT: &str = "/sys/kernel/tracing/events/block/block_bio_remap/format";
 const SYS_ENTER_FORMAT: &str = "/sys/kernel/tracing/events/raw_syscalls/sys_enter/format";
 const SYS_EXIT_FORMAT: &str = "/sys/kernel/tracing/events/raw_syscalls/sys_exit/format";
 const VMLINUX_BTF: &str = "/sys/kernel/btf/vmlinux";
@@ -109,6 +113,24 @@ unsafe impl Pod for FileIdentityLayoutValue {}
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
+struct FileExtentLayoutValue(FileExtentLayout);
+
+unsafe impl Pod for FileExtentLayoutValue {}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct F2fsFolioLayoutValue(F2fsFolioLayout);
+
+unsafe impl Pod for F2fsFolioLayoutValue {}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct BioRemapLayoutValue(BioRemapLayout);
+
+unsafe impl Pod for BioRemapLayoutValue {}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
 struct RawFilterConfigValue(RawFilterConfig);
 
 unsafe impl Pod for RawFilterConfigValue {}
@@ -153,6 +175,16 @@ struct ContextProbe {
     format_hash: String,
 }
 
+struct F2fsExtentProbe {
+    layout: FileExtentLayout,
+    format_hash: String,
+}
+
+struct F2fsFolioProbe {
+    layout: F2fsFolioLayout,
+    format_hash: String,
+}
+
 struct CollectorConfig {
     capabilities: ProbeCapabilities,
     issue: TraceLayout,
@@ -160,8 +192,204 @@ struct CollectorConfig {
     insert: Option<TraceLayout>,
     syscall: Option<RawSyscallLayout>,
     file_identity_layout: Option<FileIdentityLayout>,
+    f2fs_extent_probe: Option<F2fsExtentProbe>,
+    f2fs_folio_probe: Option<F2fsFolioProbe>,
+    bio_remap_layout: Option<(BioRemapLayout, String)>,
     pipeline_probes: Vec<PipelineProbe>,
     context_probes: Vec<ContextProbe>,
+}
+
+#[derive(Debug, Clone)]
+struct F2fsExtentObservation {
+    ts_ns: u64,
+    device: u32,
+    fs_device: u32,
+    sector: u64,
+    sectors: u32,
+    inode: u64,
+    origin_key: u64,
+    pid: u32,
+    tid: u32,
+}
+
+#[derive(Debug, Default)]
+struct F2fsExtentAttributor {
+    extents: VecDeque<F2fsExtentObservation>,
+    paths: HashMap<(u32, u32, u64), (FileIdentity, android_ebpf_protocol::PathSnapshot, u64)>,
+}
+
+impl F2fsExtentAttributor {
+    const EXTENT_TTL_NS: u64 = 5_000_000_000;
+    const MAX_EXTENTS: usize = 16_384;
+
+    fn observe_raw_extent(&mut self, event: &KernelEvent) {
+        if event.kind != KIND_FILE_EXTENT || event.sectors == 0 {
+            return;
+        }
+        self.prune(event.ts_ns);
+        if let Some(existing) = self.extents.iter_mut().rev().find(|extent| {
+            extent.device == event.device
+                && extent.fs_device == event.fs_device
+                && extent.sector == event.sector
+                && extent.sectors == event.sectors
+                && extent.inode == event.inode
+        }) {
+            existing.ts_ns = event.ts_ns;
+            existing.origin_key = event.origin_id;
+            existing.pid = event.pid;
+            existing.tid = event.tid;
+            return;
+        }
+        if self.extents.len() == Self::MAX_EXTENTS {
+            self.extents.pop_front();
+        }
+        self.extents.push_back(F2fsExtentObservation {
+            ts_ns: event.ts_ns,
+            device: event.device,
+            fs_device: event.fs_device,
+            sector: event.sector,
+            sectors: event.sectors,
+            inode: event.inode,
+            origin_key: event.origin_id,
+            pid: event.pid,
+            tid: event.tid,
+        });
+    }
+
+    fn observe_bio_remap(&mut self, event: &KernelEvent) {
+        if event.kind != KIND_BIO_REMAP || event.sectors == 0 {
+            return;
+        }
+        self.prune(event.ts_ns);
+        let old_sector = event.requested_bytes;
+        let old_end = old_sector.saturating_add(u64::from(event.sectors));
+        let mut translated = Vec::new();
+        for extent in &self.extents {
+            let extent_end = extent.sector.saturating_add(u64::from(extent.sectors));
+            // Some Android device-mapper kernels report the final bio device
+            // in every remap record while old_dev advances through the stack.
+            // In that form, a preceding translated range is chained by final
+            // device plus sector overlap rather than old_dev alone.
+            let source_matches = extent.device == event.fs_device || extent.device == event.device;
+            if !source_matches
+                || extent.ts_ns > event.ts_ns
+                || extent.sector >= old_end
+                || old_sector >= extent_end
+            {
+                continue;
+            }
+            let overlap_start = extent.sector.max(old_sector);
+            let overlap_end = extent_end.min(old_end);
+            translated.push(F2fsExtentObservation {
+                ts_ns: event.ts_ns,
+                device: event.device,
+                fs_device: extent.fs_device,
+                sector: event.sector.saturating_add(overlap_start - old_sector),
+                sectors: u32::try_from(overlap_end - overlap_start).unwrap_or(u32::MAX),
+                inode: extent.inode,
+                origin_key: extent.origin_key,
+                pid: extent.pid,
+                tid: extent.tid,
+            });
+        }
+        for extent in translated {
+            if self.extents.len() == Self::MAX_EXTENTS {
+                self.extents.pop_front();
+            }
+            self.extents.push_back(extent);
+        }
+    }
+
+    fn observe_file_io(&mut self, file: &FileIo) {
+        let (Some(identity), Some(path)) = (&file.file_identity, &file.path_snapshot) else {
+            return;
+        };
+        self.paths.insert(
+            (
+                identity.fs_device_major,
+                identity.fs_device_minor,
+                identity.inode,
+            ),
+            (identity.clone(), path.clone(), file.end_ts_ns),
+        );
+    }
+
+    fn origins_for_issue(
+        &mut self,
+        issue: &BlockIssue,
+        correlation_salt: u64,
+    ) -> Vec<RequestOrigin> {
+        self.prune(issue.ts_ns);
+        let device = encode_device(issue.device_major, issue.device_minor);
+        let issue_end = issue.sector.saturating_add(u64::from(issue.sectors));
+        let mut origins = self
+            .extents
+            .iter()
+            .filter(|extent| {
+                let extent_end = extent.sector.saturating_add(u64::from(extent.sectors));
+                extent.device == device
+                    && extent.ts_ns <= issue.ts_ns
+                    && extent.sector < issue_end
+                    && issue.sector < extent_end
+            })
+            .map(|extent| {
+                let (major, minor) = decode_device(extent.fs_device);
+                let base_key = (major, minor, extent.inode);
+                let cached = self.paths.get(&base_key);
+                RequestOrigin {
+                    ts_ns: issue.ts_ns,
+                    request_id: issue.request_id,
+                    origin_id: opaque_key(
+                        extent.origin_key ^ extent.inode.rotate_left(17),
+                        correlation_salt,
+                    ),
+                    file: cached.map_or_else(
+                        || FileIdentity {
+                            fs_device_major: major,
+                            fs_device_minor: minor,
+                            inode: extent.inode,
+                            inode_generation: None,
+                            mount_id: None,
+                        },
+                        |(identity, _, _)| identity.clone(),
+                    ),
+                    path: cached.map(|(_, path, _)| path.clone()),
+                    origin: IoOrigin::File,
+                    operation: issue.operation,
+                    bytes: Some(u64::from(issue.bytes)),
+                    pid: extent.pid,
+                    tid: extent.tid,
+                    file_origin_confidence: EdgeConfidence::Exact,
+                    request_lifetime_confidence: EdgeConfidence::Probable,
+                    incomplete: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        origins.retain(|origin| {
+            seen.insert((
+                origin.file.fs_device_major,
+                origin.file.fs_device_minor,
+                origin.file.inode,
+                origin.file.inode_generation,
+                origin.file.mount_id,
+            ))
+        });
+        origins
+    }
+
+    fn prune(&mut self, now_ns: u64) {
+        while self
+            .extents
+            .front()
+            .is_some_and(|extent| now_ns.saturating_sub(extent.ts_ns) > Self::EXTENT_TTL_NS)
+        {
+            self.extents.pop_front();
+        }
+        self.paths.retain(|_, (_, _, observed_ts_ns)| {
+            now_ns.saturating_sub(*observed_ts_ns) <= 30_000_000_000
+        });
+    }
 }
 
 #[derive(Debug, Default)]
@@ -480,7 +708,11 @@ impl LiveHeavyHitters {
                     key,
                     origin.bytes.unwrap_or_default(),
                     0,
-                    Some(EdgeConfidence::Exact),
+                    Some(
+                        origin
+                            .file_origin_confidence
+                            .weakest(origin.request_lifetime_confidence),
+                    ),
                 );
             }
             _ => {}
@@ -567,6 +799,7 @@ impl FilterMaps {
             device_latency_ns: config.detail.device_latency_ns,
             min_bytes: config.filter.min_bytes.unwrap_or(0),
             max_bytes: config.filter.max_bytes.unwrap_or(0),
+            collector_pid: std::process::id(),
             pid_count: config.filter.pids.len() as u16,
             tid_count: config.filter.tids.len() as u16,
             uid_count: config.filter.uids.len() as u16,
@@ -620,13 +853,13 @@ fn operation_code(operation: IoOperation) -> u8 {
 }
 
 fn encode_device(major: u32, minor: u32) -> u32 {
-    (major << 8) | (minor & 0xff) | ((minor & 0x0fff00) << 12)
+    (major << 20) | (minor & 0x000f_ffff)
 }
 
 fn default_capture_config() -> CaptureConfig {
     CaptureConfig {
         generation: 1,
-        mode: CaptureMode::Balanced,
+        mode: CaptureMode::Deep,
         filter: CaptureFilter {
             match_all: true,
             ..CaptureFilter::default()
@@ -745,6 +978,14 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
         }
     }
     if let Some(layout) = config.syscall {
+        let identity_result = btf_layout::file_identity_layout_from_sysfs(Path::new(VMLINUX_BTF))
+            .and_then(|identity| configure_file_identity_layout(&mut bpf, identity));
+        emit_optional_probe_result(
+            session_id,
+            PipelineLayer::Syscall,
+            "syscall FD identity snapshot",
+            identity_result,
+        );
         let result = configure_syscall_layout(&mut bpf, layout)
             .and_then(|_| attach(&mut bpf, "raw_sys_enter", "raw_syscalls", "sys_enter"))
             .and_then(|_| attach(&mut bpf, "raw_sys_exit", "raw_syscalls", "sys_exit"));
@@ -763,6 +1004,8 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
             );
         }
     }
+    let mut direct_attribution_active = false;
+    let mut f2fs_extent_active = false;
     if let Some(layout) = config.file_identity_layout {
         let mut writeback_attached = false;
         let result = (|| -> Result<()> {
@@ -856,6 +1099,7 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
             "fentry/vfs+submit_bio+blk_mq_bio_to_request+tp_btf/block_bio_merge",
             result,
         ) {
+            direct_attribution_active = true;
             config.capabilities.exact_file_attribution = true;
             mark_exact_adapter_state(&mut config.capabilities, CapabilityState::Measured, None);
             mark_exact_writeback_state(&mut config.capabilities, writeback_attached);
@@ -866,6 +1110,87 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
                 &mut config.capabilities,
                 CapabilityState::Unavailable,
                 Some("runtime attach failed; tracepoint/heuristic fallback remains active"),
+            );
+        }
+    }
+    if let Some(probe) = &config.f2fs_extent_probe {
+        let result = configure_f2fs_extent_layout(&mut bpf, probe.layout)
+            .and_then(|_| attach(&mut bpf, "f2fs_file_extent", "f2fs", "f2fs_map_blocks"));
+        if emit_optional_probe_result(
+            session_id,
+            PipelineLayer::Filesystem,
+            "f2fs/f2fs_map_blocks extent adapter",
+            result,
+        ) {
+            f2fs_extent_active = true;
+            config.capabilities.exact_file_attribution = true;
+            for plan in config.capabilities.attach_plan.iter_mut().filter(|plan| {
+                plan.probe_kind == "tracepoint/extent"
+                    && plan.event_or_function == "f2fs_map_blocks"
+            }) {
+                plan.state = CapabilityState::Measured;
+            }
+        } else {
+            mark_attach_failed(
+                &mut config.capabilities,
+                PipelineLayer::Filesystem,
+                "f2fs_map_blocks",
+                false,
+            );
+        }
+    }
+    if let Some(probe) = &config.f2fs_folio_probe {
+        let result = configure_f2fs_folio_layout(&mut bpf, probe.layout).and_then(|_| {
+            attach(
+                &mut bpf,
+                "f2fs_folio_extent",
+                "f2fs",
+                "f2fs_submit_folio_write",
+            )
+        });
+        if emit_optional_probe_result(
+            session_id,
+            PipelineLayer::Filesystem,
+            "f2fs/f2fs_submit_folio_write extent adapter",
+            result,
+        ) {
+            f2fs_extent_active = true;
+            config.capabilities.exact_file_attribution = true;
+            for plan in config.capabilities.attach_plan.iter_mut().filter(|plan| {
+                plan.probe_kind == "tracepoint/extent"
+                    && plan.event_or_function == "f2fs_submit_folio_write"
+            }) {
+                plan.state = CapabilityState::Measured;
+            }
+        } else {
+            mark_attach_failed(
+                &mut config.capabilities,
+                PipelineLayer::Filesystem,
+                "f2fs_submit_folio_write",
+                false,
+            );
+        }
+    }
+    if let Some((layout, _)) = &config.bio_remap_layout {
+        let result = configure_bio_remap_layout(&mut bpf, *layout)
+            .and_then(|_| attach(&mut bpf, "block_bio_remap", "block", "block_bio_remap"));
+        if emit_optional_probe_result(
+            session_id,
+            PipelineLayer::Bio,
+            "block/block_bio_remap extent translation",
+            result,
+        ) {
+            for plan in config.capabilities.attach_plan.iter_mut().filter(|plan| {
+                plan.probe_kind == "tracepoint/remap" && plan.event_or_function == "block_bio_remap"
+            }) {
+                plan.state = CapabilityState::Measured;
+            }
+        } else {
+            mark_attach_failed(
+                &mut config.capabilities,
+                PipelineLayer::Bio,
+                "block_bio_remap",
+                false,
             );
         }
     }
@@ -1000,7 +1325,11 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
 
     let (control_tx, control_rx) = mpsc::channel::<CaptureControlCommand>();
     let control_session = session_id.to_owned();
-    thread::spawn(move || read_control_commands(&control_session, control_tx));
+    let control_running = running.clone();
+    thread::spawn(move || {
+        read_control_commands(&control_session, control_tx);
+        control_running.store(false, Ordering::Release);
+    });
     let health_interval = Duration::from_millis(health_interval_ms);
     let mut last_health = Instant::now();
     let mut sequence = 0_u64;
@@ -1019,7 +1348,14 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
     let mut stack_cohorts = HashMap::<(StackKind, u64), StackFingerprintRecord>::new();
     let mut stack_health = StackCaptureHealth::default();
     let correlation_salt = format_hash64(session_id.as_bytes());
-    while running.load(Ordering::Acquire) {
+    let mut f2fs_attributor =
+        (f2fs_extent_active && !direct_attribution_active).then(F2fsExtentAttributor::default);
+    let mut attached_bpf = Some(bpf);
+    loop {
+        if !running.load(Ordering::Acquire) {
+            // Detach producers before draining the ring; taken map FDs remain alive.
+            attached_bpf.take();
+        }
         for command in control_rx.try_iter() {
             let previous_config = active_config.clone();
             let mut acknowledgement = apply_control_command(&mut active_config, command);
@@ -1071,46 +1407,85 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
             output.flush()?;
         }
         let mut had_event = false;
-        while let Some(item) = ring.next() {
+        // A continuously busy ring must not starve stop/control/health handling.
+        for _ in 0..1024 {
+            let Some(item) = ring.next() else {
+                break;
+            };
             had_event = true;
-            let raw_event = decode_kernel_event(&item);
-            match raw_event
-                .and_then(|raw| parse_kernel_event(raw, correlation_salt).map(|event| (raw, event)))
-            {
-                Some((raw, event)) => {
-                    observe_stack_fingerprints(
-                        &raw,
-                        correlation_salt,
-                        &stack_traces,
-                        &mut stack_cohorts,
-                        &mut stack_health,
-                    );
-                    live_top.observe(&event);
-                    update_probe_health(
-                        session_id,
-                        &event,
-                        &mut probe_health,
-                        &mut pending_stage,
-                        &mut ambiguous_stage,
-                        &mut expired_stage,
-                        &mut reused_stage,
-                    );
-                    sequence += 1;
-                    emit_event_trace(session_id, sequence, &event);
-                    let event_ts_ns = storage_event_timestamp(&event);
-                    let record = WireRecord::Event {
-                        schema_version: SCHEMA_VERSION,
-                        sequence,
-                        event,
-                    };
-                    flight_recorder.observe(event_ts_ns, record.clone());
-                    write_record(&mut output, &record)?;
-                    emitted += 1;
+            let Some(raw) = decode_kernel_event(&item) else {
+                rejected += 1;
+                continue;
+            };
+            // Defensive exclusion for objects without the kernel-side PID filter.
+            // Resolving our own /proc reads would recursively create more FileIo.
+            if raw.kind == KIND_FILE_IO && raw.pid == std::process::id() {
+                continue;
+            }
+            if raw.kind == KIND_FILE_EXTENT {
+                if let Some(attributor) = &mut f2fs_attributor {
+                    attributor.observe_raw_extent(&raw);
                 }
-                None => rejected += 1,
+                continue;
+            }
+            if raw.kind == KIND_BIO_REMAP {
+                if let Some(attributor) = &mut f2fs_attributor {
+                    attributor.observe_bio_remap(&raw);
+                }
+                continue;
+            }
+            let Some(event) = parse_kernel_event(raw, correlation_salt) else {
+                rejected += 1;
+                continue;
+            };
+            observe_stack_fingerprints(
+                &raw,
+                correlation_salt,
+                &stack_traces,
+                &mut stack_cohorts,
+                &mut stack_health,
+            );
+            if let StorageEvent::FileIo(file) = &event
+                && let Some(attributor) = &mut f2fs_attributor
+            {
+                attributor.observe_file_io(file);
+            }
+            let derived = if let (Some(attributor), StorageEvent::BlockIssue(issue)) =
+                (&mut f2fs_attributor, &event)
+            {
+                attributor
+                    .origins_for_issue(issue, correlation_salt)
+                    .into_iter()
+                    .map(StorageEvent::RequestOrigin)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            for event in std::iter::once(event).chain(derived) {
+                live_top.observe(&event);
+                update_probe_health(
+                    session_id,
+                    &event,
+                    &mut probe_health,
+                    &mut pending_stage,
+                    &mut ambiguous_stage,
+                    &mut expired_stage,
+                    &mut reused_stage,
+                );
+                sequence += 1;
+                emit_event_trace(session_id, sequence, &event);
+                let event_ts_ns = storage_event_timestamp(&event);
+                let record = WireRecord::Event {
+                    schema_version: SCHEMA_VERSION,
+                    sequence,
+                    event,
+                };
+                flight_recorder.observe(event_ts_ns, record.clone());
+                write_record(&mut output, &record)?;
+                emitted += 1;
             }
         }
-        if last_health.elapsed() >= health_interval {
+        if last_health.elapsed() >= health_interval || !running.load(Ordering::Acquire) {
             aggregate_epoch = aggregate_epoch.saturating_add(1);
             let aggregate_snapshot = read_aggregate_snapshot(
                 session_id,
@@ -1284,6 +1659,9 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
             )?;
             output.flush()?;
             last_health = Instant::now();
+        }
+        if !had_event && !running.load(Ordering::Acquire) {
+            break;
         }
         if !had_event {
             thread::sleep(Duration::from_millis(2));
@@ -1651,6 +2029,8 @@ fn emit_event_trace(session_id: &str, sequence: u64, event: &StorageEvent) {
         StorageEvent::BlockInsert(value) => ("block", Some(value.request_id), None, "insert"),
         StorageEvent::BlockIssue(value) => ("block", Some(value.request_id), None, "issue"),
         StorageEvent::BlockComplete(value) => ("block", Some(value.request_id), None, "complete"),
+        // Host-projected observations have no kernel request identity.
+        StorageEvent::ObservedBlockCompletion(_) => ("perfetto", None, None, "observed_complete"),
         StorageEvent::FileIo(value) => ("file", None, value.node_id, "syscall"),
         StorageEvent::Pipeline(value) => (
             "pipeline",
@@ -1696,6 +2076,7 @@ fn storage_event_timestamp(event: &StorageEvent) -> u64 {
         StorageEvent::BlockInsert(value) => value.ts_ns,
         StorageEvent::BlockIssue(value) => value.ts_ns,
         StorageEvent::BlockComplete(value) => value.ts_ns,
+        StorageEvent::ObservedBlockCompletion(value) => value.completion.ts_ns,
         StorageEvent::FileIo(value) => value.end_ts_ns,
         StorageEvent::Pipeline(value) => value.end_ts_ns.unwrap_or(value.ts_ns),
         StorageEvent::RequestOrigin(value) => value.ts_ns,
@@ -1719,6 +2100,7 @@ fn update_probe_health(
         StorageEvent::BlockInsert(_) => ("block.insert", None),
         StorageEvent::BlockIssue(_) => ("block.issue", None),
         StorageEvent::BlockComplete(_) => ("block.complete", None),
+        StorageEvent::ObservedBlockCompletion(_) => ("perfetto.observed_complete", None),
         StorageEvent::FileIo(_) => ("syscall.file_io", None),
         StorageEvent::Pipeline(value) => (
             match value.layer {
@@ -1818,8 +2200,8 @@ fn update_probe_health(
 
 fn capabilities() -> Result<CollectorConfig> {
     let issue_text =
-        fs::read_to_string(ISSUE_FORMAT).with_context(|| format!("cannot read {ISSUE_FORMAT}"))?;
-    let complete_text = fs::read_to_string(COMPLETE_FORMAT)
+        read_kernel_text(ISSUE_FORMAT).with_context(|| format!("cannot read {ISSUE_FORMAT}"))?;
+    let complete_text = read_kernel_text(COMPLETE_FORMAT)
         .with_context(|| format!("cannot read {COMPLETE_FORMAT}"))?;
     let issue = parse_layout(&issue_text)?;
     let complete = parse_layout(&complete_text)?;
@@ -1844,18 +2226,44 @@ fn capabilities() -> Result<CollectorConfig> {
             ),
         }
     };
-    let insert = fs::read_to_string(INSERT_FORMAT)
+    let insert = read_kernel_text(INSERT_FORMAT)
         .ok()
         .and_then(|text| parse_layout(&text).ok());
-    let syscall = fs::read_to_string(SYS_ENTER_FORMAT)
+    let syscall = read_kernel_text(SYS_ENTER_FORMAT)
         .ok()
-        .zip(fs::read_to_string(SYS_EXIT_FORMAT).ok())
+        .zip(read_kernel_text(SYS_EXIT_FORMAT).ok())
         .and_then(|(enter, exit)| parse_raw_syscall_layout(&enter, &exit).ok());
     let ufs_events = discover_events("ufs");
     let scsi_events = discover_events("scsi");
     let sched_events = discover_events("sched");
     let fs_events = discover_events("f2fs");
     let ext4_events = discover_events("ext4");
+    let f2fs_extent_probe = fs_events
+        .iter()
+        .find(|event| event.as_str() == "f2fs/f2fs_map_blocks")
+        .and_then(|_| {
+            let format =
+                read_kernel_text("/sys/kernel/tracing/events/f2fs/f2fs_map_blocks/format").ok()?;
+            Some(F2fsExtentProbe {
+                layout: parse_f2fs_extent_layout(&format).ok()?,
+                format_hash: format_hash(&format),
+            })
+        });
+    let f2fs_folio_probe = fs_events
+        .iter()
+        .find(|event| event.as_str() == "f2fs/f2fs_submit_folio_write")
+        .and_then(|_| {
+            let format =
+                read_kernel_text("/sys/kernel/tracing/events/f2fs/f2fs_submit_folio_write/format")
+                    .ok()?;
+            Some(F2fsFolioProbe {
+                layout: parse_f2fs_folio_layout(&format).ok()?,
+                format_hash: format_hash(&format),
+            })
+        });
+    let bio_remap_layout = read_kernel_text(BIO_REMAP_FORMAT)
+        .ok()
+        .and_then(|format| Some((parse_bio_remap_layout(&format).ok()?, format_hash(&format))));
     let mut pipeline_probes = Vec::new();
     let mut context_probes = Vec::new();
     if let Some(event) = ufs_events
@@ -1885,7 +2293,7 @@ fn capabilities() -> Result<CollectorConfig> {
     }) && let Some((group, event_name)) = event.split_once('/')
     {
         let path = format!("/sys/kernel/tracing/events/{group}/{event_name}/format");
-        if let Ok(format) = fs::read_to_string(path) {
+        if let Ok(format) = read_kernel_text(path) {
             context_probes.push(ContextProbe {
                 program_name: "ufs_context",
                 group: group.into(),
@@ -1963,7 +2371,7 @@ fn capabilities() -> Result<CollectorConfig> {
     }) && let Some((group, event_name)) = event.split_once('/')
     {
         let path = format!("/sys/kernel/tracing/events/{group}/{event_name}/format");
-        if let Ok(format) = fs::read_to_string(path) {
+        if let Ok(format) = read_kernel_text(path) {
             context_probes.push(ContextProbe {
                 program_name: "fs_context",
                 group: group.into(),
@@ -1979,7 +2387,7 @@ fn capabilities() -> Result<CollectorConfig> {
         && let Some((group, event_name)) = event.split_once('/')
     {
         let path = format!("/sys/kernel/tracing/events/{group}/{event_name}/format");
-        if let Ok(format) = fs::read_to_string(path) {
+        if let Ok(format) = read_kernel_text(path) {
             context_probes.push(ContextProbe {
                 program_name: "sched_context",
                 group: group.into(),
@@ -2003,6 +2411,13 @@ fn capabilities() -> Result<CollectorConfig> {
             layout.address_space_host_offset != android_ebpf_types::OFFSET_MISSING
         }) {
             pipeline_layers.push(PipelineLayer::Writeback);
+        }
+    }
+    if f2fs_extent_probe.is_some() || f2fs_folio_probe.is_some() {
+        for layer in [PipelineLayer::Filesystem, PipelineLayer::Bio] {
+            if !pipeline_layers.contains(&layer) {
+                pipeline_layers.push(layer);
+            }
         }
     }
     for probe in &pipeline_probes {
@@ -2033,7 +2448,7 @@ fn capabilities() -> Result<CollectorConfig> {
             &complete_text,
         ),
     ];
-    attach_plan.push(match fs::read_to_string(INSERT_FORMAT) {
+    attach_plan.push(match read_kernel_text(INSERT_FORMAT) {
         Ok(format) if insert.is_some() => probe_plan(
             PipelineLayer::BlockQueue,
             "tracepoint",
@@ -2058,8 +2473,8 @@ fn capabilities() -> Result<CollectorConfig> {
             state: CapabilityState::Measured,
             format_hash: Some(format_hash(&format!(
                 "{}{}",
-                fs::read_to_string(SYS_ENTER_FORMAT).unwrap_or_default(),
-                fs::read_to_string(SYS_EXIT_FORMAT).unwrap_or_default()
+                read_kernel_text(SYS_ENTER_FORMAT).unwrap_or_default(),
+                read_kernel_text(SYS_EXIT_FORMAT).unwrap_or_default()
             ))),
             reason: None,
         }
@@ -2121,6 +2536,47 @@ fn capabilities() -> Result<CollectorConfig> {
                 &reason,
             ),
         ]);
+    }
+    if let Some(probe) = &f2fs_extent_probe {
+        attach_plan.push(ProbePlan {
+            layer: PipelineLayer::Filesystem,
+            probe_kind: "tracepoint/extent".into(),
+            group: "f2fs".into(),
+            event_or_function: "f2fs_map_blocks".into(),
+            state: CapabilityState::Derived,
+            format_hash: Some(probe.format_hash.clone()),
+            reason: Some(
+                "exact inode-to-physical-extent evidence; request lifetime remains probable without rq identity"
+                    .into(),
+            ),
+        });
+    }
+    if let Some(probe) = &f2fs_folio_probe {
+        attach_plan.push(ProbePlan {
+            layer: PipelineLayer::Filesystem,
+            probe_kind: "tracepoint/extent".into(),
+            group: "f2fs".into(),
+            event_or_function: "f2fs_submit_folio_write".into(),
+            state: CapabilityState::Derived,
+            format_hash: Some(probe.format_hash.clone()),
+            reason: Some(
+                "exact inode-to-allocated-block evidence for new and out-of-place writes; request lifetime remains probable without rq identity"
+                    .into(),
+            ),
+        });
+    }
+    if let Some((_, format_hash)) = &bio_remap_layout {
+        attach_plan.push(ProbePlan {
+            layer: PipelineLayer::Bio,
+            probe_kind: "tracepoint/remap".into(),
+            group: "block".into(),
+            event_or_function: "block_bio_remap".into(),
+            state: CapabilityState::Derived,
+            format_hash: Some(format_hash.clone()),
+            reason: Some(
+                "translates filesystem/device-mapper extents to final block device".into(),
+            ),
+        });
     }
     attach_plan.extend(pipeline_probes.iter().map(|probe| ProbePlan {
         layer: probe.layer,
@@ -2253,6 +2709,9 @@ fn capabilities() -> Result<CollectorConfig> {
         insert,
         syscall,
         file_identity_layout,
+        f2fs_extent_probe,
+        f2fs_folio_probe,
+        bio_remap_layout,
         pipeline_probes,
         context_probes,
     })
@@ -2285,7 +2744,7 @@ fn build_pipeline_probe(
 ) -> Option<PipelineProbe> {
     let (group, event_name) = event.split_once('/')?;
     let path = format!("/sys/kernel/tracing/events/{group}/{event_name}/format");
-    let format = fs::read_to_string(path).ok()?;
+    let format = read_kernel_text(path).ok()?;
     let layout = parse_pipeline_layout(
         &format,
         key_aliases,
@@ -2349,7 +2808,7 @@ fn probe_plan(
 }
 
 fn discover_events(needle: &str) -> Vec<String> {
-    let Ok(groups) = fs::read_dir("/sys/kernel/tracing/events") else {
+    let Ok(groups) = fs::read_dir(trace_path("/sys/kernel/tracing/events")) else {
         return Vec::new();
     };
     let mut result = Vec::new();
@@ -2390,12 +2849,51 @@ fn configure_syscall_layout(bpf: &mut Ebpf, layout: RawSyscallLayout) -> Result<
     Ok(())
 }
 
-fn configure_file_identity_layout(bpf: &mut Ebpf, layout: FileIdentityLayout) -> Result<()> {
+fn configure_file_identity_layout(bpf: &mut Ebpf, mut layout: FileIdentityLayout) -> Result<()> {
+    layout.reserved[0] = u16::from(
+        [
+            layout.task_files_offset,
+            layout.files_fdt_offset,
+            layout.fdtable_fd_offset,
+            layout.fdtable_max_fds_offset,
+            layout.file_flags_offset,
+            layout.file_pos_offset,
+        ]
+        .iter()
+        .all(|offset| *offset != android_ebpf_types::OFFSET_MISSING),
+    );
     let map = bpf
         .map_mut("FILE_IDENTITY_LAYOUT")
         .context("FILE_IDENTITY_LAYOUT map is missing")?;
     let mut array = Array::<_, FileIdentityLayoutValue>::try_from(map)?;
     array.set(0, FileIdentityLayoutValue(layout), 0)?;
+    Ok(())
+}
+
+fn configure_f2fs_extent_layout(bpf: &mut Ebpf, layout: FileExtentLayout) -> Result<()> {
+    let map = bpf
+        .map_mut("F2FS_EXTENT_LAYOUT")
+        .context("F2FS_EXTENT_LAYOUT map is missing")?;
+    let mut array = Array::<_, FileExtentLayoutValue>::try_from(map)?;
+    array.set(0, FileExtentLayoutValue(layout), 0)?;
+    Ok(())
+}
+
+fn configure_f2fs_folio_layout(bpf: &mut Ebpf, layout: F2fsFolioLayout) -> Result<()> {
+    let map = bpf
+        .map_mut("F2FS_FOLIO_LAYOUT")
+        .context("F2FS_FOLIO_LAYOUT map is missing")?;
+    let mut array = Array::<_, F2fsFolioLayoutValue>::try_from(map)?;
+    array.set(0, F2fsFolioLayoutValue(layout), 0)?;
+    Ok(())
+}
+
+fn configure_bio_remap_layout(bpf: &mut Ebpf, layout: BioRemapLayout) -> Result<()> {
+    let map = bpf
+        .map_mut("BIO_REMAP_LAYOUT")
+        .context("BIO_REMAP_LAYOUT map is missing")?;
+    let mut array = Array::<_, BioRemapLayoutValue>::try_from(map)?;
+    array.set(0, BioRemapLayoutValue(layout), 0)?;
     Ok(())
 }
 
@@ -2509,14 +3007,45 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
             status: event.status,
         })),
         KIND_FILE_IO => {
-            let path = resolve_fd_path(event.pid, event.fd);
+            let observed_identity = resolve_fd_identity(event.pid, event.fd);
+            let kernel_identity = (event.inode != 0).then(|| {
+                let (major, minor) = decode_device(event.fs_device);
+                FileIdentity {
+                    fs_device_major: major,
+                    fs_device_minor: minor,
+                    inode: event.inode,
+                    inode_generation: None,
+                    mount_id: None,
+                }
+            });
+            let path = if fd_identity_matches(kernel_identity.as_ref(), observed_identity.as_ref())
+            {
+                let candidate = resolve_fd_path(event.pid, event.fd);
+                // Check again after readlink to reject an FD recycled during resolution.
+                if fd_identity_matches(
+                    kernel_identity.as_ref(),
+                    resolve_fd_identity(event.pid, event.fd).as_ref(),
+                ) {
+                    candidate
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let file_identity = kernel_identity.map(|mut identity| {
+                if path.is_some() {
+                    identity.mount_id = observed_identity.as_ref().and_then(|value| value.mount_id);
+                }
+                identity
+            });
             let path_snapshot = path
                 .clone()
                 .map(|value| android_ebpf_protocol::PathSnapshot {
                     deleted: value.ends_with(" (deleted)"),
                     path: Some(value),
                     source: android_ebpf_protocol::PathSource::ProcFd,
-                    captured_ts_ns: event.ts_ns,
+                    captured_ts_ns: monotonic_ns(),
                 });
             let confidence = if path.is_some() {
                 AttributionConfidence::Attributed
@@ -2535,16 +3064,14 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
                 comm: decode_comm(&event.comm),
                 path,
                 confidence,
-                file_identity: resolve_fd_identity(event.pid, event.fd),
+                file_identity,
                 path_snapshot,
-                offset: resolve_fdinfo_value(event.pid, event.fd, "pos", 10).map(|position| {
-                    if event.return_value > 0 {
-                        position.saturating_sub(event.return_value as u64)
-                    } else {
-                        position
-                    }
-                }),
-                io_mode: resolve_fd_mode(event.pid, event.fd),
+                offset: (event.inode != 0).then_some(event.origin_id),
+                io_mode: if event.inode != 0 {
+                    file_mode_from_flags(u64::from(event.origin_flags))
+                } else {
+                    android_ebpf_protocol::FileIoMode::Unknown
+                },
                 node_id: Some(request_id),
             }))
         }
@@ -2580,6 +3107,8 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
                 bytes: (event.bytes != 0).then_some(u64::from(event.bytes)),
                 pid: event.pid,
                 tid: event.tid,
+                file_origin_confidence: EdgeConfidence::Exact,
+                request_lifetime_confidence: EdgeConfidence::Exact,
                 incomplete: event.origin_flags & ORIGIN_INCOMPLETE != 0,
             }))
         }
@@ -2671,19 +3200,33 @@ fn resolve_fdinfo_value(pid: u32, fd: i32, key: &str, radix: u32) -> Option<u64>
     if fd < 0 {
         return None;
     }
-    let value = fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).ok()?;
+    let value = read_kernel_text(format!("/proc/{pid}/fdinfo/{fd}")).ok()?;
     value.lines().find_map(|line| {
         let raw = line.strip_prefix(key)?.strip_prefix(':')?.trim();
         u64::from_str_radix(raw, radix).ok()
     })
 }
 
-fn resolve_fd_mode(pid: u32, fd: i32) -> android_ebpf_protocol::FileIoMode {
-    let Some(flags) = resolve_fdinfo_value(pid, fd, "flags", 8) else {
-        return android_ebpf_protocol::FileIoMode::Unknown;
+fn fd_identity_matches(captured: Option<&FileIdentity>, observed: Option<&FileIdentity>) -> bool {
+    matches!((captured, observed), (Some(a), Some(b)) if a.fs_device_major == b.fs_device_major && a.fs_device_minor == b.fs_device_minor && a.inode == b.inode)
+}
+
+fn monotonic_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
     };
-    const O_DIRECT: u64 = 0o40000;
-    const O_SYNC_MASK: u64 = 0o4010000;
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64)
+}
+
+fn file_mode_from_flags(flags: u64) -> android_ebpf_protocol::FileIoMode {
+    const O_DIRECT: u64 = libc::O_DIRECT as u64;
+    const O_SYNC_MASK: u64 = libc::O_SYNC as u64;
     if flags & O_DIRECT != 0 {
         android_ebpf_protocol::FileIoMode::Direct
     } else if flags & O_SYNC_MASK != 0 {
@@ -2694,9 +3237,7 @@ fn resolve_fd_mode(pid: u32, fd: i32) -> android_ebpf_protocol::FileIoMode {
 }
 
 fn decode_device(device: u32) -> (u32, u32) {
-    let major = (device >> 8) & 0x0fff;
-    let minor = (device & 0x00ff) | ((device >> 12) & 0x0fff00);
-    (major, minor)
+    (device >> 20, device & 0x000f_ffff)
 }
 
 fn decode_operation(value: u8) -> IoOperation {
@@ -2718,9 +3259,7 @@ fn decode_comm(value: &[u8; 16]) -> String {
 }
 
 fn read_trimmed(path: &str) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .map(|value| value.trim().into())
+    read_kernel_text(path).ok().map(|value| value.trim().into())
 }
 
 fn emit_diagnostic(
@@ -2769,6 +3308,44 @@ fn emit_diagnostic(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recycled_fd_never_supplies_another_files_path() {
+        let original = android_ebpf_protocol::FileIdentity {
+            fs_device_major: 254,
+            fs_device_minor: 63,
+            inode: 101,
+            inode_generation: None,
+            mount_id: None,
+        };
+        let recycled = android_ebpf_protocol::FileIdentity {
+            inode: 202,
+            ..original.clone()
+        };
+        assert!(super::fd_identity_matches(Some(&original), Some(&original)));
+        assert!(!super::fd_identity_matches(
+            Some(&original),
+            Some(&recycled)
+        ));
+        assert!(!super::fd_identity_matches(None, Some(&original)));
+        assert!(!super::fd_identity_matches(Some(&original), None));
+    }
+
+    #[test]
+    fn native_direct_flag_is_not_reported_as_buffered() {
+        assert_eq!(
+            super::file_mode_from_flags(libc::O_DIRECT as u64),
+            android_ebpf_protocol::FileIoMode::Direct
+        );
+        assert_eq!(
+            super::file_mode_from_flags(0),
+            android_ebpf_protocol::FileIoMode::Buffered
+        );
+        assert_eq!(
+            super::file_mode_from_flags(libc::O_SYNC as u64),
+            android_ebpf_protocol::FileIoMode::Sync
+        );
+    }
+
     use super::*;
 
     fn hello_record() -> WireRecord {
@@ -2831,7 +3408,7 @@ mod tests {
             ts_ns: 100,
             request_id: 0xfeed,
             origin_id: 0xbeef,
-            fs_device: (259 << 8) | 7,
+            fs_device: (259 << 20) | 7,
             inode: 1234,
             inode_generation: 9,
             mount_id: 42,
@@ -2861,6 +3438,79 @@ mod tests {
         assert_eq!(origin.file.mount_id, Some(42));
         assert_eq!(origin.bytes, Some(4096));
         assert!(origin.incomplete);
+    }
+
+    #[test]
+    fn f2fs_extent_attributes_file_when_request_pointer_is_unavailable() {
+        let mut attributor = F2fsExtentAttributor::default();
+        let filesystem_device = encode_device(254, 11);
+        let intermediate_device = encode_device(259, 76);
+        let block_device = encode_device(8, 32);
+        attributor.observe_raw_extent(&KernelEvent {
+            ts_ns: 100,
+            sector: 8_192,
+            origin_id: 1_024,
+            inode: 55,
+            device: filesystem_device,
+            fs_device: filesystem_device,
+            sectors: 16,
+            bytes: 8_192,
+            pid: 10,
+            tid: 11,
+            kind: KIND_FILE_EXTENT,
+            ..KernelEvent::default()
+        });
+        attributor.observe_bio_remap(&KernelEvent {
+            ts_ns: 150,
+            sector: 8_192,
+            requested_bytes: 8_192,
+            device: block_device,
+            fs_device: filesystem_device,
+            sectors: 16,
+            kind: KIND_BIO_REMAP,
+            ..KernelEvent::default()
+        });
+        // V2602DA reports the final 8:32 bio device in both remap records;
+        // old_dev advances to the intermediate dm device on the second one.
+        attributor.observe_bio_remap(&KernelEvent {
+            ts_ns: 151,
+            sector: 20_000,
+            requested_bytes: 8_192,
+            device: block_device,
+            fs_device: intermediate_device,
+            sectors: 16,
+            kind: KIND_BIO_REMAP,
+            ..KernelEvent::default()
+        });
+
+        let origins = attributor.origins_for_issue(
+            &BlockIssue {
+                ts_ns: 200,
+                request_id: 77,
+                device_major: 8,
+                device_minor: 32,
+                sector: 20_008,
+                sectors: 8,
+                bytes: 4_096,
+                operation: IoOperation::Read,
+                pid: 12,
+                tid: 13,
+                cpu: 0,
+                comm: "reader".into(),
+            },
+            99,
+        );
+
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].file.inode, 55);
+        assert_eq!(origins[0].file.fs_device_major, 254);
+        assert_eq!(origins[0].file.fs_device_minor, 11);
+        assert_eq!(origins[0].request_id, 77);
+        assert_eq!(origins[0].file_origin_confidence, EdgeConfidence::Exact);
+        assert_eq!(
+            origins[0].request_lifetime_confidence,
+            EdgeConfidence::Probable
+        );
     }
 
     #[test]
@@ -2944,4 +3594,17 @@ mod tests {
                 .all(|plan| plan.state == CapabilityState::Unavailable)
         );
     }
+}
+
+fn trace_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let path = path.as_ref();
+    if !std::path::Path::new("/sys/kernel/tracing/events").is_dir()
+        && let Ok(suffix) = path.strip_prefix("/sys/kernel/tracing")
+    {
+        return std::path::Path::new("/sys/kernel/debug/tracing").join(suffix);
+    }
+    path.to_owned()
+}
+fn read_kernel_text(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    fs::read_to_string(trace_path(path))
 }
