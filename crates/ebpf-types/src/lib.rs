@@ -7,6 +7,8 @@ pub const KIND_BLOCK_INSERT: u8 = 3;
 pub const KIND_FILE_IO: u8 = 4;
 pub const KIND_PIPELINE: u8 = 5;
 pub const KIND_REQUEST_ORIGIN: u8 = 6;
+pub const KIND_FILE_EXTENT: u8 = 7;
+pub const KIND_BIO_REMAP: u8 = 8;
 pub const ORIGIN_KIND_MASK: u32 = 0xff;
 pub const ORIGIN_FILE: u32 = 1;
 pub const ORIGIN_FILESYSTEM_METADATA: u32 = 2;
@@ -73,7 +75,52 @@ pub struct FileIdentityLayout {
     pub inode_generation_offset: u16,
     pub superblock_device_offset: u16,
     pub address_space_host_offset: u16,
+    pub task_files_offset: u16,
+    pub files_fdt_offset: u16,
+    pub fdtable_fd_offset: u16,
+    pub fdtable_max_fds_offset: u16,
+    pub file_flags_offset: u16,
+    pub file_pos_offset: u16,
     pub reserved: [u16; 2],
+}
+
+/// Runtime offsets for the stable fields exported by f2fs_map_blocks.
+/// F2FS block addresses are expressed in 4 KiB filesystem blocks.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileExtentLayout {
+    pub dev_offset: u16,
+    pub inode_offset: u16,
+    pub physical_block_offset: u16,
+    pub block_count_offset: u16,
+    pub result_offset: u16,
+    pub physical_block_size: u8,
+    pub reserved: u8,
+}
+
+/// Runtime offsets for F2FS per-folio write submission tracepoints. Unlike
+/// `f2fs_map_blocks`, this event exposes the allocated physical block for a
+/// newly-created page before the bio reaches device-mapper.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct F2fsFolioLayout {
+    pub dev_offset: u16,
+    pub inode_offset: u16,
+    pub physical_block_offset: u16,
+    pub data_type_offset: u16,
+    pub physical_block_size: u8,
+    pub reserved: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BioRemapLayout {
+    pub device_offset: u16,
+    pub sector_offset: u16,
+    pub sectors_offset: u16,
+    pub old_device_offset: u16,
+    pub old_sector_offset: u16,
+    pub reserved: [u16; 3],
 }
 
 #[repr(C)]
@@ -110,6 +157,10 @@ pub struct PipelineTraceLayout {
 pub struct FileStart {
     pub start_ts_ns: u64,
     pub requested_bytes: u64,
+    pub inode: u64,
+    pub file_offset: u64,
+    pub fs_device: u32,
+    pub file_flags: u32,
     pub fd: i32,
     pub operation: u8,
     pub reserved: [u8; 3],
@@ -134,6 +185,7 @@ pub struct RawFilterConfig {
     pub device_latency_ns: u64,
     pub min_bytes: u32,
     pub max_bytes: u32,
+    pub collector_pid: u32,
     pub pid_count: u16,
     pub tid_count: u16,
     pub uid_count: u16,

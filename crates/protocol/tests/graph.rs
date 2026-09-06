@@ -206,6 +206,8 @@ fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
             bytes: Some(2048),
             pid: 10,
             tid: 11,
+            file_origin_confidence: EdgeConfidence::Exact,
+            request_lifetime_confidence: EdgeConfidence::Exact,
             incomplete: false,
         }));
     }
@@ -256,4 +258,58 @@ fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
             .and_then(|snapshot| snapshot.path.as_deref()),
         Some("/data/exact-a.bin")
     );
+}
+
+#[test]
+fn extent_origin_keeps_exact_file_evidence_but_probable_request_lifetime() {
+    let mut engine = AnalysisEngine::new();
+    engine.ingest(StorageEvent::RequestOrigin(RequestOrigin {
+        ts_ns: 100,
+        request_id: 91,
+        origin_id: 501,
+        file: identity(303),
+        path: None,
+        origin: IoOrigin::File,
+        operation: IoOperation::Read,
+        bytes: Some(4096),
+        pid: 10,
+        tid: 11,
+        file_origin_confidence: EdgeConfidence::Exact,
+        request_lifetime_confidence: EdgeConfidence::Probable,
+        incomplete: false,
+    }));
+    engine.ingest(StorageEvent::BlockIssue(BlockIssue {
+        ts_ns: 110,
+        request_id: 91,
+        device_major: 259,
+        device_minor: 7,
+        sector: 8192,
+        sectors: 8,
+        bytes: 4096,
+        operation: IoOperation::Read,
+        pid: 10,
+        tid: 11,
+        cpu: 0,
+        comm: "reader".into(),
+    }));
+    let completed = engine
+        .ingest(StorageEvent::BlockComplete(BlockComplete {
+            ts_ns: 200,
+            request_id: 91,
+            device_major: 259,
+            device_minor: 7,
+            status: 0,
+        }))
+        .expect("request completes");
+
+    let graph = engine.transaction_for(&completed);
+    let request = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == IoNodeKind::BlockRequest)
+        .expect("request node");
+    let origins = graph.file_origins_for(request.node_id);
+    assert_eq!(origins.len(), 1);
+    assert_eq!(origins[0].file.inode, 303);
+    assert_eq!(origins[0].confidence, EdgeConfidence::Probable);
 }

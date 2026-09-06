@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [features]
 default = []
-gui = ["dep:eframe", "dep:egui_plot", "dep:rfd"]
+gui = ["dep:eframe", "dep:egui_plot", "dep:rfd", "dep:image"]
 
 [dependencies]
 android-ebpf-protocol = { path = "../protocol" }
@@ -19,6 +19,7 @@ csv.workspace = true
 eframe = { workspace = true, optional = true }
 egui_plot = { workspace = true, optional = true }
 rfd = { workspace = true, optional = true }
+image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

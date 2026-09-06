@@ -15,7 +15,17 @@ fn release_bundle_artifacts_and_session_path_are_automatic() {
             .unwrap();
     assert_eq!(paths.agent, bundle.join("android-ebpf-agent"));
     assert_eq!(paths.bpf_object, bundle.join("android-storage-ebpf.o"));
-    assert_eq!(paths.session.parent(), Some(sessions.as_path()));
+    assert_eq!(paths.session.parent(), Some(paths.log_directory.as_path()));
+    assert_eq!(paths.log_directory.parent(), Some(sessions.as_path()));
+    assert!(
+        paths
+            .log_directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(&paths.session_id)
+    );
+    assert_eq!(paths.agent_log.parent(), paths.session.parent());
     assert_eq!(
         paths.session.extension().and_then(|value| value.to_str()),
         Some("ndjson")

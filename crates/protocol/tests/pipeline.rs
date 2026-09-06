@@ -53,8 +53,8 @@ fn pipeline_reports_queue_device_and_total_latency() {
         .expect("request completes");
 
     assert_eq!(io.queue_latency_ns, Some(2_000_000));
-    assert_eq!(io.device_latency_ns, 5_000_000);
-    assert_eq!(io.total_latency_ns, 7_000_000);
+    assert_eq!(io.device_latency_ns, Some(5_000_000));
+    assert_eq!(io.total_latency_ns, Some(7_000_000));
     assert_eq!(io.size_class, IoSizeClass::Large);
     assert_eq!(io.access_pattern, AccessPattern::Unknown);
 }
@@ -69,8 +69,8 @@ fn utilization_is_union_of_overlapping_request_intervals() {
 
     let summary = engine.summary();
     assert_eq!(summary.logging_ns, 7_000_000);
-    assert_eq!(summary.busy_ns, 7_000_000);
-    assert_eq!(summary.idle_ns, 0);
+    assert_eq!(summary.busy_ns, Some(7_000_000));
+    assert_eq!(summary.idle_ns, Some(0));
     assert_eq!(summary.category_summaries.len(), 2);
     assert_eq!(
         summary.category_summaries[1].access_pattern,
@@ -104,6 +104,6 @@ fn a_gap_between_requests_is_idle_time() {
 
     let summary = engine.summary();
     assert_eq!(summary.logging_ns, 7_000_000);
-    assert_eq!(summary.busy_ns, 4_000_000);
-    assert_eq!(summary.idle_ns, 3_000_000);
+    assert_eq!(summary.busy_ns, Some(4_000_000));
+    assert_eq!(summary.idle_ns, Some(3_000_000));
 }

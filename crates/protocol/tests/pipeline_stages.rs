@@ -6,6 +6,7 @@ use android_ebpf_protocol::{
 
 fn completed() -> CompletedIo {
     CompletedIo {
+        evidence: None,
         insert: Some(BlockInsert {
             ts_ns: 1_000,
             request_id: 7,
@@ -37,11 +38,11 @@ fn completed() -> CompletedIo {
             device_minor: 0,
             status: 0,
         },
-        latency_ns: 800,
+        latency_ns: Some(800),
         queue_latency_ns: Some(200),
-        device_latency_ns: 800,
-        total_latency_ns: 1_000,
-        queue_depth_after: 0,
+        device_latency_ns: Some(800),
+        total_latency_ns: Some(1_000),
+        queue_depth_after: Some(0),
         access_pattern: AccessPattern::Unknown,
         size_class: IoSizeClass::Small,
     }

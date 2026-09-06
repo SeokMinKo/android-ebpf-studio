@@ -1,5 +1,7 @@
 # Exact file-to-block attribution handoff
 
+> 2026-09-06 local extension: current checkout is `main` at `bb1bb66`, with existing uncommitted attribution work preserved. Automatic capture, selection summaries and current verification boundaries are documented in [AUTO_CAPTURE_SELECTION.md](AUTO_CAPTURE_SELECTION.md). Branch/state descriptions below are historical handoff context, not the current checkout status. No phone was available for fresh acceptance of this local build.
+
 ## 목적과 현재 상태
 
 이 문서는 다른 개발 환경에서 `Block I/O → file identity/path` 구현을 이어서 검증하기 위한 인수인계 기준입니다.
@@ -11,7 +13,7 @@
 - 구현 상태: host 코드·테스트·eBPF 빌드 완료
 - 남은 필수 단계: 실제 rooted userdebug Android 보드의 verifier/load/attach 및 workload 검증
 
-이 브랜치는 파일 경로 문자열을 block layer에서 직접 생성하지 않습니다. 커널에서는 `filesystem device + inode + optional generation/mount` identity와 `bio/request`의 직접 객체 관계를 수집하고, userspace에서 같은 identity의 `PathSnapshot`을 결합합니다. path가 없어도 exact inode identity는 유효합니다.
+이 브랜치는 파일 경로 문자열을 block layer에서 직접 생성하지 않습니다. 커널에서는 `filesystem device + inode + optional generation/mount` identity를 수집하고, userspace에서 같은 identity의 `PathSnapshot`을 결합합니다. path가 없어도 exact inode identity는 유효합니다. request pointer가 없는 커널에서는 F2FS extent adapter가 inode와 physical extent를 직접 관측하고 block sector overlap으로 request에 결합합니다.
 
 ## 새 환경에서 시작하기
 
@@ -37,6 +39,7 @@ git status --short --branch
 ## 구현된 데이터 흐름
 
 ```text
+DirectObjectAdapter:
 vfs_read/write 또는 writeback(address_space.host)
   → FileIdentity를 현재 task에 저장
   → submit_bio에서 bio identity에 결합
@@ -46,6 +49,17 @@ vfs_read/write 또는 writeback(address_space.host)
   → agent가 raw pointer를 session-salted opaque ID로 변환
   → RequestOrigin NDJSON
   → transaction graph의 Exact MergedInto edge
+  → 같은 FileIdentity의 FileIo/PathSnapshot으로 경로 보강
+
+F2fsExtentAdapter (rq identity가 없는 커널 포함):
+f2fs_map_blocks 성공 record(dev, ino, pblk, len)
+  또는 f2fs_submit_folio_write DATA record(dev, ino, new_blkaddr)
+  → 4 KiB F2FS block을 512-byte sector range로 변환
+  → block_bio_remap으로 device-mapper old_dev/old_sector를 최종 dev/sector로 변환
+  → Android의 flattened-final-device remap record도 sector 연속성으로 연결
+  → 같은 device에서 range가 겹치는 block_rq_issue와 bounded-time 결합
+  → file_origin_confidence=Exact
+  → request_lifetime_confidence=Probable
   → 같은 FileIdentity의 FileIo/PathSnapshot으로 경로 보강
 ```
 
@@ -60,8 +74,8 @@ merge adapter는 성공 이후 호출되는 tracepoint만 사용합니다. Linux
 
 | 영역 | 파일 | 확인할 내용 |
 | --- | --- | --- |
-| Shared ABI | `crates/ebpf-types/src/lib.rs` | `KIND_REQUEST_ORIGIN`, `KernelFileOrigin`, `FileIdentityLayout` |
-| eBPF capture | `crates/android-ebpf/src/main.rs` | VFS/writeback, bio/request, success-only merge hooks, bounded maps |
+| Shared ABI | `crates/ebpf-types/src/lib.rs` | `KIND_REQUEST_ORIGIN`, `KIND_FILE_EXTENT`, identity/extent/folio layouts |
+| eBPF capture | `crates/android-ebpf/src/main.rs` | VFS/writeback, bio/request, F2FS extent, success-only merge hooks |
 | BTF offset parser | `crates/android-agent/src/btf_layout.rs` | target `/sys/kernel/btf/vmlinux`의 구조체 member offset 해석 |
 | Agent loader | `crates/android-agent/src/main.rs` | typed hook attach, capability/fallback, pointer pseudonymization |
 | Protocol/analysis | `crates/protocol/src/lib.rs` | `RequestOrigin`, exact graph edge, path snapshot join, cache invalidation |
@@ -71,14 +85,16 @@ merge adapter는 성공 이후 호출되는 tracepoint만 사용합니다. Linux
 
 ## 정확성 및 fallback 계약
 
-다음 조건을 모두 만족한 capture만 exact adapter를 활성화합니다.
+DirectObjectAdapter는 다음 조건을 모두 만족할 때 활성화합니다.
 
 1. issue/complete tracepoint가 동일한 `rq` identity를 제공한다.
 2. `/sys/kernel/btf/vmlinux`에서 필요한 file/inode/superblock offset을 해석한다.
 3. `vfs_read/write`, `submit_bio`, `blk_mq_bio_to_request`가 attach된다.
 4. `tp_btf/block_bio_frontmerge`와 `block_bio_backmerge`가 attach된다.
 
-모두 성공하면 capability record가 `exact_file_attribution=true`이고 VFS/Bio plan이 `measured`입니다. 하나라도 실패하면 `EXACT_ATTRIBUTION_ENABLED=0`을 유지하고 기존 block tracepoint 및 syscall/time/task heuristic을 계속 사용합니다. heuristic edge는 `Probable` 또는 `ProbableAsync`이며 `Exact`로 승격하면 안 됩니다.
+F2fsExtentAdapter는 `f2fs/f2fs_map_blocks`의 `dev`, `ino`, `m_pblk/pblk`, `m_len/len`, `ret` layout과 `f2fs/f2fs_submit_folio_write`의 `dev`, `ino`, `new_blkaddr`, `type` layout을 각각 검증합니다. 전자는 이미 할당된 read/overwrite extent를, 후자는 신규 또는 out-of-place DATA write의 실제 할당 블록을 제공합니다. 사용 가능한 tracepoint 하나라도 attach되면 adapter가 활성화됩니다. `block/block_bio_remap`이 있으면 device-mapper sector 변환을 추적하며, V2602DA처럼 각 remap record의 `dev`가 최종 장치로 평탄화된 경우에도 동일 최종 장치와 old-sector 범위의 연속성으로 다음 변환을 연결합니다. 성공한 mapping의 file identity/extent는 exact지만, shared `rq`가 없는 상태의 request lifetime 결합은 `Probable`입니다. 따라서 이 경로에서는 `exact_file_attribution=true`와 `exact_request_correlation=false`가 동시에 정상입니다.
+
+두 adapter가 모두 실패하면 `exact_file_attribution=false`를 유지하고 기존 block tracepoint 및 syscall/time/task heuristic을 계속 사용합니다. heuristic edge는 `Probable` 또는 `ProbableAsync`이며 `Exact`로 승격하면 안 됩니다.
 
 추가 규칙:
 

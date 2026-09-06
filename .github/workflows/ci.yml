@@ -31,6 +31,16 @@ jobs:
         run: rustup toolchain install 1.98.0 --profile minimal
       - name: Check Windows GUI
         run: cargo +1.98.0 check -p android-ebpf-studio --features gui
+      - name: Test protocol and GUI analysis
+        run: cargo +1.98.0 test -p android-ebpf-protocol -p android-ebpf-studio --features gui
+      - name: Build host ADB fixtures
+        run: cargo +1.98.0 build -p android-ebpf-studio --example fake_adb --example fake_perfetto_adb
+      - name: Verify capture and recovery transport with host fixtures
+        shell: pwsh
+        run: |
+          $env:ANDROID_EBPF_FAKE_ADB = "$PWD/target/debug/examples/fake_adb.exe"
+          $env:ANDROID_EBPF_FAKE_PERFETTO_ADB = "$PWD/target/debug/examples/fake_perfetto_adb.exe"
+          cargo +1.98.0 test -p android-ebpf-studio --test capture_transport --test perfetto_session -- --include-ignored
 
   ebpf-object:
     runs-on: ubuntu-latest

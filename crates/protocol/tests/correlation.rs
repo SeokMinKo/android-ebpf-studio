@@ -32,7 +32,7 @@ fn completion_computes_latency_and_removes_pending_request() {
         })
         .expect("issue must correlate");
 
-    assert_eq!(completed.latency_ns, 2_500_000);
+    assert_eq!(completed.latency_ns, Some(2_500_000));
     assert_eq!(completed.issue.comm, "fio");
     assert_eq!(correlator.pending_len(), 0);
 }

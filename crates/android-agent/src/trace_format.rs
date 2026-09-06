@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use android_ebpf_types::{OFFSET_MISSING, PipelineTraceLayout, RawSyscallLayout, TraceLayout};
+use android_ebpf_types::{
+    BioRemapLayout, F2fsFolioLayout, FileExtentLayout, OFFSET_MISSING, PipelineTraceLayout,
+    RawSyscallLayout, TraceLayout,
+};
 use anyhow::{Context, Result, bail};
 
 pub fn parse_layout(input: &str) -> Result<TraceLayout> {
@@ -84,6 +87,99 @@ pub fn parse_pipeline_layout(
     })
 }
 
+pub fn parse_f2fs_extent_layout(input: &str) -> Result<FileExtentLayout> {
+    let fields = parse_fields(input)?;
+    let required_field = |aliases: &[&str], size: u16| -> Result<u16> {
+        let (name, (offset, actual_size)) = aliases
+            .iter()
+            .find_map(|name| fields.get(*name).copied().map(|field| (*name, field)))
+            .with_context(|| {
+                format!(
+                    "mandatory f2fs extent field `{}` is missing",
+                    aliases.join("/")
+                )
+            })?;
+        if actual_size != size {
+            bail!("f2fs extent field `{name}` must be {size} bytes, got {actual_size}")
+        }
+        Ok(offset)
+    };
+    let (physical_name, (physical_block_offset, physical_block_size)) = ["m_pblk", "pblk"]
+        .iter()
+        .find_map(|name| fields.get(*name).copied().map(|field| (*name, field)))
+        .context("mandatory f2fs extent field `m_pblk/pblk` is missing")?;
+    if !matches!(physical_block_size, 4 | 8) {
+        bail!("f2fs extent field `{physical_name}` must be 4 or 8 bytes, got {physical_block_size}")
+    }
+    Ok(FileExtentLayout {
+        dev_offset: required_field(&["dev"], 4)?,
+        inode_offset: required_field(&["ino", "inode"], 8)?,
+        physical_block_offset,
+        block_count_offset: required_field(&["m_len", "len"], 4)?,
+        result_offset: required_field(&["ret"], 4)?,
+        physical_block_size: u8::try_from(physical_block_size)?,
+        reserved: 0,
+    })
+}
+
+pub fn parse_bio_remap_layout(input: &str) -> Result<BioRemapLayout> {
+    let fields = parse_fields(input)?;
+    let required = |name: &str, size: u16| -> Result<u16> {
+        let (offset, actual_size) = fields
+            .get(name)
+            .copied()
+            .with_context(|| format!("mandatory bio remap field `{name}` is missing"))?;
+        if actual_size != size {
+            bail!("bio remap field `{name}` must be {size} bytes, got {actual_size}")
+        }
+        Ok(offset)
+    };
+    Ok(BioRemapLayout {
+        device_offset: required("dev", 4)?,
+        sector_offset: required("sector", 8)?,
+        sectors_offset: required("nr_sector", 4)?,
+        old_device_offset: required("old_dev", 4)?,
+        old_sector_offset: required("old_sector", 8)?,
+        reserved: [0; 3],
+    })
+}
+
+pub fn parse_f2fs_folio_layout(input: &str) -> Result<F2fsFolioLayout> {
+    let fields = parse_fields(input)?;
+    let required = |aliases: &[&str], expected_sizes: &[u16]| -> Result<(u16, u16)> {
+        let (name, field) = aliases
+            .iter()
+            .find_map(|name| fields.get(*name).copied().map(|field| (*name, field)))
+            .with_context(|| {
+                format!(
+                    "mandatory f2fs folio field `{}` is missing",
+                    aliases.join("/")
+                )
+            })?;
+        if !expected_sizes.contains(&field.1) {
+            bail!(
+                "f2fs folio field `{name}` must have size {:?}, got {}",
+                expected_sizes,
+                field.1
+            )
+        }
+        Ok(field)
+    };
+    let (dev_offset, _) = required(&["dev"], &[4])?;
+    let (inode_offset, _) = required(&["ino", "inode"], &[8])?;
+    let (physical_block_offset, physical_block_size) =
+        required(&["new_blkaddr", "new_blk"], &[4, 8])?;
+    let (data_type_offset, _) = required(&["type"], &[4])?;
+    Ok(F2fsFolioLayout {
+        dev_offset,
+        inode_offset,
+        physical_block_offset,
+        data_type_offset,
+        physical_block_size: u8::try_from(physical_block_size)?,
+        reserved: [0; 3],
+    })
+}
+
 fn parse_offsets(input: &str) -> Result<HashMap<String, u16>> {
     Ok(parse_fields(input)?
         .into_iter()
@@ -156,4 +252,79 @@ pub fn validate_pair(issue: &TraceLayout, complete: &TraceLayout) -> Result<bool
         bail!("request pointer is present in only one block tracepoint")
     }
     Ok(issue_has_request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_f2fs_extent_without_request_pointer() {
+        let format = r#"
+field:dev_t dev; offset:8; size:4; signed:0;
+field:ino_t ino; offset:16; size:8; signed:0;
+field:block_t m_pblk; offset:28; size:4; signed:0;
+field:unsigned int m_len; offset:32; size:4; signed:0;
+field:int ret; offset:52; size:4; signed:1;
+"#;
+
+        assert_eq!(
+            parse_f2fs_extent_layout(format).unwrap(),
+            FileExtentLayout {
+                dev_offset: 8,
+                inode_offset: 16,
+                physical_block_offset: 28,
+                block_count_offset: 32,
+                result_offset: 52,
+                physical_block_size: 4,
+                reserved: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_android_bio_remap_layout() {
+        let format = r#"
+field:dev_t dev; offset:8; size:4; signed:0;
+field:sector_t sector; offset:16; size:8; signed:0;
+field:unsigned int nr_sector; offset:24; size:4; signed:0;
+field:dev_t old_dev; offset:28; size:4; signed:0;
+field:sector_t old_sector; offset:32; size:8; signed:0;
+"#;
+        assert_eq!(
+            parse_bio_remap_layout(format).unwrap(),
+            BioRemapLayout {
+                device_offset: 8,
+                sector_offset: 16,
+                sectors_offset: 24,
+                old_device_offset: 28,
+                old_sector_offset: 32,
+                reserved: [0; 3],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_v2602da_f2fs_submit_folio_write_layout() {
+        let format = r#"
+field:dev_t dev; offset:8; size:4; signed:0;
+field:ino_t ino; offset:16; size:8; signed:0;
+field:unsigned long index; offset:24; size:8; signed:0;
+field:block_t old_blkaddr; offset:32; size:4; signed:0;
+field:block_t new_blkaddr; offset:36; size:4; signed:0;
+field:enum req_op op; offset:40; size:4; signed:0;
+field:int type; offset:52; size:4; signed:1;
+"#;
+        assert_eq!(
+            parse_f2fs_folio_layout(format).unwrap(),
+            F2fsFolioLayout {
+                dev_offset: 8,
+                inode_offset: 16,
+                physical_block_offset: 36,
+                data_type_offset: 52,
+                physical_block_size: 4,
+                reserved: [0; 3],
+            }
+        );
+    }
 }

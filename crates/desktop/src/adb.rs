@@ -1,13 +1,32 @@
 use std::{
     collections::HashMap,
+    io::Read,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
 
 const REMOTE_AGENT: &str = "/data/local/tmp/android-ebpf-studio/agent";
 const REMOTE_BPF: &str = "/data/local/tmp/android-ebpf-studio/storage-ebpf.o";
+
+fn adb_process(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let command = Command::new(program);
+    #[cfg(windows)]
+    let command = {
+        let mut command = command;
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW: no flashing ADB consoles.
+        command
+    };
+    command
+}
+
+pub fn is_root_uid(output: &str) -> bool {
+    output.trim() == "0"
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceState {
@@ -76,7 +95,45 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     fn execute(&self) -> std::io::Result<Output> {
-        Command::new(&self.program).args(&self.args).output()
+        let mut child = adb_process(&self.program)
+            .args(&self.args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let out = thread::spawn(move || {
+            let mut v = Vec::new();
+            stdout.read_to_end(&mut v).map(|_| v)
+        });
+        let err = thread::spawn(move || {
+            let mut v = Vec::new();
+            stderr.read_to_end(&mut v).map(|_| v)
+        });
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "ADB timed out after 20 seconds; reconnect or approve the root prompt and retry Start",
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        Ok(Output {
+            status,
+            stdout: out
+                .join()
+                .map_err(|_| std::io::Error::other("stdout reader failed"))??,
+            stderr: err
+                .join()
+                .map_err(|_| std::io::Error::other("stderr reader failed"))??,
+        })
     }
 }
 
@@ -128,9 +185,50 @@ impl AdbCommandBuilder {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RootMethod {
+    #[default]
+    Shell,
+    SuCommand,
+    SuUid,
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+impl AdbCommandBuilder {
+    pub fn root_shell(&self, method: RootMethod, args: &[&str]) -> CommandSpec {
+        let command = args
+            .iter()
+            .map(|v| shell_quote(v))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command = match method {
+            RootMethod::Shell => command,
+            RootMethod::SuCommand => format!("su -c {}", shell_quote(&command)),
+            RootMethod::SuUid => format!("su 0 sh -c {}", shell_quote(&command)),
+        };
+        self.shell(&[&command])
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PreflightReport {
+    #[serde(default)]
+    pub perfetto: bool,
+    #[serde(default)]
+    pub perfetto_version: String,
     pub root: bool,
+    pub root_method: RootMethod,
+    pub serial: String,
+    pub model: String,
+    pub boot_id: String,
+    pub build_fingerprint: String,
+    pub mountinfo: String,
+    pub filesystems: String,
+    pub block_devices: String,
+    pub trace_root: String,
     pub abi: String,
     pub android_version: String,
     pub kernel_release: String,
@@ -148,7 +246,11 @@ pub struct PreflightReport {
 
 impl PreflightReport {
     pub fn full_ebpf_ready(&self) -> bool {
-        self.root && self.tracefs && self.block_issue && self.block_complete
+        self.root
+            && self.abi == "arm64-v8a"
+            && self.tracefs
+            && self.block_issue
+            && self.block_complete
     }
 }
 
@@ -176,6 +278,39 @@ impl Default for AdbClient {
 }
 
 impl AdbClient {
+    pub(crate) fn unprivileged_text(
+        &self,
+        serial: &str,
+        args: &[&str],
+    ) -> Result<String, AdbError> {
+        let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
+        self.root_text(&builder, RootMethod::Shell, args)
+    }
+
+    pub(crate) fn push_file(
+        &self,
+        serial: &str,
+        local: &Path,
+        remote: &str,
+    ) -> Result<(), AdbError> {
+        let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
+        self.push(&builder, local, remote)
+    }
+
+    pub(crate) fn pull_file(
+        &self,
+        serial: &str,
+        remote: &str,
+        local: &Path,
+    ) -> Result<(), AdbError> {
+        let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
+        self.run(
+            "pull Perfetto trace",
+            builder.host(&["pull", remote, &local.to_string_lossy()]),
+        )
+        .map(|_| ())
+    }
+
     pub fn new(adb_path: impl Into<PathBuf>) -> Self {
         Self {
             adb_path: adb_path.into(),
@@ -183,81 +318,127 @@ impl AdbClient {
     }
 
     pub fn list_devices(&self) -> Result<Vec<AdbDevice>, AdbError> {
-        let output = Command::new(&self.adb_path)
-            .args(["devices", "-l"])
-            .output()?;
+        let output = CommandSpec {
+            program: self.adb_path.to_string_lossy().into_owned(),
+            args: vec!["devices".into(), "-l".into()],
+        }
+        .execute()?;
         require_success("devices", &output)?;
         Ok(parse_devices(&String::from_utf8_lossy(&output.stdout)))
     }
 
     pub fn preflight(&self, serial: &str) -> Result<PreflightReport, AdbError> {
         let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
-        let root_output = builder.host(&["root"]).execute()?;
+        let method = self.detect_root(&builder);
         let mut report = PreflightReport {
-            root: root_output.status.success(),
-            ..PreflightReport::default()
+            serial: serial.into(),
+            ..Default::default()
         };
-        if !root_output.status.success() {
-            report.diagnostics.push(bounded_stderr(&root_output));
-        }
-        let _ = builder.host(&["wait-for-device"]).execute()?;
-        report.abi = self.shell_text(&builder, &["getprop", "ro.product.cpu.abi"])?;
+        let method = match method {
+            Ok(value) => {
+                report.root = true;
+                value
+            }
+            Err(error) => {
+                report.diagnostics.push(format!(
+                    "Root unavailable; checking unprivileged capture support ({error})"
+                ));
+                RootMethod::Shell
+            }
+        };
+        report.root_method = method;
+        report.model = self.root_text(&builder, method, &["getprop", "ro.product.model"])?;
+        report.boot_id = self.root_text(
+            &builder,
+            method,
+            &["cat", "/proc/sys/kernel/random/boot_id"],
+        )?;
+        report.build_fingerprint =
+            self.root_text(&builder, method, &["getprop", "ro.build.fingerprint"])?;
+        report.mountinfo = self.root_text(&builder, method, &["cat", "/proc/self/mountinfo"])?;
+        report.filesystems = self.root_text(&builder, method, &["cat", "/proc/filesystems"])?;
+        report.block_devices = self.root_text(&builder, method, &["cat", "/proc/partitions"])?;
+        report.trace_root = if self.root_bool(
+            &builder,
+            method,
+            &["test", "-d", "/sys/kernel/tracing/events"],
+        )? {
+            "/sys/kernel/tracing".into()
+        } else {
+            "/sys/kernel/debug/tracing".into()
+        };
+        report.abi = self.root_text(&builder, method, &["getprop", "ro.product.cpu.abi"])?;
         report.android_version =
-            self.shell_text(&builder, &["getprop", "ro.build.version.release"])?;
-        report.kernel_release = self.shell_text(&builder, &["uname", "-r"])?;
-        report.btf = self.shell_bool(&builder, &["test", "-r", "/sys/kernel/btf/vmlinux"])?;
-        report.tracefs =
-            self.shell_bool(&builder, &["test", "-d", "/sys/kernel/tracing/events"])?;
-        report.block_issue = self.shell_bool(
+            self.root_text(&builder, method, &["getprop", "ro.build.version.release"])?;
+        report.kernel_release = self.root_text(&builder, method, &["uname", "-r"])?;
+        report.btf =
+            self.root_bool(&builder, method, &["test", "-r", "/sys/kernel/btf/vmlinux"])?;
+        report.tracefs = self.root_bool(
             &builder,
+            method,
+            &["test", "-d", &format!("{}/events", report.trace_root)],
+        )?;
+        report.block_issue = self.root_bool(
+            &builder,
+            method,
             &[
                 "test",
                 "-r",
-                "/sys/kernel/tracing/events/block/block_rq_issue/format",
+                &format!("{}/events/block/block_rq_issue/format", report.trace_root),
             ],
         )?;
-        report.block_complete = self.shell_bool(
+        report.block_complete = self.root_bool(
             &builder,
+            method,
             &[
                 "test",
                 "-r",
-                "/sys/kernel/tracing/events/block/block_rq_complete/format",
+                &format!(
+                    "{}/events/block/block_rq_complete/format",
+                    report.trace_root
+                ),
             ],
         )?;
-        report.block_insert = self.shell_bool(
+        report.block_insert = self.root_bool(
             &builder,
+            method,
             &[
                 "test",
                 "-r",
-                "/sys/kernel/tracing/events/block/block_rq_insert/format",
+                &format!("{}/events/block/block_rq_insert/format", report.trace_root),
             ],
         )?;
-        report.raw_syscalls = self.shell_bool(
+        report.raw_syscalls = self.root_bool(
             &builder,
+            method,
             &[
                 "test",
                 "-r",
-                "/sys/kernel/tracing/events/raw_syscalls/sys_enter/format",
+                &format!("{}/events/raw_syscalls/sys_enter/format", report.trace_root),
             ],
-        )? && self.shell_bool(
+        )? && self.root_bool(
             &builder,
+            method,
             &[
                 "test",
                 "-r",
-                "/sys/kernel/tracing/events/raw_syscalls/sys_exit/format",
+                &format!("{}/events/raw_syscalls/sys_exit/format", report.trace_root),
             ],
         )?;
-        let events = self.shell_text(
-            &builder,
-            &[
-                "find",
-                "/sys/kernel/tracing/events",
-                "-maxdepth",
-                "2",
-                "-type",
-                "d",
-            ],
-        )?;
+        let events = self
+            .root_text(
+                &builder,
+                method,
+                &[
+                    "find",
+                    &format!("{}/events", report.trace_root),
+                    "-maxdepth",
+                    "2",
+                    "-type",
+                    "d",
+                ],
+            )
+            .unwrap_or_default();
         report.ufs_events = events
             .lines()
             .filter(|line| line.to_ascii_lowercase().contains("ufs"))
@@ -279,7 +460,34 @@ impl AdbClient {
             .take(256)
             .map(str::to_owned)
             .collect();
+        if !report.full_ebpf_ready() {
+            if let Ok(query) = self.root_text(&builder, RootMethod::Shell, &["perfetto", "--query"])
+            {
+                report.perfetto = query.contains("linux.ftrace");
+                report.perfetto_version = query
+                    .lines()
+                    .find(|line| line.contains("Perfetto v"))
+                    .unwrap_or("Perfetto service available")
+                    .to_owned();
+            }
+            report.diagnostics.push("Full block tracing unavailable: requires arm64 agent and readable issue/complete tracepoints. Root alone does not prove BPF verifier/attach support.".into());
+        }
         Ok(report)
+    }
+
+    pub fn disk_stats(
+        &self,
+        serial: &str,
+        method: RootMethod,
+    ) -> Result<(String, String), AdbError> {
+        let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
+        let boot = self.root_text(
+            &builder,
+            method,
+            &["cat", "/proc/sys/kernel/random/boot_id"],
+        )?;
+        let raw = self.root_text(&builder, method, &["cat", "/proc/diskstats"])?;
+        Ok((boot, raw))
     }
 
     pub fn deploy(
@@ -294,15 +502,19 @@ impl AdbClient {
             }
         }
         let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
+        let method = self.detect_root(&builder)?;
         self.run(
             "create remote directory",
-            builder.shell(&["mkdir", "-p", "/data/local/tmp/android-ebpf-studio"]),
+            builder.root_shell(
+                method,
+                &["mkdir", "-p", "/data/local/tmp/android-ebpf-studio"],
+            ),
         )?;
         self.push(&builder, local_agent, REMOTE_AGENT)?;
         self.push(&builder, local_bpf, REMOTE_BPF)?;
         self.run(
             "chmod agent",
-            builder.shell(&["chmod", "0755", REMOTE_AGENT]),
+            builder.root_shell(method, &["chmod", "0755", REMOTE_AGENT]),
         )?;
         Ok(())
     }
@@ -314,24 +526,70 @@ impl AdbClient {
         log_level: &str,
     ) -> Result<Child, AdbError> {
         let builder = AdbCommandBuilder::with_adb(&self.adb_path, serial)?;
-        let spec = builder.shell(&[
-            REMOTE_AGENT,
-            "capture",
-            "--bpf-object",
-            REMOTE_BPF,
-            "--health-interval-ms",
-            "1000",
-            "--session-id",
-            session_id,
-            "--log-level",
-            log_level,
-        ]);
-        Ok(Command::new(spec.program)
+        let method = self.detect_root(&builder)?;
+        let spec = builder.root_shell(
+            method,
+            &[
+                REMOTE_AGENT,
+                "capture",
+                "--bpf-object",
+                REMOTE_BPF,
+                "--health-interval-ms",
+                "1000",
+                "--session-id",
+                session_id,
+                "--log-level",
+                log_level,
+            ],
+        );
+        Ok(adb_process(spec.program)
             .args(spec.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?)
+    }
+
+    fn detect_root(&self, builder: &AdbCommandBuilder) -> Result<RootMethod, AdbError> {
+        for method in [RootMethod::Shell, RootMethod::SuCommand, RootMethod::SuUid] {
+            if self
+                .root_text(builder, method, &["id", "-u"])
+                .is_ok_and(|uid| is_root_uid(&uid))
+            {
+                return Ok(method);
+            }
+        }
+        // Try adbd restart only after existing shell and su root have failed.
+        let _ = self.run("enable adbd root", builder.host(&["root"]));
+        let _ = self.run(
+            "wait for root reconnect",
+            builder.host(&["wait-for-device"]),
+        );
+        if self
+            .root_text(builder, RootMethod::Shell, &["id", "-u"])
+            .is_ok_and(|uid| is_root_uid(&uid))
+        {
+            return Ok(RootMethod::Shell);
+        }
+        Err(AdbError::Command { operation: "root detection".into(), message: "Approve USB debugging and the su/root prompt on the phone, then retry Start. Shell, su -c, su 0 and adb root did not provide UID 0.".into() })
+    }
+
+    fn root_text(
+        &self,
+        builder: &AdbCommandBuilder,
+        method: RootMethod,
+        args: &[&str],
+    ) -> Result<String, AdbError> {
+        let output = self.run("root probe", builder.root_shell(method, args))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+    fn root_bool(
+        &self,
+        builder: &AdbCommandBuilder,
+        method: RootMethod,
+        args: &[&str],
+    ) -> Result<bool, AdbError> {
+        Ok(builder.root_shell(method, args).execute()?.status.success())
     }
 
     fn push(
@@ -343,15 +601,6 @@ impl AdbClient {
         let local = local.to_string_lossy();
         self.run("push artifact", builder.host(&["push", &local, remote]))
             .map(|_| ())
-    }
-
-    fn shell_text(&self, builder: &AdbCommandBuilder, args: &[&str]) -> Result<String, AdbError> {
-        let output = self.run("shell probe", builder.shell(args))?;
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    }
-
-    fn shell_bool(&self, builder: &AdbCommandBuilder, args: &[&str]) -> Result<bool, AdbError> {
-        Ok(builder.shell(args).execute()?.status.success())
     }
 
     fn run(&self, operation: &str, spec: CommandSpec) -> Result<Output, AdbError> {

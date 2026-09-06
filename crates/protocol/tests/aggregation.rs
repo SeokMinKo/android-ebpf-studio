@@ -43,7 +43,7 @@ fn aggregate_reports_bytes_iops_queue_depth_and_percentiles() {
     assert_eq!(summary.completed_ios, 2);
     assert_eq!(summary.read_bytes, 4_096);
     assert_eq!(summary.write_bytes, 8_192);
-    assert_eq!(summary.max_queue_depth, 2);
+    assert_eq!(summary.max_queue_depth, Some(2));
     assert_eq!(summary.p50_latency_ns, Some(1_000_000));
     assert_eq!(summary.p95_latency_ns, Some(3_000_000));
     assert_eq!(summary.p99_latency_ns, Some(3_000_000));

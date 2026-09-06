@@ -8,7 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 5;
+pub const SCHEMA_VERSION: u16 = 6;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 const MAX_DERIVED_CACHE_ENTRIES: usize = 4_096;
@@ -196,7 +196,7 @@ impl EdgeConfidence {
         }
     }
 
-    fn weakest(self, other: Self) -> Self {
+    pub fn weakest(self, other: Self) -> Self {
         if self.rank() <= other.rank() {
             self
         } else {
@@ -311,10 +311,22 @@ pub struct RequestOrigin {
     pub pid: u32,
     #[serde(default)]
     pub tid: u32,
+    /// Confidence that the physical extent belongs to this file identity.
+    #[serde(default = "exact_edge_confidence")]
+    pub file_origin_confidence: EdgeConfidence,
+    /// Confidence that this origin belongs to this exact block-request
+    /// lifetime. This can be weaker than the file/extent observation on
+    /// kernels whose block tracepoints do not expose a request pointer.
+    #[serde(default = "exact_edge_confidence")]
+    pub request_lifetime_confidence: EdgeConfidence,
     /// True when the kernel-side bounded origin set overflowed. Retained
     /// origins are still exact, but the set is known to be incomplete.
     #[serde(default)]
     pub incomplete: bool,
+}
+
+fn exact_edge_confidence() -> EdgeConfidence {
+    EdgeConfidence::Exact
 }
 
 impl IoEdge {
@@ -704,6 +716,9 @@ pub struct PipelineSpan {
     pub layer: PipelineLayer,
     pub start_ts_ns: u64,
     pub end_ts_ns: u64,
+    /// False for an unpaired boundary or context marker; its plot position is not a latency.
+    #[serde(default)]
+    pub duration_observed: bool,
     pub name: String,
     pub confidence: CorrelationConfidence,
     pub source: String,
@@ -745,6 +760,8 @@ pub enum StorageEvent {
     BlockInsert(BlockInsert),
     BlockIssue(BlockIssue),
     BlockComplete(BlockComplete),
+    /// Completion observations whose source has no kernel request identity.
+    ObservedBlockCompletion(CompletedIo),
     FileIo(FileIo),
     Pipeline(PipelineObservation),
     RequestOrigin(RequestOrigin),
@@ -1413,6 +1430,18 @@ pub struct StackFingerprintRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]
 pub enum WireRecord {
+    SourceInfo {
+        schema_version: u16,
+        source: String,
+        status: String,
+        metadata: serde_json::Value,
+    },
+    DiskStats {
+        schema_version: u16,
+        elapsed_ms: u64,
+        boot_id: String,
+        raw: String,
+    },
     Hello {
         schema_version: u16,
         agent_version: String,
@@ -1479,7 +1508,9 @@ pub enum WireRecord {
 
 #[derive(Debug, Default)]
 pub struct SessionLoad {
+    pub source_info: Vec<WireRecord>,
     pub hello: Option<WireRecord>,
+    pub disk_stats: Vec<WireRecord>,
     pub capabilities: Option<ProbeCapabilities>,
     pub events: Vec<StorageEvent>,
     pub health: Vec<WireRecord>,
@@ -1490,6 +1521,7 @@ pub struct SessionLoad {
     pub segments: Vec<SegmentRecord>,
     pub stack_fingerprints: Vec<StackFingerprintRecord>,
     pub footer: Option<WireRecord>,
+    pub accepted_events: u64,
     pub total_lines: u64,
     pub rejected_lines: u64,
     pub integrity_ok: Option<bool>,
@@ -1515,51 +1547,100 @@ impl SessionReader {
         Self { max_line_bytes }
     }
 
-    pub fn read<R: BufRead>(&self, mut input: R) -> Result<SessionLoad, SessionError> {
-        let mut loaded = SessionLoad::default();
-        let mut line = String::new();
+    /// Streams records with a bounded line buffer. Rejected lines never leak
+    /// their suffix into the next event; visitors can cancel or propagate I/O errors.
+    pub fn visit<R: BufRead>(
+        &self,
+        mut input: R,
+        mut visitor: impl FnMut(WireRecord) -> Result<(), SessionError>,
+    ) -> Result<(u64, u64), SessionError> {
+        let mut line = Vec::new();
+        let (mut total, mut rejected) = (0, 0);
         loop {
             line.clear();
-            if input.read_line(&mut line)? == 0 {
+            let count = std::io::Read::take(&mut input, self.max_line_bytes as u64 + 1)
+                .read_until(b'\n', &mut line)?;
+            if count == 0 {
                 break;
             }
-            if line.trim().is_empty() {
-                continue;
-            }
-            loaded.total_lines += 1;
             if line.len() > self.max_line_bytes {
-                loaded.rejected_lines += 1;
+                if line.last() != Some(&b'\n') {
+                    loop {
+                        let buffer = input.fill_buf()?;
+                        if buffer.is_empty() {
+                            break;
+                        }
+                        let newline = buffer.iter().position(|b| *b == b'\n');
+                        let consumed = newline.map_or(buffer.len(), |p| p + 1);
+                        input.consume(consumed);
+                        if newline.is_some() {
+                            break;
+                        }
+                    }
+                }
+                total += 1;
+                rejected += 1;
                 continue;
             }
-            match serde_json::from_str::<WireRecord>(&line) {
-                Ok(record @ WireRecord::Hello { .. }) => loaded.hello = Some(record),
-                Ok(WireRecord::Capabilities { capabilities, .. }) => {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            total += 1;
+            match serde_json::from_slice::<WireRecord>(&line) {
+                Ok(record) => visitor(record)?,
+                Err(_) => rejected += 1,
+            }
+        }
+        Ok((total, rejected))
+    }
+
+    pub fn read<R: BufRead>(&self, input: R) -> Result<SessionLoad, SessionError> {
+        let mut events = Vec::new();
+        let mut loaded = self.read_events(input, |event| {
+            events.push(event);
+            Ok(())
+        })?;
+        loaded.events = events;
+        Ok(loaded)
+    }
+
+    pub fn read_events<R: BufRead>(
+        &self,
+        input: R,
+        mut visit_event: impl FnMut(StorageEvent) -> Result<(), SessionError>,
+    ) -> Result<SessionLoad, SessionError> {
+        let mut loaded = SessionLoad::default();
+        let (total, rejected) = self.visit(input, |record| {
+            match record {
+                record @ WireRecord::SourceInfo { .. } => loaded.source_info.push(record),
+                record @ WireRecord::DiskStats { .. } => loaded.disk_stats.push(record),
+                record @ WireRecord::Hello { .. } => loaded.hello = Some(record),
+                WireRecord::Capabilities { capabilities, .. } => {
                     loaded.capabilities = Some(capabilities)
                 }
-                Ok(WireRecord::Event { event, .. }) => loaded.events.push(event),
-                Ok(record @ WireRecord::Health { .. }) => loaded.health.push(record),
-                Ok(WireRecord::Control {
-                    acknowledgement, ..
-                }) => loaded.controls.push(acknowledgement),
-                Ok(WireRecord::Aggregate { snapshot, .. }) => loaded.aggregates.push(snapshot),
-                Ok(WireRecord::HeavyHitters { snapshot, .. }) => {
-                    loaded.heavy_hitters.push(snapshot)
+                WireRecord::Event { event, .. } => {
+                    loaded.accepted_events += 1;
+                    visit_event(event)?;
                 }
-                Ok(WireRecord::Trigger { trigger, .. }) => loaded.triggers.push(trigger),
-                Ok(WireRecord::Segment { segment, .. }) => loaded.segments.push(segment),
-                Ok(WireRecord::StackFingerprint { fingerprint, .. }) => {
+                record @ WireRecord::Health { .. } => loaded.health.push(record),
+                WireRecord::Control {
+                    acknowledgement, ..
+                } => loaded.controls.push(acknowledgement),
+                WireRecord::Aggregate { snapshot, .. } => loaded.aggregates.push(snapshot),
+                WireRecord::HeavyHitters { snapshot, .. } => loaded.heavy_hitters.push(snapshot),
+                WireRecord::Trigger { trigger, .. } => loaded.triggers.push(trigger),
+                WireRecord::Segment { segment, .. } => loaded.segments.push(segment),
+                WireRecord::StackFingerprint { fingerprint, .. } => {
                     loaded.stack_fingerprints.push(fingerprint)
                 }
-                Ok(
-                    record @ WireRecord::Footer {
-                        events_seen,
-                        events_persisted,
-                        events_dropped,
-                        events_rejected,
-                        graceful,
-                        ..
-                    },
-                ) => {
+                record @ WireRecord::Footer {
+                    events_seen,
+                    events_persisted,
+                    events_dropped,
+                    events_rejected,
+                    graceful,
+                    ..
+                } => {
                     loaded.integrity_ok = Some(
                         events_seen
                             == events_persisted
@@ -1569,8 +1650,21 @@ impl SessionReader {
                     loaded.graceful = graceful;
                     loaded.footer = Some(record);
                 }
-                Err(_) => loaded.rejected_lines += 1,
             }
+            Ok(())
+        })?;
+        loaded.total_lines = total;
+        loaded.rejected_lines = rejected;
+        // The final footer describes the actual event stream, not just arithmetic.
+        if let Some(WireRecord::Footer {
+            events_persisted, ..
+        }) = &loaded.footer
+        {
+            loaded.integrity_ok = Some(
+                loaded.integrity_ok == Some(true)
+                    && *events_persisted == loaded.accepted_events
+                    && rejected == 0,
+            );
         }
         Ok(loaded)
     }
@@ -1614,18 +1708,80 @@ impl IoSizeClass {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionEvidence {
+    pub source: String,
+    pub record_id: u64,
+    pub issue_record_candidates: Vec<u64>,
+    pub issue_timestamp_ns: Option<u64>,
+    pub issuer_pid: Option<u32>,
+    pub issuer_tid: Option<u32>,
+    #[serde(default)]
+    pub issuer_cpu: Option<u32>,
+    #[serde(default)]
+    pub completion_status: Option<i32>,
+    pub process_name: Option<String>,
+    pub timing_confidence: CorrelationConfidence,
+    pub reason: String,
+    pub clock: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedIo {
     pub insert: Option<BlockInsert>,
     pub issue: BlockIssue,
     pub completion: BlockComplete,
-    /// Compatibility alias for issue-to-complete time.
-    pub latency_ns: u64,
+    /// Compatibility alias for issue-to-complete time. None means unmeasured.
+    pub latency_ns: Option<u64>,
     pub queue_latency_ns: Option<u64>,
-    pub device_latency_ns: u64,
-    pub total_latency_ns: u64,
-    pub queue_depth_after: usize,
+    pub device_latency_ns: Option<u64>,
+    pub total_latency_ns: Option<u64>,
+    pub queue_depth_after: Option<usize>,
     pub access_pattern: AccessPattern,
     pub size_class: IoSizeClass,
+    /// For observed completions, `issue` holds volume/address context. Its
+    /// timestamp and PID are measurements only when confirmed by this evidence.
+    #[serde(default)]
+    pub evidence: Option<Box<CompletionEvidence>>,
+}
+
+impl CompletedIo {
+    pub fn issue_timestamp(&self) -> Option<u64> {
+        self.evidence
+            .as_ref()
+            .map_or(Some(self.issue.ts_ns), |e| e.issue_timestamp_ns)
+    }
+    pub fn issuer_pid(&self) -> Option<u32> {
+        self.evidence
+            .as_ref()
+            .map_or(Some(self.issue.pid), |e| e.issuer_pid)
+    }
+    pub fn issuer_tid(&self) -> Option<u32> {
+        self.evidence
+            .as_ref()
+            .map_or(Some(self.issue.tid), |e| e.issuer_tid)
+    }
+    pub fn issuer_cpu(&self) -> Option<u32> {
+        self.evidence
+            .as_ref()
+            .map_or(Some(self.issue.cpu), |e| e.issuer_cpu)
+    }
+    pub fn completion_status(&self) -> Option<i32> {
+        self.evidence
+            .as_ref()
+            .map_or(Some(self.completion.status), |e| e.completion_status)
+    }
+    pub fn start_timestamp(&self) -> u64 {
+        self.insert
+            .as_ref()
+            .map(|i| i.ts_ns)
+            .or_else(|| self.issue_timestamp())
+            .unwrap_or(self.completion.ts_ns)
+    }
+    pub fn timing_confidence(&self) -> CorrelationConfidence {
+        self.evidence
+            .as_ref()
+            .map_or(CorrelationConfidence::Exact, |e| e.timing_confidence)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1746,13 +1902,14 @@ impl RequestCorrelator {
             insert: pending.insert,
             issue: pending.issue,
             completion,
-            latency_ns: device_latency_ns,
+            latency_ns: Some(device_latency_ns),
             queue_latency_ns,
-            device_latency_ns,
-            total_latency_ns,
-            queue_depth_after: self.pending.len(),
+            device_latency_ns: Some(device_latency_ns),
+            total_latency_ns: Some(total_latency_ns),
+            queue_depth_after: Some(self.pending.len()),
             access_pattern: pending.access_pattern,
             size_class,
+            evidence: None,
         })
     }
 
@@ -1858,13 +2015,15 @@ pub struct AnalysisSummary {
     pub random_ios: u64,
     pub small_ios: u64,
     pub large_ios: u64,
-    pub max_queue_depth: usize,
+    pub max_queue_depth: Option<usize>,
+    #[serde(default)]
+    pub unmeasured_latency_ios: u64,
     pub p50_latency_ns: Option<u64>,
     pub p95_latency_ns: Option<u64>,
     pub p99_latency_ns: Option<u64>,
     pub logging_ns: u64,
-    pub busy_ns: u64,
-    pub idle_ns: u64,
+    pub busy_ns: Option<u64>,
+    pub idle_ns: Option<u64>,
     pub file_ios: u64,
     pub attributed_file_ios: u64,
     #[serde(default)]
@@ -1877,8 +2036,8 @@ pub struct TimeBucket {
     pub second: u64,
     pub completed_ios: u64,
     pub bytes: u64,
-    pub average_latency_ns: f64,
-    pub max_queue_depth: usize,
+    pub average_latency_ns: Option<f64>,
+    pub max_queue_depth: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -1886,7 +2045,8 @@ struct MutableBucket {
     completed_ios: u64,
     bytes: u64,
     latency_sum_ns: u128,
-    max_queue_depth: usize,
+    latency_samples: u64,
+    max_queue_depth: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -2062,6 +2222,9 @@ pub struct AnalysisEngine {
     analysis_index: RefCell<Option<AnalysisIndex>>,
     slow_reason_cache: RefCell<HashMap<u64, Option<SlowReason>>>,
     attribution_generation: u64,
+    completion_window: Option<(u64, u64)>,
+    last_request_completion: HashMap<u64, u64>,
+    evidence_windows: HashMap<(u64, u64, u64), (u64, u64)>,
 }
 
 impl AnalysisEngine {
@@ -2095,7 +2258,16 @@ impl AnalysisEngine {
             analysis_index: RefCell::new(None),
             slow_reason_cache: RefCell::new(HashMap::new()),
             attribution_generation: 0,
+            completion_window: None,
+            last_request_completion: HashMap::new(),
+            evidence_windows: HashMap::new(),
         }
+    }
+
+    /// Replay every block event for original queue depth and spatial continuity,
+    /// but retain completed request details only inside this inclusive window.
+    pub fn set_completion_window(&mut self, start_ns: u64, end_ns: u64) {
+        self.completion_window = Some((start_ns, end_ns));
     }
 
     pub fn ingest(&mut self, event: StorageEvent) -> Option<CompletedIo> {
@@ -2135,11 +2307,11 @@ impl AnalysisEngine {
                 }
                 let ts_ns = issue.ts_ns;
                 let depth = self.correlator.on_issue_classified(issue, pattern);
-                self.summary.max_queue_depth = self.summary.max_queue_depth.max(depth);
+                self.summary.max_queue_depth = self.summary.max_queue_depth.max(Some(depth));
                 self.buckets
                     .entry(ts_ns / 1_000_000_000)
                     .or_default()
-                    .max_queue_depth = depth;
+                    .max_queue_depth = Some(depth);
                 None
             }
             StorageEvent::BlockComplete(completion) => {
@@ -2148,6 +2320,51 @@ impl AnalysisEngine {
                     self.summary.uncorrelated_completions += 1;
                     return None;
                 };
+                let previous = self
+                    .last_request_completion
+                    .insert(completed.issue.request_id, completed.completion.ts_ns);
+                let earliest = completed
+                    .insert
+                    .as_ref()
+                    .map_or(completed.issue.ts_ns, |v| v.ts_ns)
+                    .saturating_sub(30_000_000_000);
+                let low = previous.map_or(earliest, |ts| earliest.max(ts.saturating_add(1)));
+                if self.completion_window.is_some_and(|(start, end)| {
+                    completed.completion.ts_ns < start || completed.completion.ts_ns > end
+                }) {
+                    return Some(completed);
+                }
+                self.record_completed(&completed);
+                self.evidence_windows.insert(
+                    request_cache_key(&completed),
+                    (low, completed.completion.ts_ns),
+                );
+                if self.completed.len() == MAX_ANALYSIS_SAMPLES {
+                    for old in self.completed.drain(..MAX_ANALYSIS_SAMPLES / 10) {
+                        self.evidence_windows.remove(&request_cache_key(&old));
+                    }
+                }
+                self.completed.push(completed.clone());
+                Some(completed)
+            }
+            StorageEvent::ObservedBlockCompletion(completed) => {
+                self.observe_ts(completed.start_timestamp());
+                self.observe_ts(completed.completion.ts_ns);
+                self.summary.issued_ios += u64::from(completed.issue_timestamp().is_some());
+                match completed.access_pattern {
+                    AccessPattern::Sequential => self.summary.sequential_ios += 1,
+                    AccessPattern::Random => self.summary.random_ios += 1,
+                    AccessPattern::Unknown => {}
+                }
+                match completed.size_class {
+                    IoSizeClass::Small => self.summary.small_ios += 1,
+                    IoSizeClass::Large => self.summary.large_ios += 1,
+                }
+                if self.completion_window.is_some_and(|(start, end)| {
+                    completed.completion.ts_ns < start || completed.completion.ts_ns > end
+                }) {
+                    return Some(completed);
+                }
                 self.record_completed(&completed);
                 if self.completed.len() == MAX_ANALYSIS_SAMPLES {
                     self.completed.drain(..MAX_ANALYSIS_SAMPLES / 10);
@@ -2274,7 +2491,11 @@ impl AnalysisEngine {
                         bytes: origin.bytes,
                         pid: origin.pid,
                         tid: origin.tid,
-                        name: "direct bio file origin".into(),
+                        name: if origin.request_lifetime_confidence == EdgeConfidence::Exact {
+                            "direct bio file origin".into()
+                        } else {
+                            "filesystem extent file origin".into()
+                        },
                     },
                 );
                 bounded_push(
@@ -2285,9 +2506,15 @@ impl AnalysisEngine {
                         from_node_id: node_id,
                         to_node_id: request_node_id,
                         relation: IoRelation::MergedInto,
-                        confidence: EdgeConfidence::Exact,
+                        confidence: origin
+                            .file_origin_confidence
+                            .weakest(origin.request_lifetime_confidence),
                         evidence: vec![CorrelationEvidence {
-                            match_type: if origin.incomplete {
+                            match_type: if origin.request_lifetime_confidence
+                                != EdgeConfidence::Exact
+                            {
+                                "f2fs_extent_block_overlap"
+                            } else if origin.incomplete {
                                 "direct_bio_request_incomplete"
                             } else {
                                 "direct_bio_request"
@@ -2296,7 +2523,8 @@ impl AnalysisEngine {
                             opaque_key: Some(origin.origin_id),
                             delta_ns: None,
                             candidate_count: 1,
-                            sector_match: false,
+                            sector_match: origin.request_lifetime_confidence
+                                != EdgeConfidence::Exact,
                             bytes_match: origin.bytes.is_some(),
                             task_match: origin.pid != 0,
                         }],
@@ -2320,24 +2548,26 @@ impl AnalysisEngine {
             IoOperation::Write => self.summary.write_bytes += bytes,
             _ => self.summary.other_bytes += bytes,
         }
-        self.latencies_ns.push(completed.total_latency_ns);
-        self.live_latency_histogram
-            .record(completed.total_latency_ns);
-        let start = completed
-            .insert
-            .as_ref()
-            .map_or(completed.issue.ts_ns, |value| value.ts_ns);
-        merge_interval(
-            &mut self.busy_intervals,
-            (start, completed.completion.ts_ns),
-        );
+        if let Some(latency) = completed.total_latency_ns {
+            self.latencies_ns.push(latency);
+            self.live_latency_histogram.record(latency);
+            merge_interval(
+                &mut self.busy_intervals,
+                (completed.start_timestamp(), completed.completion.ts_ns),
+            );
+        } else {
+            self.summary.unmeasured_latency_ios += 1;
+        }
         let bucket = self
             .buckets
             .entry(completed.completion.ts_ns / 1_000_000_000)
             .or_default();
         bucket.completed_ios += 1;
         bucket.bytes += bytes;
-        bucket.latency_sum_ns += completed.total_latency_ns as u128;
+        if let Some(latency) = completed.total_latency_ns {
+            bucket.latency_sum_ns += latency as u128;
+            bucket.latency_samples += 1;
+        }
         bucket.max_queue_depth = bucket.max_queue_depth.max(completed.queue_depth_after);
         let category = self
             .categories
@@ -2349,13 +2579,20 @@ impl AnalysisEngine {
             .or_default();
         category.completed_ios += 1;
         category.bytes += bytes;
-        category.latencies.push(completed.total_latency_ns);
-        category.histogram.record(completed.total_latency_ns);
+        if let Some(latency) = completed.total_latency_ns {
+            category.latencies.push(latency);
+            category.histogram.record(latency);
+        }
     }
 
     fn observe_ts(&mut self, ts_ns: u64) {
         self.first_ts_ns = Some(self.first_ts_ns.map_or(ts_ns, |value| value.min(ts_ns)));
         self.last_ts_ns = Some(self.last_ts_ns.map_or(ts_ns, |value| value.max(ts_ns)));
+    }
+
+    /// Stable timestamp across retention and filtered views.
+    pub fn session_start_ns(&self) -> Option<u64> {
+        self.first_ts_ns
     }
 
     pub fn summary(&self) -> AnalysisSummary {
@@ -2372,8 +2609,11 @@ impl AnalysisEngine {
             .first_ts_ns
             .zip(self.last_ts_ns)
             .map_or(0, |(first, last)| last.saturating_sub(first));
-        summary.busy_ns = union_duration(&self.busy_intervals).min(summary.logging_ns);
-        summary.idle_ns = summary.logging_ns.saturating_sub(summary.busy_ns);
+        summary.busy_ns = (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0)
+            .then(|| union_duration(&self.busy_intervals).min(summary.logging_ns));
+        summary.idle_ns = summary
+            .busy_ns
+            .map(|busy| summary.logging_ns.saturating_sub(busy));
         summary.category_summaries = self
             .categories
             .iter()
@@ -2434,13 +2674,17 @@ impl AnalysisEngine {
             .first_ts_ns
             .zip(self.last_ts_ns)
             .map_or(0, |(first, last)| last.saturating_sub(first));
-        summary.busy_ns = self
-            .busy_intervals
-            .iter()
-            .map(|(start, end)| end.saturating_sub(*start))
-            .sum::<u64>()
-            .min(summary.logging_ns);
-        summary.idle_ns = summary.logging_ns.saturating_sub(summary.busy_ns);
+        summary.busy_ns =
+            (summary.unmeasured_latency_ios == 0 && summary.completed_ios > 0).then(|| {
+                self.busy_intervals
+                    .iter()
+                    .map(|(start, end)| end.saturating_sub(*start))
+                    .sum::<u64>()
+                    .min(summary.logging_ns)
+            });
+        summary.idle_ns = summary
+            .busy_ns
+            .map(|busy| summary.logging_ns.saturating_sub(busy));
         summary.category_summaries = self
             .categories
             .iter()
@@ -2461,6 +2705,42 @@ impl AnalysisEngine {
         summary
     }
 
+    /// Project retained completed requests without reclassifying adjacency or
+    /// fabricating queue depth from the filtered stream. Evidence remains from
+    /// this session; filtering must never change attribution confidence.
+    pub fn select_completed(&self, mut predicate: impl FnMut(&CompletedIo) -> bool) -> Self {
+        let mut result = Self::new();
+        result.file_ios = self.file_ios.clone();
+        result.pipeline_observations = self.pipeline_observations.clone();
+        result.graph_nodes = self.graph_nodes.clone();
+        result.graph_edges = self.graph_edges.clone();
+        result.attribution_generation = self.attribution_generation;
+        for io in self.completed.iter().filter(|io| predicate(io)) {
+            if let Some(window) = self.evidence_windows.get(&request_cache_key(io)) {
+                result
+                    .evidence_windows
+                    .insert(request_cache_key(io), *window);
+            }
+            result.observe_ts(io.insert.as_ref().map_or(io.issue.ts_ns, |v| v.ts_ns));
+            result.observe_ts(io.completion.ts_ns);
+            result.record_completed(io);
+            result.summary.issued_ios += u64::from(io.issue_timestamp().is_some());
+            match io.access_pattern {
+                AccessPattern::Sequential => result.summary.sequential_ios += 1,
+                AccessPattern::Random => result.summary.random_ios += 1,
+                _ => {}
+            }
+            match io.size_class {
+                IoSizeClass::Small => result.summary.small_ios += 1,
+                IoSizeClass::Large => result.summary.large_ios += 1,
+            }
+            result.summary.max_queue_depth =
+                result.summary.max_queue_depth.max(io.queue_depth_after);
+            result.completed.push(io.clone());
+        }
+        result
+    }
+
     pub fn completed_ios(&self) -> &[CompletedIo] {
         &self.completed
     }
@@ -2477,6 +2757,9 @@ impl AnalysisEngine {
     }
 
     pub fn pipeline_for(&self, io: &CompletedIo) -> IoPipeline {
+        if io.evidence.is_some() {
+            return build_io_pipeline(io, &[]);
+        }
         let cache_key = request_cache_key(io);
         if let Some(pipeline) = self.pipeline_cache.borrow().get(&cache_key) {
             return pipeline.clone();
@@ -2509,6 +2792,10 @@ impl AnalysisEngine {
         let observations: Vec<_> = positions
             .into_iter()
             .map(|position| self.pipeline_observations[position].clone())
+            .filter(|v| {
+                v.correlation_id != Some(io.issue.request_id)
+                    || self.evidence_time_matches(io, v.ts_ns)
+            })
             .collect();
         drop(index_guard);
         let pipeline = build_io_pipeline(io, &observations);
@@ -2582,6 +2869,10 @@ impl AnalysisEngine {
         let observations: Vec<_> = observation_positions
             .into_iter()
             .map(|position| self.pipeline_observations[position].clone())
+            .filter(|v| {
+                v.correlation_id != Some(io.issue.request_id)
+                    || self.evidence_time_matches(io, v.ts_ns)
+            })
             .collect();
         let nodes: Vec<_> = index
             .nodes_by_transaction
@@ -2589,6 +2880,7 @@ impl AnalysisEngine {
             .into_iter()
             .flatten()
             .map(|&position| self.graph_nodes[position].clone())
+            .filter(|v| self.evidence_time_matches(io, v.start_ts_ns))
             .collect();
         let edges: Vec<_> = index
             .edges_by_transaction
@@ -2605,6 +2897,18 @@ impl AnalysisEngine {
         }
         cache.insert(cache_key, graph.clone());
         graph
+    }
+
+    fn evidence_time_matches(&self, io: &CompletedIo, ts: u64) -> bool {
+        let (low, high) = self
+            .evidence_windows
+            .get(&request_cache_key(io))
+            .copied()
+            .unwrap_or((
+                io.issue.ts_ns.saturating_sub(30_000_000_000),
+                io.completion.ts_ns,
+            ));
+        ts >= low && ts <= high
     }
 
     pub fn transactions(&self) -> Vec<IoTransactionGraph> {
@@ -2707,11 +3011,8 @@ impl AnalysisEngine {
                 second: *second,
                 completed_ios: value.completed_ios,
                 bytes: value.bytes,
-                average_latency_ns: if value.completed_ios == 0 {
-                    0.0
-                } else {
-                    value.latency_sum_ns as f64 / value.completed_ios as f64
-                },
+                average_latency_ns: (value.latency_samples > 0)
+                    .then(|| value.latency_sum_ns as f64 / value.latency_samples as f64),
                 max_queue_depth: value.max_queue_depth,
             })
             .collect()
@@ -2795,7 +3096,7 @@ pub fn build_transaction_graph(
         transaction_id: Some(request_id),
         kind: IoNodeKind::BlockRequest,
         start_ts_ns: io.issue.ts_ns,
-        end_ts_ns: Some(block_end),
+        end_ts_ns: io.device_latency_ns.map(|_| block_end),
         origin: IoOrigin::Unknown,
         file: None,
         path: None,
@@ -2803,7 +3104,14 @@ pub fn build_transaction_graph(
         bytes: Some(io.issue.bytes as u64),
         pid: io.issue.pid,
         tid: io.issue.tid,
-        name: format!("block request {request_id}"),
+        name: if let Some(e) = &io.evidence {
+            format!(
+                "{} observation {} · {:?}",
+                e.source, e.record_id, e.timing_confidence
+            )
+        } else {
+            format!("block request {request_id}")
+        },
     });
     if let Some(insert) = &io.insert {
         let queue_node_id = synthetic_node_id(8, request_id);
@@ -2823,14 +3131,23 @@ pub fn build_transaction_graph(
             tid: io.issue.tid,
             name: "block queue".into(),
         });
-        let _ = graph.add_edge(IoEdge::exact(
+        let mut edge = IoEdge::exact(
             synthetic_node_id(18, request_id),
             queue_node_id,
             request_node_id,
             IoRelation::Dispatches,
-        ));
+        );
+        if io.evidence.is_some() {
+            edge.confidence = EdgeConfidence::Probable;
+        }
+        let _ = graph.add_edge(edge);
     }
 
+    // A trace-local observation number cannot join kernel request pointers,
+    // nearby files or foreign session evidence.
+    if io.evidence.is_some() {
+        return graph;
+    }
     let probable_window_start = block_start.saturating_sub(10_000_000);
     let probable_window_end = block_end.saturating_add(10_000_000);
     let has_exact_file_origin = raw_edges.iter().any(|edge| {
@@ -2947,7 +3264,7 @@ pub fn build_transaction_graph(
                 transaction_id: Some(request_id),
                 kind: pipeline_node_kind(span.layer),
                 start_ts_ns: span.start_ts_ns,
-                end_ts_ns: Some(span.end_ts_ns),
+                end_ts_ns: span.duration_observed.then_some(span.end_ts_ns),
                 origin: IoOrigin::Unknown,
                 file: None,
                 path: None,
@@ -3093,6 +3410,7 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
 
     let mut candidates: Vec<&PipelineObservation> = observations
         .iter()
+        .filter(|_| io.evidence.is_none())
         .filter(|value| {
             let end = value.end_ts_ns.unwrap_or(value.ts_ns);
             if end < value.ts_ns {
@@ -3133,6 +3451,8 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
                 layer: value.layer,
                 start_ts_ns: value.ts_ns,
                 end_ts_ns: end,
+                duration_observed: value.end_ts_ns.is_some()
+                    && value.phase != PipelinePhase::Instant,
                 name: value.name.clone(),
                 confidence: if value.correlation_id == Some(request_id)
                     && value.confidence != CorrelationConfidence::ContextOnly
@@ -3162,8 +3482,9 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             layer: PipelineLayer::BlockQueue,
             start_ts_ns: insert.ts_ns,
             end_ts_ns: io.issue.ts_ns,
+            duration_observed: true,
             name: "block queue".into(),
-            confidence: CorrelationConfidence::Exact,
+            confidence: io.timing_confidence(),
             source: "block_rq_insert → block_rq_issue".into(),
             opcode: None,
             status: None,
@@ -3173,8 +3494,9 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
         layer: PipelineLayer::BlockDevice,
         start_ts_ns: io.issue.ts_ns,
         end_ts_ns: io.completion.ts_ns,
+        duration_observed: io.device_latency_ns.is_some(),
         name: "block device".into(),
-        confidence: CorrelationConfidence::Exact,
+        confidence: io.timing_confidence(),
         source: "block_rq_issue → block_rq_complete".into(),
         opcode: None,
         status: Some(io.completion.status),
