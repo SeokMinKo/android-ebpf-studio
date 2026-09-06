@@ -742,6 +742,7 @@ impl StudioApp {
             report["device_phases"] = serde_json::json!(self.render_qa.device_phases);
             report["preflight"] = serde_json::json!(self.preflight);
             report["source_info"] = serde_json::json!(self.source_info);
+            report["loss_status"] = serde_json::json!(self.loss_status);
             report["status"] = serde_json::json!(self.status);
             report["qa_timed_out"] = serde_json::json!(timed_out);
             report["active_filter"] = serde_json::json!(self.query);

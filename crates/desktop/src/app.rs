@@ -951,7 +951,15 @@ impl StudioApp {
 
     fn drain_messages(&mut self) {
         let started = Instant::now();
-        for _ in 0..MAX_MESSAGES_PER_FRAME {
+        // Post-Stop batches can be cheap enough that the live-capture count cap
+        // wastes most of the time budget on hundreds of redundant UI frames.
+        // Retain the 4 ms yield boundary so input/close handling stays responsive.
+        let max_messages = if self.phase == CapturePhase::Analyzing {
+            MAX_MESSAGES_PER_FRAME * 4
+        } else {
+            MAX_MESSAGES_PER_FRAME
+        };
+        for _ in 0..max_messages {
             if started.elapsed() >= Duration::from_millis(4) {
                 break;
             }
@@ -1128,12 +1136,15 @@ impl StudioApp {
         match record {
             value @ WireRecord::SourceInfo { .. } => {
                 let WireRecord::SourceInfo {
-                    status, metadata, ..
+                    source,
+                    status,
+                    metadata,
+                    ..
                 } = &value
                 else {
                     unreachable!()
                 };
-                self.loss_status = status.clone();
+                self.loss_status = crate::perfetto_session::source_status(source, status, metadata);
                 if metadata.get("stage").and_then(|s| s.as_str()) == Some("recording")
                     && self.phase == CapturePhase::Preparing
                 {

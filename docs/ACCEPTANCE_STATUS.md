@@ -76,6 +76,52 @@ interruption, not physical USB interruption or a successful ten-minute UI soak.
 The interruption's origin was not established. At the last recorded UI sample,
 the warm frame p95 was 9.61 ms and working set was approximately 223 MiB.
 
+### Post-Stop ingestion and source loss visibility
+
+A later ten-minute non-root capture completed automatically with 329,553
+completion observations (99,553 retained details). Stop to analysis took 6.064 s,
+so it **failed** the requested five-second budget. Sampled peak working set was
+551.3 MiB. The raw trace reported one central-service buffer chunk overwritten
+(32,768 bytes), despite kernel loss counters being zero. All timing remained
+Unresolved; this is not a loss-free acceptance result.
+
+Analysis now consumes up to 4,000 queued messages per frame while retaining the
+4 ms yield boundary. Live recording keeps its existing 1,000-message cap. Native
+replay of the same 329,553 observations decreased from 3.000 s to 2.268 s, with
+the original hash, retained population and displayed graph/KPI scope unchanged.
+The cap had left most of the processing budget unused on inexpensive records,
+causing hundreds of unnecessary render cycles. A single expensive record can
+still exceed the yield target; this is not a hard real-time guarantee.
+
+```text
+node scripts/check-analysis-replay.mjs <release-exe> <capture.ndjson> <new-output-dir> 2300
+```
+
+The replay gate checks native completion, nonempty input, rejection count,
+preservation of the source, displayed graph/KPI scope and elapsed analysis time.
+The 2,300 ms component budget reserves the observed 2.68 s for device Stop,
+retrieval and decoding; replay alone does not establish the full Stop budget.
+Run on the target host with a representative retained source session. Timing is
+an opt-in release check, not a fixed CI hardware promise.
+
+Visible source status now derives service loss, missing counters, lost bundles,
+parse errors, truncation, projection limits and failed flushes from the stored
+quality evidence. This applies to live capture and reopening older sessions.
+Service byte and chunk counters keep their distinct units and are not summed
+into kernel event loss. Tests reproduce hidden service loss with zero kernel
+loss, preserve unmeasured latency and volume, and check missing-counter and
+failure messages. Raw capture contents remain unchanged.
+
+A subsequent ten-minute physical run of the ingestion change completed with
+515,961 observations (95,961 retained), 60 successful workload iterations,
+5.237 s from Stop to analysis and a sampled 706.3 MiB peak working set. This
+**still fails** the five-second requirement. It contained more observations
+than the earlier run, so the two wall times are not a controlled improvement
+ratio. Stop/pull/decode occupied approximately 2.70 s; analysis/finalization
+approximately 2.49 s. The same one-chunk/32,768-byte service overwrite was
+observed, with kernel loss zero and all timing Unresolved. The later warning
+layout was verified separately on saved actual data in all three themes.
+
 ## Outstanding acceptance and limitations
 
 - Fresh root-device verifier/attach and known-file workload validation, a second

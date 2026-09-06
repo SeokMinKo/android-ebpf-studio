@@ -14,6 +14,64 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Derive the visible warning from saved evidence as well as new captures.
+/// Kernel counters do not include loss in Perfetto's central service buffers.
+pub fn source_status(source: &str, status: &str, metadata: &serde_json::Value) -> String {
+    if source != "perfetto" || metadata["stage"] != "complete" {
+        return status.into();
+    }
+    let Ok(quality) = serde_json::from_value::<perfetto::TraceQuality>(metadata["quality"].clone())
+    else {
+        return format!("{status} · Trace quality unavailable (missing or incompatible metadata)");
+    };
+    let mut notices = Vec::new();
+    let service_loss: Vec<_> = quality
+        .service_loss_counters
+        .iter()
+        .filter(|(_, value)| **value > 0)
+        .map(|(name, value)| {
+            if let Some((buffer, counter)) =
+                name.strip_prefix("buffer_").and_then(|s| s.split_once('_'))
+            {
+                format!("buffer {buffer}: {value} {}", counter.replace('_', " "))
+            } else {
+                format!("{value} {}", name.replace('_', " "))
+            }
+        })
+        .collect();
+    if !service_loss.is_empty() {
+        notices.push(format!(
+            "Service loss detected: {}",
+            service_loss.join(", ")
+        ));
+    } else if !quality.service_stats_seen {
+        notices.push("Service loss counters unavailable".into());
+    }
+    if quality.lost_bundles > 0 {
+        notices.push(format!("Lost ftrace bundles: {}", quality.lost_bundles));
+    }
+    if quality.parse_errors > 0 {
+        notices.push(format!("Trace parse errors: {}", quality.parse_errors));
+    }
+    if quality.truncated {
+        notices.push("Raw trace truncated".into());
+    }
+    if quality.projection_limited {
+        notices.push("Analysis projection limit reached; raw trace preserved".into());
+    }
+    if quality.final_flush_outcome == Some(2) {
+        notices.push("Final trace flush failed".into());
+    }
+    if !notices.is_empty() {
+        let status = status
+            .strip_suffix(" · quality details in Diagnostics")
+            .unwrap_or(status);
+        format!("{status}\n{}", notices.join(" · "))
+    } else {
+        status.into()
+    }
+}
+
 pub fn project_records(
     decoded: &DecodedTrace,
     raw_trace: &str,
