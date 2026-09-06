@@ -150,8 +150,10 @@ layout was verified separately on saved actual data in all three themes.
   filters, temporal aggregation, selection Summary, Compare and exports. Host
   regressions preserve full count/volume and raw evidence for unknown/mixed clocks;
   physical unsupported-clock capture and clock normalization remain unverified.
-- Retained-detail FilePath coverage is labeled as such. A whole-session coverage
-  denominator beyond the retained analysis window is not yet provided.
+- [Whole-session FilePath coverage](FILEPATH_COVERAGE.md) now includes observed
+  block completions beyond detail retention and preserves late root evidence.
+  Root worker memory grows with evidence volume; representative long root
+  capture performance and physical known-path accuracy remain unverified.
 - A previously observed intermittent native startup access violation has not
   been explained. Forty subsequent launch probes (20 welcome, 20 Compare)
   passed; those repetitions do not establish that the original defect is fixed.

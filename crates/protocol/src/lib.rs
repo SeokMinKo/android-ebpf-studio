@@ -8,6 +8,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+mod filepath_coverage;
+pub use filepath_coverage::{
+    CoverageVolume, FilePathConfidence, FilePathCoverage, FilePathCoverageEngine,
+};
+
 pub const SCHEMA_VERSION: u16 = 6;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
@@ -348,6 +353,8 @@ pub struct FileOriginView {
     pub file: FileIdentity,
     pub path: Option<PathSnapshot>,
     pub confidence: EdgeConfidence,
+    /// The collector reported that additional origins were dropped.
+    pub incomplete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -497,6 +504,7 @@ impl IoTransactionGraph {
 
     pub fn file_origins_for(&self, node_id: u64) -> Vec<FileOriginView> {
         let mut queue = VecDeque::from([(node_id, EdgeConfidence::Exact)]);
+        let mut incomplete = false;
         let mut seen = HashSet::new();
         let mut origins = BTreeMap::<FileIdentity, FileOriginView>::new();
         while let Some((current, confidence)) = queue.pop_front() {
@@ -510,6 +518,7 @@ impl IoTransactionGraph {
                     file: file.clone(),
                     path: node.path.clone(),
                     confidence,
+                    incomplete: false,
                 };
                 origins
                     .entry(file.clone())
@@ -521,10 +530,20 @@ impl IoTransactionGraph {
                     .or_insert(candidate);
             }
             for edge in self.edges.iter().filter(|edge| edge.to_node_id == current) {
+                incomplete |= edge
+                    .evidence
+                    .iter()
+                    .any(|e| e.match_type == "direct_bio_request_incomplete");
                 queue.push_back((edge.from_node_id, confidence.weakest(edge.confidence)));
             }
         }
-        origins.into_values().collect()
+        origins
+            .into_values()
+            .map(|mut origin| {
+                origin.incomplete = incomplete;
+                origin
+            })
+            .collect()
     }
 
     pub fn metrics(&self) -> GraphMetrics {
@@ -2218,6 +2237,8 @@ impl AnalysisIndex {
 
 #[derive(Debug)]
 pub struct AnalysisEngine {
+    // Only the dedicated final coverage worker disables detail eviction.
+    retain_all_evidence: bool,
     correlator: RequestCorrelator,
     classifier: SequentialClassifier,
     summary: AnalysisSummary,
@@ -2254,6 +2275,7 @@ impl AnalysisEngine {
     /// The second argument remains for source compatibility; continuity is now purely spatial.
     pub fn with_windows(correlation_ttl_ns: u64, _sequential_window_ns: u64) -> Self {
         Self {
+            retain_all_evidence: false,
             correlator: RequestCorrelator::new(correlation_ttl_ns),
             classifier: SequentialClassifier::new(),
             summary: AnalysisSummary::default(),
@@ -2358,7 +2380,7 @@ impl AnalysisEngine {
                     request_cache_key(&completed),
                     (low, completed.completion.ts_ns),
                 );
-                if self.completed.len() == MAX_ANALYSIS_SAMPLES {
+                if !self.retain_all_evidence && self.completed.len() == MAX_ANALYSIS_SAMPLES {
                     for old in self.completed.drain(..MAX_ANALYSIS_SAMPLES / 10) {
                         self.evidence_windows.remove(&request_cache_key(&old));
                     }
@@ -2386,7 +2408,7 @@ impl AnalysisEngine {
                     return Some(completed);
                 }
                 self.record_completed(&completed);
-                if self.completed.len() == MAX_ANALYSIS_SAMPLES {
+                if !self.retain_all_evidence && self.completed.len() == MAX_ANALYSIS_SAMPLES {
                     self.completed.drain(..MAX_ANALYSIS_SAMPLES / 10);
                 }
                 self.completed.push(completed.clone());
@@ -2403,7 +2425,7 @@ impl AnalysisEngine {
                 ) {
                     self.summary.attributed_file_ios += 1;
                 }
-                if self.file_ios.len() == MAX_ANALYSIS_SAMPLES {
+                if !self.retain_all_evidence && self.file_ios.len() == MAX_ANALYSIS_SAMPLES {
                     self.file_ios.drain(..MAX_ANALYSIS_SAMPLES / 10);
                 }
                 if file.end_ts_ns >= file.start_ts_ns {
@@ -2454,6 +2476,7 @@ impl AnalysisEngine {
                             && observation.ts_ns >= begin.ts_ns
                         {
                             bounded_push(
+                                self.retain_all_evidence,
                                 &mut self.pipeline_observations,
                                 PipelineObservation {
                                     ts_ns: begin.ts_ns,
@@ -2474,7 +2497,11 @@ impl AnalysisEngine {
                             );
                         }
                     }
-                    _ => bounded_push(&mut self.pipeline_observations, observation),
+                    _ => bounded_push(
+                        self.retain_all_evidence,
+                        &mut self.pipeline_observations,
+                        observation,
+                    ),
                 }
                 let newest = self.last_ts_ns.unwrap_or_default();
                 self.pending_pipeline
@@ -2488,7 +2515,7 @@ impl AnalysisEngine {
                 self.attribution_generation = self.attribution_generation.saturating_add(1);
                 self.observe_ts(node.start_ts_ns);
                 self.observe_ts(node.end_or_start());
-                bounded_push(&mut self.graph_nodes, node);
+                bounded_push(self.retain_all_evidence, &mut self.graph_nodes, node);
                 None
             }
             StorageEvent::RequestOrigin(origin) => {
@@ -2497,6 +2524,7 @@ impl AnalysisEngine {
                 let node_id = request_origin_node_id(origin.request_id, origin.origin_id);
                 let request_node_id = block_request_node_id(origin.request_id);
                 bounded_push(
+                    self.retain_all_evidence,
                     &mut self.graph_nodes,
                     IoNode {
                         node_id,
@@ -2519,6 +2547,7 @@ impl AnalysisEngine {
                     },
                 );
                 bounded_push(
+                    self.retain_all_evidence,
                     &mut self.graph_edges,
                     IoEdge {
                         edge_id: request_origin_edge_id(origin.request_id, origin.origin_id),
@@ -2554,7 +2583,7 @@ impl AnalysisEngine {
             }
             StorageEvent::Edge(edge) => {
                 self.attribution_generation = self.attribution_generation.saturating_add(1);
-                bounded_push(&mut self.graph_edges, edge);
+                bounded_push(self.retain_all_evidence, &mut self.graph_edges, edge);
                 None
             }
         }
@@ -3105,8 +3134,8 @@ fn durations_by_kind(graph: &IoTransactionGraph) -> BTreeMap<IoNodeKind, u64> {
         .collect()
 }
 
-fn bounded_push<T>(values: &mut Vec<T>, value: T) {
-    if values.len() == MAX_ANALYSIS_SAMPLES {
+fn bounded_push<T>(retain_all: bool, values: &mut Vec<T>, value: T) {
+    if !retain_all && values.len() == MAX_ANALYSIS_SAMPLES {
         values.drain(..MAX_ANALYSIS_SAMPLES / 10);
     }
     values.push(value);

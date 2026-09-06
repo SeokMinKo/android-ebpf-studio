@@ -88,7 +88,7 @@ pub enum HostMessage {
     RawTraceExported(Result<PathBuf, String>),
     Exported(Result<PathBuf, String>),
     Ended(Result<(), String>),
-    Finalized(Result<(), String>),
+    Finalized(Result<Option<android_ebpf_protocol::FilePathCoverage>, String>),
 }
 
 #[derive(Debug, Clone)]

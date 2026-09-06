@@ -1,5 +1,37 @@
 // Keep raw session evidence in the engine for attribution; expose only evidence
 // related to the filtered block cohort in the file table and coverage counters.
+fn coverage_percent(count: u64, total: u64) -> String {
+    if total == 0 {
+        return "N/A".into();
+    }
+    if count == 0 {
+        return "0%".into();
+    }
+    if count == total {
+        return "100%".into();
+    }
+    let value = ratio(count, total);
+    if value < 0.1 {
+        "<0.1%".into()
+    } else if value > 99.9 {
+        ">99.9%".into()
+    } else {
+        format!("{value:.1}%")
+    }
+}
+
+#[test]
+fn coverage_labels_do_not_round_missing_requests_into_perfect_resolution() {
+    assert_eq!(coverage_percent(99_998, 100_001), ">99.9%");
+    assert_eq!(coverage_percent(3, 100_001), "<0.1%");
+    assert_eq!(coverage_percent(1, u64::MAX), "<0.1%");
+    assert_eq!(coverage_percent(u64::MAX - 1, u64::MAX), ">99.9%");
+    assert_eq!(coverage_percent(0, 184), "0%");
+    assert_eq!(coverage_percent(184, 184), "100%");
+    assert_eq!(coverage_percent(141, 184), "76.6%");
+    assert_eq!(coverage_percent(0, 0), "N/A");
+}
+
 fn related_file_positions(engine: &AnalysisEngine) -> Vec<usize> {
     if engine.file_ios().is_empty() || engine.completed_ios().is_empty() {
         return Vec::new();
@@ -80,6 +112,87 @@ fn related_file_positions(engine: &AnalysisEngine) -> Vec<usize> {
 }
 
 impl StudioApp {
+    fn session_file_path_coverage_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(coverage) = &self.file_path_coverage else {
+            ui.label("Whole-session FilePath coverage: available after session finalization or reopening saved data.");
+            return;
+        };
+        let total = coverage.completion_records();
+        if total == 0 {
+            ui.label("Whole-session FilePath coverage: unavailable — no block completion records observed.");
+            return;
+        }
+        let qa = self
+            .render_qa
+            .output
+            .as_ref()
+            .and_then(|_| std::env::var("ANDROID_EBPF_QA_GESTURE").ok());
+        let qa_active = qa.as_ref().is_some_and(|g| g.starts_with("coverage-"));
+        let start = ui.cursor().min;
+        if qa_active && self.render_qa.frames >= 28 && self.render_qa.input_step == 0 {
+            ui.scroll_to_rect(
+                egui::Rect::from_min_size(start, egui::vec2(ui.available_width(), 300.0)),
+                Some(egui::Align::Min),
+            );
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "Whole session FilePath · {total} completion records · linked {}",
+                coverage_percent(coverage.exact.count + coverage.probable.count, total)
+            ))
+            .strong(),
+        );
+        ui.horizontal_wrapped(|ui| {
+            for (name, row) in [
+                ("Exact", coverage.exact),
+                ("Probable", coverage.probable),
+                ("Unresolved", coverage.unresolved),
+            ] {
+                ui.label(format!(
+                    "{name} {} ({})",
+                    row.count,
+                    coverage_percent(row.count, total)
+                ));
+            }
+        });
+        egui::CollapsingHeader::new("Coverage basis and unresolved reasons")
+            .id_salt("whole-session-filepath-basis")
+            .default_open(qa.as_deref() == Some("coverage-basis"))
+            .show(ui, |ui| {
+                ui.label("Percentages use observed block completion records, including unmatched completions. Whole-session results stay unchanged by detail filters and Compare selections. Pending issues, lost events and collector-suppressed I/O are outside this denominator; inspect capture diagnostics for those limits.");
+                egui::Grid::new("whole-session-filepath-volume").striped(true).show(ui, |ui| {
+                    ui.strong("FilePath"); ui.strong("Records"); ui.strong("Known request MiB"); ui.end_row();
+                    for (name, row) in [("Exact", coverage.exact), ("Probable", coverage.probable), ("Unresolved", coverage.unresolved), ("Multiple origins (overlap)", coverage.multi_origin)] {
+                        ui.label(name); ui.label(row.count.to_string()); ui.label(format!("{:.3}", row.known_bytes as f64 / 1_048_576.0)); ui.end_row();
+                    }
+                });
+                ui.label(format!("Unresolved: no origin {} · identity without path {} · context-only {} · incomplete origin set {} · observations without joinable file identity {} · unmatched completions {}.", coverage.no_origin, coverage.missing_path, coverage.context_only, coverage.incomplete_origin_set, coverage.observation_without_file_identity, coverage.unmatched_completions));
+                ui.label(format!("Unmatched completion bytes are unavailable ({} records). Issue events without a paired completion: {}. Multiple-origin records overlap confidence rows and are counted once in the denominator.", coverage.unmatched_completions, coverage.issue_events_without_completion));
+            });
+        if qa_active {
+            let rect = egui::Rect::from_min_max(
+                start,
+                egui::pos2(ui.max_rect().right(), ui.cursor().top()),
+            );
+            self.render_qa
+                .regions
+                .insert("session-filepath-coverage".into(), (rect, ui.clip_rect()));
+            if self.render_qa.latency_stable_rect == Some(rect) {
+                self.render_qa.latency_stable_frames += 1;
+            } else {
+                self.render_qa.latency_stable_rect = Some(rect);
+                self.render_qa.latency_stable_frames = 0;
+            }
+            if self.render_qa.frames >= 30
+                && self.render_qa.latency_stable_frames >= 8
+                && ui.clip_rect().contains(rect.center())
+            {
+                self.render_qa.input_step = 7;
+            }
+        }
+        ui.add_space(8.0);
+    }
+
     fn update_file_evidence_scope(&mut self) {
         self.file_evidence_positions = (self.query.active() || self.reanalysis.window.is_some())
             .then(|| related_file_positions(self.analysis()));

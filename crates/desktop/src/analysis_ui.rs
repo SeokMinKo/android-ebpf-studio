@@ -71,7 +71,7 @@ mod diskstats_performance_tests {
             app.summary_view.is_none(),
             "pending batches must not rebuild results on every frame"
         );
-        app.tx.send(HostMessage::Finalized(Ok(()))).unwrap();
+        app.tx.send(HostMessage::Finalized(Ok(None))).unwrap();
         app.drain_messages();
         let mut output = ctx.run_ui(Default::default(), |root| {
             egui::CentralPanel::default().show(root, |ui| app.analysis_page_ui(ui));
@@ -157,38 +157,10 @@ struct AnalysisFilter {
     confidence: Option<PathConfidence>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-enum PathConfidence {
-    Exact,
-    Probable,
-    Unresolved,
-}
+type PathConfidence = android_ebpf_protocol::FilePathConfidence;
 
 fn path_confidence(origins: &[FileOriginView]) -> PathConfidence {
-    if origins.is_empty()
-        || origins.iter().any(|v| {
-            v.path
-                .as_ref()
-                .and_then(|p| p.path.as_ref())
-                .is_none_or(|p| p.is_empty())
-        })
-    {
-        PathConfidence::Unresolved
-    } else if origins
-        .iter()
-        .all(|v| v.confidence == EdgeConfidence::Exact)
-    {
-        PathConfidence::Exact
-    } else if origins.iter().any(|v| {
-        matches!(
-            v.confidence,
-            EdgeConfidence::Probable | EdgeConfidence::ProbableAsync
-        )
-    }) {
-        PathConfidence::Probable
-    } else {
-        PathConfidence::Unresolved
-    }
+    PathConfidence::from_origins(origins)
 }
 
 impl AnalysisFilter {
@@ -510,14 +482,15 @@ impl StudioApp {
             unplaced_time_count,
             ..
         } = self.trend_view.as_ref().unwrap().1.clone();
+        self.session_file_path_coverage_ui(ui);
         let total: u64 = coverage.iter().sum();
         if unplaced_time_count > 0 {
             ui.label(format!("{unplaced_time_count} / {total} I/O have no supported session clock. Time graphs and time filters exclude them; count, bytes, address and FilePath coverage retain them."));
         }
-        ui.label(format!("FilePath by request count (n={total}): Exact {:.1}% · Probable {:.1}% · Unresolved {:.1}% · multi-origin {multi}", ratio(coverage[0],total), ratio(coverage[1],total), ratio(coverage[2],total)));
+        ui.label(format!("Retained detail FilePath by request count (n={total}): Exact {} · Probable {} · Unresolved {} · multi-origin {multi}", coverage_percent(coverage[0],total), coverage_percent(coverage[1],total), coverage_percent(coverage[2],total)));
         ui.label("FilePath confidence requires a path snapshot as well as identity evidence. Exact inode without a path remains FilePath Unresolved. This ratio describes retained detail, not bytes or suppressed/unpaired I/O.");
         if let Some(aggregate) = &self.latest_aggregate {
-            ui.label(format!("Session-wide kernel observed: {} · retained completed: {} · remaining I/O cannot be assigned a FilePath coverage claim", aggregate.counters.observed, self.analyzer.completed_ios().len()));
+            ui.label(format!("Last kernel snapshot observed: {} · retained completed: {} · lost/suppressed I/O are outside observed-completion FilePath coverage", aggregate.counters.observed, self.analyzer.completed_ios().len()));
         }
         let mut selected_bin = None;
         for (id, title, offset) in [
@@ -768,6 +741,7 @@ mod query_regressions {
             mount_id: None,
         };
         let mut origin = FileOriginView {
+            incomplete: false,
             file: identity,
             path: None,
             confidence: EdgeConfidence::Exact,
