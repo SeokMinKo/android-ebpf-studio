@@ -29,6 +29,14 @@ This ledger supersedes older statements that no phone was available.
   failure after readiness/data, Stop, cancellation during recheck and reboot.
   Initial and updated profiles plus the original failure evidence are preserved.
   This fallback boundary has not been exercised on a physical root phone.
+- Perfetto errors after launch first attempt owned-process cleanup and partial
+  trace recovery. Missing PID/lifetime output can be rediscovered using the same
+  boot, both nonce-owned arguments and stable creation ticks. Uncertain ownership
+  leaves an Error with a retryable manifest instead of starting another source.
+  Host fixtures cover identity-read failures, missing PID, post-launch nonzero
+  exit, normal process-state changes, foreign/ambiguous identities and recovery
+  after failed enumeration. These do not establish physical disconnection or a
+  real device-side readiness timeout.
 
 The retained-summary regression reproduces 100,001 observed completions with
 90,001 remaining in the analysis window. It checks count, separate Read/Write

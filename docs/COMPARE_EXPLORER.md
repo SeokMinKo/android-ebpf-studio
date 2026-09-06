@@ -21,6 +21,18 @@
 
 ## 화면
 
+네이티브 선택·탭 전환 회귀 검사는 저장된 두 세션으로 재현할 수 있습니다.
+새 출력 폴더를 사용하며 원본 해시, 실제 입력 완료 조건, 스크린샷을 확인합니다.
+배율 1의 분포 탭과 배율 2의 점 선택은 자동 스크롤 결함의 회귀 조건입니다.
+검증용 스크롤은 보이지 않는 대상에만 적용됩니다. 정상 앱 실행에는 적용되지 않습니다.
+
+```text
+node scripts/check-compare-interaction.mjs <release-exe> <baseline.ndjson> <current.ndjson> <new-output-dir> compare-distributions 1
+node scripts/check-compare-interaction.mjs <release-exe> <baseline.ndjson> <current.ndjson> <new-output-dir> compare-point 2
+```
+
+이는 지정된 native QA 전이 검증이며 모든 OS 배율·접근성 검증을 대체하지 않습니다.
+
 선택 그래프 (local acceptance artifact) · Files 비교 (local acceptance artifact) · Processes 비교 (local acceptance artifact) · High Contrast 분포 (local acceptance artifact) · 작은 창 (local acceptance artifact)
 
 ## 범위와 남은 작업

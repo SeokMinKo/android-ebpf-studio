@@ -61,6 +61,29 @@ Exit code zero without readiness is not treated as successful capture.
 Host-only fake ADB tests exercise these transitions through the production
 capture code and owned Perfetto transport. They are not physical root acceptance.
 
+### Perfetto launch failures and partial recovery
+
+A failed `--background-wait` call can follow a successful background fork; its
+exit status alone does not prove that no collector is running. The desktop saves
+any returned PID even on a nonzero exit. If launch/readiness fails, it first
+identifies and stops its own capture and projects retrieved observations into the
+normal session analysis. The result remains Error, with the startup reason,
+quality evidence, raw trace and recovery manifest preserved. It does not silently
+replace partially collected block I/O with device counters.
+
+If PID or lifetime output was lost, recovery checks the original boot and looks
+for a unique Perfetto process containing both exact nonce-scoped config and trace
+arguments. Creation ticks must stay stable across identification; normal changes
+between running and sleeping states do not change process ownership. Foreign or
+ambiguous processes are never signalled. Failed enumeration/connectivity leaves
+an explicit recovery error; retry uses the saved manifest after reconnection.
+Counters start only when no owned process or accessible trace remains.
+
+Host regressions cover transient identity reads, missing PID output, nonzero exit
+after launch, changing process state, foreign commands, ambiguous matches and a
+failed enumeration followed by successful recovery. They do not simulate physical
+USB removal. Background semantics: [Perfetto CLI reference](https://perfetto.dev/docs/reference/perfetto-cli).
+
 ### Saved source quality
 
 The decoder preserves ftrace lost-bundle flags, parse errors, unavailable and

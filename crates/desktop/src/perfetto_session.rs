@@ -235,7 +235,7 @@ pub fn reanalyze_saved_trace(original: &Path) -> anyhow::Result<PathBuf> {
 pub fn recover_from_phone(client: AdbClient, original: &Path) -> anyhow::Result<PathBuf> {
     let manifest = recovery_manifest(original)
         .ok_or_else(|| anyhow::anyhow!("No Perfetto recovery manifest beside this session"))?;
-    let capture = PerfettoCapture::recover(client, &manifest)?;
+    let mut capture = PerfettoCapture::recover(client, &manifest)?;
     let decoded = capture.recover_and_pull()?;
     write_recovered_session(&decoded, original, "Recovered from original phone")
 }
