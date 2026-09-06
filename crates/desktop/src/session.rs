@@ -561,6 +561,14 @@ fn write_summary(
                 .unwrap_or_default(),
         ),
         (
+            "queue_depth_definition",
+            "observed in-flight at issue; all captured devices; not hardware queue depth".into(),
+        ),
+        (
+            "measured_queue_depth_ios",
+            summary.measured_queue_depth_ios.to_string(),
+        ),
+        (
             "p50_latency_ns",
             summary
                 .p50_latency_ns

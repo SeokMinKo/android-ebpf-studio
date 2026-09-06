@@ -642,9 +642,14 @@ impl StudioApp {
             && let Some(value) = ExplorerPreset::ALL.get(index)
             && let Some((x, y, group)) = value.query()
         {
+            self.explorer_preset = *value;
             self.x_axis = x;
             self.y_axis = y;
             self.group_by = group;
+            self.compare_explore.preset = *value;
+            self.compare_explore.axes = [x, y];
+            self.compare_explore.category = group;
+            self.compare_explore.needs_apply = true;
         }
     }
     fn render_qa_tick(&mut self, ctx: &egui::Context) {
@@ -756,6 +761,19 @@ impl StudioApp {
             );
             let mut report = serde_json::json!({ "capture": path, "result": result.as_ref().map(|_| "saved").map_err(|e| e.to_string()), "phase": self.phase.label(), "page": format!("{:?}", self.page), "theme": format!("{:?}",self.theme), "completed_requests": self.analysis().completed_ios().len(), "received_events": self.received_events, "rejected": self.rejected_records, "frames": self.render_qa.frames, "reanalysis_before_first":self.render_qa.reanalysis_before_first,"reanalysis_window_first":self.render_qa.reanalysis_window_first,"source_completed_ios":self.reanalysis.source_count,"reanalysis_window_ns":self.reanalysis.window,"reanalysis_ms":self.reanalysis.elapsed_ms,"reanalysis_error":self.reanalysis.error,"reanalysis_actions":self.reanalysis.completed_actions,"file_evidence_count":self.file_evidence_positions.as_ref().map(|v|v.len()),"file_evidence_total":self.analysis().file_ios().len(),"filtered_read_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Read).count(),"filtered_write_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Write).count(),"explorer_available":self.explorer_view.as_ref().map(|v|v.available),"range_draft":self.selection.axis_range.values,"range_actions":self.render_qa.range_actions,"range_error":self.selection.axis_range.error,"range_initial":self.render_qa.range_initial.map(|b|[b.min(),b.max()]),"range_expected":self.render_qa.range_expected.map(|b|[b.min(),b.max()]),"range_applied":self.render_qa.range_applied.map(|b|[b.min(),b.max()]),"plot_bounds":self.selection.current_bounds.map(|b|[b.min(),b.max()]),"point_diameter":self.plot_style.point_diameter,"color_category":format!("{:?}",self.group_by),"rendered_colors":self.explorer_view.as_ref().map(|view|view.groups.iter().map(|(name,_)|(name,self.plot_style.color(self.group_by,name).to_array())).collect::<BTreeMap<_,_>>()), "stop_analysis_ms":self.render_qa.stop_analysis_ms,"session_path":self.session_path,"selected_files":self.selection.summary.as_ref().map(|s|s.files.len()),"selected_processes":self.selection.summary.as_ref().map(|s|s.processes.len()),"selection_count": self.selection.summary.as_ref().map(|s|s.keys.len()), "selection_ms": self.selection.summary.as_ref().map(|s|s.elapsed.as_secs_f64()*1000.0), "zoom_history_depth": self.selection.zoom_history.len(), "zoom_actions": self.render_qa.zoom_actions, "back_actions": self.render_qa.back_actions, "ui_performance": self.performance.snapshot() });
             report["comparison_explore"] = self.compare_qa_report();
+            report["explorer_axes"] = serde_json::json!([self.x_axis.label(), self.y_axis.label()]);
+            if std::env::var_os("ANDROID_EBPF_QA_DEPTH").is_some() {
+                report["depth_selected_keys"] =
+                    serde_json::json!(self.selection.summary.as_ref().map(|s| &s.keys));
+                report["queue_depth_samples"] = serde_json::json!(self.analysis().completed_ios().iter().map(|io| serde_json::json!({"key":selection_key(io),"at_issue":io.queue_depth_at_issue,"after_completion":io.queue_depth_after})).collect::<Vec<_>>());
+                report["explorer_coordinates"] =
+                    serde_json::json!(self.explorer_view.as_ref().map(|v| {
+                        v.groups
+                            .iter()
+                            .flat_map(|(_, points)| points.iter().map(|p| p.coordinates))
+                            .collect::<Vec<_>>()
+                    }));
+            }
             report["activity"] = serde_json::json!(self.render_qa.activity);
             if self.render_qa.activity.expected_second.is_some() {
                 report["activity_selected_keys"] =

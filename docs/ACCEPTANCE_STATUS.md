@@ -22,6 +22,10 @@ This ledger supersedes older statements that no phone was available.
   requests as the graphs, including after retention eviction and filter changes.
   Session totals remain available separately for export. File-operation evidence
   keeps its independent scope and follows request filters where applicable.
+- [Observed queue depth](QUEUE_DEPTH.md) preserves issue-time context through
+  filters and replay; after-completion counts have a separate named axis. Missing
+  measurements remain unavailable. Regression checks cover both the serial-depth
+  undercount and time-bucket peak overwrite found during the graph audit.
 - Root preflight also detects shell-accessible Perfetto. If the eBPF collector
   fails before readiness or measurements, it rechecks the same boot and selects
   Perfetto, then device counters when that service cannot start. Host fixtures

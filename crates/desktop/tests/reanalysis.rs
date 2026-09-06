@@ -237,6 +237,8 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
     assert_eq!(io.access_pattern, AccessPattern::Sequential);
     assert_eq!(io.total_latency_ns, Some(100));
     assert_eq!(io.queue_depth_after, Some(0));
+    assert_eq!(io.queue_depth_at_issue, Some(1));
+    assert_eq!(view.engine.retained_summary().max_queue_depth, Some(1));
     let graph = view.engine.transaction_for(io);
     let origins = graph.file_origins_for(block_request_node_id(1));
     assert_eq!(origins.len(), 1);
@@ -280,6 +282,17 @@ fn streamed_export_keeps_all_raw_events_including_old_file_evidence() {
         .map(Result::unwrap)
         .collect();
     assert_eq!(rows.len(), 41);
+    let metrics: std::collections::BTreeMap<String, String> = csv::Reader::from_path(&summary)
+        .unwrap()
+        .records()
+        .map(|r| {
+            let r = r.unwrap();
+            (r[0].to_owned(), r[1].to_owned())
+        })
+        .collect();
+    assert_eq!(metrics["max_queue_depth"], "1");
+    assert_eq!(metrics["measured_queue_depth_ios"], "20");
+    assert!(metrics["queue_depth_definition"].contains("at issue; all captured devices"));
     assert!(
         rows.iter()
             .any(|r| r.get(12) == Some("/data/old-window.bin"))

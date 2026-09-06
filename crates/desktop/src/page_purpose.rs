@@ -125,6 +125,37 @@ mod page_purpose_tests {
     }
 
     #[test]
+    fn queue_axes_keep_distinct_observation_times_and_missing_values() {
+        let engine = fixture();
+        let mut io = engine.completed_ios()[0].clone();
+        assert_eq!(AxisMetric::QueueDepthAtIssue.value(&io, 0, None), Some(1.0));
+        assert_eq!(AxisMetric::QueueDepth.value(&io, 0, None), Some(0.0));
+        io.queue_depth_at_issue = None;
+        assert_eq!(AxisMetric::QueueDepthAtIssue.value(&io, 0, None), None);
+        assert_eq!(AxisMetric::QueueDepth.value(&io, 0, None), Some(0.0));
+        let mut app = StudioApp {
+            analyzer: engine,
+            ..Default::default()
+        };
+        app.query.pid = 20;
+        app.rebuild_filtered();
+        app.x_axis = AxisMetric::QueueDepthAtIssue;
+        app.y_axis = AxisMetric::TotalLatencyMs;
+        app.rebuild_explorer_view();
+        assert!(
+            app.explorer_view
+                .as_ref()
+                .unwrap()
+                .groups
+                .iter()
+                .flat_map(|(_, points)| points)
+                .all(|p| p.coordinates[0] == 1.0)
+        );
+        assert_eq!(app.analysis_summary().measured_queue_depth_ios, 2);
+        assert_eq!(app.analysis_summary().max_queue_depth, Some(1));
+    }
+
+    #[test]
     fn overview_distinguishes_longest_request_busiest_interval_and_largest_issuer() {
         let d = TrendData::build(&fixture(), 0);
         assert_eq!(d.slowest.unwrap().issue.request_id, 1);

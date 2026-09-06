@@ -1754,6 +1754,12 @@ pub struct CompletedIo {
     pub queue_latency_ns: Option<u64>,
     pub device_latency_ns: Option<u64>,
     pub total_latency_ns: Option<u64>,
+    /// Observed correlated in-flight requests immediately after this issue,
+    /// including this request, across all captured devices. Not hardware depth.
+    /// Older projected completions and unsupported sources leave this unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth_at_issue: Option<usize>,
+    /// Observed correlated requests remaining after this completion, all devices.
     pub queue_depth_after: Option<usize>,
     pub access_pattern: AccessPattern,
     pub size_class: IoSizeClass,
@@ -1847,6 +1853,7 @@ struct PendingRequest {
     issue: BlockIssue,
     insert: Option<BlockInsert>,
     access_pattern: AccessPattern,
+    queue_depth_at_issue: usize,
 }
 
 /// Correlates optional insert, issue and completion events while guarding ID reuse.
@@ -1906,6 +1913,7 @@ impl RequestCorrelator {
                     issue,
                     insert,
                     access_pattern,
+                    queue_depth_at_issue: self.pending.len() + 1,
                 },
             );
         }
@@ -1938,6 +1946,7 @@ impl RequestCorrelator {
             queue_latency_ns,
             device_latency_ns: Some(device_latency_ns),
             total_latency_ns: Some(total_latency_ns),
+            queue_depth_at_issue: Some(pending.queue_depth_at_issue),
             queue_depth_after: Some(self.pending.len()),
             access_pattern: pending.access_pattern,
             size_class,
@@ -2048,6 +2057,10 @@ pub struct AnalysisSummary {
     pub small_ios: u64,
     pub large_ios: u64,
     pub max_queue_depth: Option<usize>,
+    /// Completed requests with an observed issue-time depth. max_queue_depth
+    /// remains an observed peak over this subset when other requests lack it.
+    #[serde(default)]
+    pub measured_queue_depth_ios: u64,
     #[serde(default)]
     pub unmeasured_latency_ios: u64,
     /// Completed I/O preserved outside temporal graphs and time-range filters.
@@ -2072,6 +2085,8 @@ pub struct TimeBucket {
     pub completed_ios: u64,
     pub bytes: u64,
     pub average_latency_ns: Option<f64>,
+    /// Peak observed in-flight count at issue timestamps in this second.
+    /// Completion count/bytes/latency use completion timestamps independently.
     pub max_queue_depth: Option<usize>,
 }
 
@@ -2349,10 +2364,8 @@ impl AnalysisEngine {
                 let ts_ns = issue.ts_ns;
                 let depth = self.correlator.on_issue_classified(issue, pattern);
                 self.summary.max_queue_depth = self.summary.max_queue_depth.max(Some(depth));
-                self.buckets
-                    .entry(ts_ns / 1_000_000_000)
-                    .or_default()
-                    .max_queue_depth = Some(depth);
+                let bucket = self.buckets.entry(ts_ns / 1_000_000_000).or_default();
+                bucket.max_queue_depth = bucket.max_queue_depth.max(Some(depth));
                 None
             }
             StorageEvent::BlockComplete(completion) => {
@@ -2591,6 +2604,14 @@ impl AnalysisEngine {
 
     fn record_completed(&mut self, completed: &CompletedIo) {
         self.summary.completed_ios += 1;
+        if let Some(depth) = completed.queue_depth_at_issue {
+            self.summary.measured_queue_depth_ios += 1;
+            self.summary.max_queue_depth = self.summary.max_queue_depth.max(Some(depth));
+            if let Some(ts) = completed.issue_timestamp() {
+                let bucket = self.buckets.entry(ts / 1_000_000_000).or_default();
+                bucket.max_queue_depth = bucket.max_queue_depth.max(Some(depth));
+            }
+        }
         let bytes = completed.issue.bytes as u64;
         match completed.issue.operation {
             IoOperation::Read => self.summary.read_bytes += bytes,
@@ -2617,7 +2638,6 @@ impl AnalysisEngine {
                 bucket.latency_sum_ns += latency as u128;
                 bucket.latency_samples += 1;
             }
-            bucket.max_queue_depth = bucket.max_queue_depth.max(completed.queue_depth_after);
         } else {
             self.summary.unplaced_time_ios += 1;
         }
@@ -2771,7 +2791,6 @@ impl AnalysisEngine {
             IoSizeClass::Small => self.summary.small_ios += 1,
             IoSizeClass::Large => self.summary.large_ios += 1,
         }
-        self.summary.max_queue_depth = self.summary.max_queue_depth.max(io.queue_depth_after);
     }
 
     /// A bounded-cost snapshot intended for live rendering. Percentiles are
