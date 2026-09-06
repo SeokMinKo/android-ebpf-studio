@@ -177,6 +177,7 @@ impl<'a> Projection<'a> {
                 .and_then(|d| d.checked_add(o.queue_latency_ns.unwrap_or(0))),
             queue_latency_ns: o.queue_latency_ns,
             queue_depth_after: None,
+            queue_depth_at_issue: None,
             access_pattern,
             size_class: IoSizeClass::classify(bytes),
             evidence: Some(Box::new(CompletionEvidence {

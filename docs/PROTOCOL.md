@@ -26,6 +26,7 @@ Reader는 알 수 없는 JSON field를 무시하지만, 알 수 없는 `record` 
 - `sector`: 512-byte logical sector unit from block tracepoint.
 - `bytes`: request payload bytes.
 - queue latency: insert→issue, device latency: issue→complete, total latency: insert(없으면 issue)→complete.
+- `queue_depth_at_issue`는 issue 직후 해당 요청을 포함한 전체 수집 디바이스의 관측 in-flight 수입니다. `queue_depth_after`는 completion 이후 남은 수이며 서로 대체하지 않습니다. 새 필드가 없는 과거 변환본은 미측정입니다. 최대값과 시간 버킷 기준은 [Queue depth](QUEUE_DEPTH.md)를 참조합니다.
 - logging time은 첫 관측 timestamp부터 마지막 관측 timestamp까지입니다.
 - busy time은 완료된 block request interval의 합집합이며 중첩 요청을 중복 합산하지 않습니다.
 - Pipeline measured coverage도 additive span의 합집합입니다. `context_only` UIC marker는 표시되지만 latency 합산에서 제외됩니다.

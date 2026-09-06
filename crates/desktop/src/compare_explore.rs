@@ -255,6 +255,9 @@ impl StudioApp {
                 "zoom_depth":v.selection.zoom_history.len(),
                 "displayed":v.explorer_view.as_ref().map(|v|v.displayed),
                 "axes":[v.x_axis.label(),v.y_axis.label()],"category":v.group_by.label(),
+                "queue_depth_samples":std::env::var_os("ANDROID_EBPF_QA_DEPTH").map(|_|v.analysis().completed_ios().iter().map(|io|serde_json::json!({"key":selection_key(io),"at_issue":io.queue_depth_at_issue,"after_completion":io.queue_depth_after})).collect::<Vec<_>>()),
+                "selected_keys":std::env::var_os("ANDROID_EBPF_QA_DEPTH").and_then(|_|v.selection.summary.as_ref().map(|s|&s.keys)),
+                "explorer_coordinates":std::env::var_os("ANDROID_EBPF_QA_DEPTH").and_then(|_|v.explorer_view.as_ref().map(|view|view.groups.iter().flat_map(|(_, points)|points.iter().map(|p|p.coordinates)).collect::<Vec<_>>())),
             })
         };
         serde_json::json!({"ready_ms":self.render_qa.compare_ready_ms,"baseline":self.comparison.as_ref().map(|b|describe(&b.viewer)),"current":self.compare_explore.current.as_ref().map(|b|describe(b)),"actions":self.compare_explore.actions,"linked":self.compare_explore.linked_bounds,"error":self.compare_explore.error})
@@ -1523,6 +1526,7 @@ mod compare_explore_tests {
             io.device_latency_ns = None;
             io.latency_ns = None;
             io.queue_depth_after = None;
+            io.queue_depth_at_issue = None;
             io.access_pattern = android_ebpf_protocol::AccessPattern::Unknown;
             assert_eq!(AxisMetric::TimeMs.value(&io, 0, None).is_none(), clock != 0);
             assert!(AnalysisFilter::default().matches(&b.analyzer, &io, 0));

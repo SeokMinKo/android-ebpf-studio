@@ -135,7 +135,7 @@ impl ExplorerPreset {
                 GroupBy::File,
             )),
             Self::QueuePressure => Some((
-                AxisMetric::QueueDepth,
+                AxisMetric::QueueDepthAtIssue,
                 AxisMetric::TotalLatencyMs,
                 GroupBy::Direction,
             )),
@@ -171,13 +171,14 @@ enum AxisMetric {
     DeviceLatencyMs,
     Pid,
     QueueDepth,
+    QueueDepthAtIssue,
     FilesystemLatencyMs,
     UfsLatencyMs,
     CriticalPathMs,
 }
 
 impl AxisMetric {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
@@ -187,6 +188,7 @@ impl AxisMetric {
         Self::DeviceLatencyMs,
         Self::Pid,
         Self::QueueDepth,
+        Self::QueueDepthAtIssue,
         Self::FilesystemLatencyMs,
         Self::UfsLatencyMs,
         Self::CriticalPathMs,
@@ -202,7 +204,8 @@ impl AxisMetric {
             Self::QueueLatencyMs => "Queue latency (ms)",
             Self::DeviceLatencyMs => "Device latency (ms)",
             Self::Pid => "PID",
-            Self::QueueDepth => "Queue depth",
+            Self::QueueDepth => "In-flight after completion",
+            Self::QueueDepthAtIssue => "In-flight at issue",
             Self::FilesystemLatencyMs => "Filesystem latency (ms)",
             Self::UfsLatencyMs => "UFS latency (ms)",
             Self::CriticalPathMs => "Critical path (ms)",
@@ -234,6 +237,7 @@ impl AxisMetric {
             Self::DeviceLatencyMs => io.device_latency_ns.map(|n| n as f64 / 1e6),
             Self::Pid => io.issuer_pid().map(|pid| pid as f64),
             Self::QueueDepth => io.queue_depth_after.map(|n| n as f64),
+            Self::QueueDepthAtIssue => io.queue_depth_at_issue.map(|n| n as f64),
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
@@ -256,7 +260,9 @@ impl AxisMetric {
 
     fn format_value(self, value: f64) -> String {
         match self {
-            Self::Sector | Self::Pid | Self::QueueDepth => format!("{value:.0}"),
+            Self::Sector | Self::Pid | Self::QueueDepth | Self::QueueDepthAtIssue => {
+                format!("{value:.0}")
+            }
             Self::AddressKiB | Self::ChunkKiB => format!("{value:.1}"),
             Self::TimeMs
             | Self::TotalLatencyMs
@@ -1539,11 +1545,14 @@ impl StudioApp {
             );
             metric_card(
                 &mut columns[2],
-                "MAX QUEUE DEPTH",
+                "MAX OBSERVED DEPTH",
                 summary
                     .max_queue_depth
                     .map_or("Not measured".into(), |n| n.to_string()),
-                "in-flight requests",
+                &format!(
+                    "at issue · all devices · {}/{} I/O measured",
+                    summary.measured_queue_depth_ios, summary.completed_ios
+                ),
                 accent(),
             );
         });
@@ -1765,6 +1774,12 @@ impl StudioApp {
         let auto_bounds = std::mem::take(&mut self.selection.auto_bounds);
         if view.displayed == 0 && !compact {
             ui.label("No plottable I/O for these axes and filters. Missing measurements are excluded; retained requests remain in the table below.");
+        }
+        if [x_axis, y_axis]
+            .iter()
+            .any(|a| matches!(a, AxisMetric::QueueDepth | AxisMetric::QueueDepthAtIssue))
+        {
+            ui.label("Observed in-flight requests across all captured devices: at issue includes this request; after completion excludes it. Filters preserve the original context. Loss, ID ambiguity and expiry can reduce the count; this is not hardware queue depth.");
         }
         let plot = studio_plot("interactive-storage-explorer");
         let plot = if show_legend {
@@ -2666,6 +2681,16 @@ impl StudioApp {
                             ("Queue latency", format_latency(io.queue_latency_ns)),
                             ("Device latency", format_latency(io.device_latency_ns)),
                             ("Total latency", format_latency(io.total_latency_ns)),
+                            (
+                                "In-flight at issue (all devices)",
+                                io.queue_depth_at_issue
+                                    .map_or("Not measured".into(), |v| v.to_string()),
+                            ),
+                            (
+                                "In-flight after completion (all devices)",
+                                io.queue_depth_after
+                                    .map_or("Not measured".into(), |v| v.to_string()),
+                            ),
                         ] {
                             ui.label(RichText::new(name).color(muted()));
                             ui.label(RichText::new(value).monospace());
@@ -4430,7 +4455,7 @@ mod ui_tests {
         assert_eq!(
             ExplorerPreset::QueuePressure.query(),
             Some((
-                AxisMetric::QueueDepth,
+                AxisMetric::QueueDepthAtIssue,
                 AxisMetric::TotalLatencyMs,
                 GroupBy::Direction
             ))
