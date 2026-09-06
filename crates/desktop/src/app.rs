@@ -38,6 +38,7 @@ const MAX_MESSAGES_PER_FRAME: usize = 1_000;
 const LIVE_ANALYSIS_REFRESH: Duration = Duration::from_millis(250);
 const PERFORMANCE_WARNING_INTERVAL: Duration = Duration::from_secs(10);
 include!("analysis_ui.rs");
+include!("latency_distribution.rs");
 include!("qa.rs");
 include!("selection.rs");
 include!("plot_style.rs");

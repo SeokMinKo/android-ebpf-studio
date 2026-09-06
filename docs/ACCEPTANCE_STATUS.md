@@ -143,7 +143,8 @@ layout was verified separately on saved actual data in all three themes.
   model/kernel, and physical phone replacement/reconnection remain unverified.
 - Physical USB interruption and retry have not been validated end to end.
 - The complete visible-graph/filter/theme/drilldown matrix is not finished.
-  Histogram drilldown, full OS accessibility, and all system-theme transitions
+  Histogram drilldown now has [a direct request-selection path](LATENCY_DISTRIBUTION.md).
+  Full OS accessibility and all system-theme transitions
   require further work or evidence.
 - Unsupported Perfetto clocks now have unavailable normalized time across axes,
   filters, temporal aggregation, selection Summary, Compare and exports. Host

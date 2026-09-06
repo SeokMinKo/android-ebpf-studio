@@ -67,6 +67,7 @@ impl Drop for CompareExplore {
 
 fn compare_filter(shared: &AnalysisFilter, local: &AnalysisFilter) -> AnalysisFilter {
     AnalysisFilter {
+        latency_range: shared.latency_range,
         start_ms: shared.start_ms,
         end_ms: shared.end_ms,
         operation: shared.operation,
