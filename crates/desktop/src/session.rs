@@ -288,8 +288,16 @@ pub fn load_analysis_window(
         .source_info
         .last()
         .and_then(|r| {
-            if let WireRecord::SourceInfo { status, .. } = r {
-                Some(status.clone())
+            if let WireRecord::SourceInfo {
+                source,
+                status,
+                metadata,
+                ..
+            } = r
+            {
+                Some(crate::perfetto_session::source_status(
+                    source, status, metadata,
+                ))
             } else {
                 None
             }

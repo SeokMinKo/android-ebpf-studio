@@ -138,6 +138,80 @@ fn shared_projection_emits_capabilities_and_stops_at_sink_failure_without_succes
 }
 
 #[test]
+fn reopening_service_loss_shows_it_even_when_kernel_loss_is_zero() {
+    let f = Fixture::new();
+    let mut decoded = perfetto::decode(&trace()[..]);
+    decoded.quality.ftrace_start_seen = true;
+    decoded.quality.ftrace_end_seen = true;
+    decoded.quality.kernel_start.insert(0, [Some(0); 3]);
+    decoded.quality.kernel_end.insert(0, [Some(0); 3]);
+    decoded.quality.service_stats_seen = true;
+    decoded
+        .quality
+        .service_loss_counters
+        .insert("buffer_0_bytes_overwritten".into(), 32768);
+    decoded
+        .quality
+        .service_loss_counters
+        .insert("buffer_0_chunks_overwritten".into(), 1);
+    let path = f.dir.join("service-loss.ndjson");
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+    project_records(&decoded, "perfetto/capture.pftrace", |record| {
+        android_ebpf_protocol::write_record(&mut writer, &record)?;
+        Ok(())
+    })
+    .unwrap();
+    drop(writer);
+    let loaded = session::load_analysis(&path).unwrap();
+    assert!(loaded.loss_status.contains("kernel loss 0"));
+    assert!(
+        loaded.loss_status.contains("Service loss detected"),
+        "{}",
+        loaded.loss_status
+    );
+    assert!(loaded.loss_status.contains("32768 bytes overwritten"));
+    assert!(loaded.loss_status.contains("1 chunks overwritten"));
+    assert_eq!(loaded.engine.summary().completed_ios, 1);
+    assert_eq!(loaded.engine.summary().read_bytes, 4096);
+    assert_eq!(loaded.engine.summary().p99_latency_ns, None);
+}
+
+#[test]
+fn source_quality_preserves_unknown_counters_and_distinct_failure_reasons() {
+    let mut quality = perfetto::TraceQuality::default();
+    let mut metadata = serde_json::json!({"stage":"complete", "quality":quality});
+    let unknown = source_status("perfetto", "Perfetto capture", &metadata);
+    assert!(unknown.contains("Service loss counters unavailable"));
+    assert!(!unknown.contains("Service loss detected"));
+    quality.service_stats_seen = true;
+    quality.lost_bundles = 3;
+    quality.parse_errors = 2;
+    quality.truncated = true;
+    quality.projection_limited = true;
+    quality.final_flush_outcome = Some(2);
+    metadata["quality"] = serde_json::to_value(quality).unwrap();
+    let status = source_status("perfetto", "Perfetto capture", &metadata);
+    for reason in [
+        "Lost ftrace bundles: 3",
+        "Trace parse errors: 2",
+        "Raw trace truncated",
+        "Analysis projection limit reached",
+        "Final trace flush failed",
+    ] {
+        assert!(status.contains(reason), "{status}");
+    }
+    assert_eq!(
+        source_status("other", "Original source", &metadata),
+        "Original source"
+    );
+    metadata["stage"] = "recording".into();
+    assert_eq!(
+        source_status("perfetto", "Still recording", &metadata),
+        "Still recording"
+    );
+}
+
+#[test]
 fn metadata_cannot_redirect_raw_export_to_an_unrelated_file() {
     let f = Fixture::new();
     std::fs::remove_file(&f.raw).unwrap();
