@@ -37,6 +37,107 @@ fn packet(cpu: u64, events: Vec<Vec<u8>>, lost: bool) -> Vec<u8> {
     b(1, b(1, bundle))
 }
 
+fn scheduler_event(ts: u64, delay: Option<(u64, u64)>, task: u64) -> Vec<u8> {
+    let mut fields = [
+        b(1, "sched_stat_iowait"),
+        b(2, [b(1, "pid"), n(4, task)].concat()),
+        b(2, [b(1, "comm"), b(3, "waiting-task\0")].concat()),
+    ]
+    .concat();
+    if let Some((wire, value)) = delay {
+        fields.extend(b(2, [b(1, "delay"), n(wire, value)].concat()));
+    }
+    [n(1, ts), n(2, 999), b(327, fields)].concat()
+}
+
+#[test]
+fn scheduler_generic_delay_keeps_payload_task_cpu_zero_and_cross_cpu_order() {
+    let trace = [
+        packet(7, vec![scheduler_event(300, Some((5, 123456)), 42)], false),
+        packet(
+            0,
+            vec![
+                scheduler_event(100, Some((4, 0)), 43),
+                event(45, 110, 5, 32, 8),
+                event(125, 210, 999, 32, 8),
+            ],
+            false,
+        ),
+    ]
+    .concat();
+    let decoded = decode(&trace[..]);
+    assert_eq!(decoded.quality.parse_errors, 0);
+    assert_eq!(
+        decoded
+            .scheduler_waits
+            .iter()
+            .map(|w| (w.ts_ns, w.delay_ns, w.tid, w.pid, w.cpu))
+            .collect::<Vec<_>>(),
+        [
+            (100, 0, 43, None, Some(0)),
+            (300, 123456, 42, None, Some(7))
+        ]
+    );
+    assert!(
+        decoded
+            .scheduler_waits
+            .iter()
+            .all(|w| w.comm == "waiting-task")
+    );
+    let blocks = analyze(&decoded);
+    assert_eq!(blocks.completions.len(), 1);
+    assert_eq!(blocks.completions[0].bytes, 4096);
+}
+
+#[test]
+fn scheduler_missing_negative_or_invalid_task_is_not_a_zero_delay_sample() {
+    for (delay, task) in [
+        (None, 42),
+        (Some((4, u64::MAX)), 42),
+        (Some((5, 1)), 0),
+        (Some((5, 1)), u64::MAX),
+    ] {
+        let trace = packet(0, vec![scheduler_event(100, delay, task)], false);
+        let decoded = decode(&trace[..]);
+        assert!(decoded.scheduler_waits.is_empty());
+        assert_eq!(decoded.quality.parse_errors, 1);
+    }
+    let trace = b(
+        1,
+        b(
+            1,
+            [
+                n(1, 0),
+                n(5, 2),
+                b(2, scheduler_event(100, Some((5, 10)), 42)),
+            ]
+            .concat(),
+        ),
+    );
+    let decoded = decode(&trace[..]);
+    assert!(decoded.scheduler_waits.is_empty());
+    assert!(decoded.quality.unsupported_clocks.contains(&2));
+}
+
+#[test]
+fn malformed_scheduler_sample_does_not_discard_later_block_or_wait_events() {
+    let trace = packet(
+        0,
+        vec![
+            scheduler_event(100, None, 42),
+            event(45, 110, 5, 32, 8),
+            event(125, 210, 999, 32, 8),
+            scheduler_event(220, Some((5, 5000)), 43),
+        ],
+        false,
+    );
+    let decoded = decode(&trace[..]);
+    assert_eq!(decoded.quality.parse_errors, 1);
+    assert_eq!(decoded.events.len(), 2);
+    assert_eq!(decoded.scheduler_waits.len(), 1);
+    assert_eq!(analyze(&decoded).completions.len(), 1);
+}
+
 #[test]
 fn sorts_cpu_packets_and_matches_only_probably_without_using_completion_tid_as_issuer() {
     let trace = [

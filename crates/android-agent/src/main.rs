@@ -2031,6 +2031,7 @@ fn emit_event_trace(session_id: &str, sequence: u64, event: &StorageEvent) {
         StorageEvent::BlockComplete(value) => ("block", Some(value.request_id), None, "complete"),
         // Host-projected observations have no kernel request identity.
         StorageEvent::ObservedBlockCompletion(_) => ("perfetto", None, None, "observed_complete"),
+        StorageEvent::SchedulerIoWait(_) => ("scheduler", None, None, "iowait"),
         StorageEvent::FileIo(value) => ("file", None, value.node_id, "syscall"),
         StorageEvent::Pipeline(value) => (
             "pipeline",
@@ -2077,6 +2078,7 @@ fn storage_event_timestamp(event: &StorageEvent) -> u64 {
         StorageEvent::BlockIssue(value) => value.ts_ns,
         StorageEvent::BlockComplete(value) => value.ts_ns,
         StorageEvent::ObservedBlockCompletion(value) => value.completion.ts_ns,
+        StorageEvent::SchedulerIoWait(value) => value.ts_ns,
         StorageEvent::FileIo(value) => value.end_ts_ns,
         StorageEvent::Pipeline(value) => value.end_ts_ns.unwrap_or(value.ts_ns),
         StorageEvent::RequestOrigin(value) => value.ts_ns,
@@ -2101,6 +2103,7 @@ fn update_probe_health(
         StorageEvent::BlockIssue(_) => ("block.issue", None),
         StorageEvent::BlockComplete(_) => ("block.complete", None),
         StorageEvent::ObservedBlockCompletion(_) => ("perfetto.observed_complete", None),
+        StorageEvent::SchedulerIoWait(_) => ("scheduler.iowait", None),
         StorageEvent::FileIo(_) => ("syscall.file_io", None),
         StorageEvent::Pipeline(value) => (
             match value.layer {

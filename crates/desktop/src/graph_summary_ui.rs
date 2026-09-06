@@ -232,6 +232,10 @@ fn metric_distribution_named_ui(ui:&mut egui::Ui, metric:&crate::graph_summary::
     });
     ui.data_mut(|d|d.insert_temp(id,direction));
     let d=[&metric.total,&metric.read,&metric.write,&metric.other][direction];
+    distribution_ui(ui,d,unit,sample_label);
+}
+fn distribution_ui(ui:&mut egui::Ui,d:&crate::graph_summary::Distribution,unit:&str,sample_label:&str) {
+    constrain_summary_width(ui);
     ui.label(format!("n={} · unmeasured={}",d.values.len(),d.missing));
     if d.values.is_empty() {ui.label("No measured samples; percentiles unavailable.");return;}
     let percentile_table = |ui:&mut egui::Ui| {

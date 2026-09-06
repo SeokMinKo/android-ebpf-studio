@@ -69,7 +69,7 @@ pub fn project_records(
             }
         }
     }
-    let metadata = serde_json::json!({"stage":"complete","raw_trace":raw_trace,"quality":decoded.quality,"block_activity_devices":devices.values().collect::<Vec<_>>(),"block_records":decoded.events.len(),"completion_observations":analysis.completions.len(),"unresolved_timing":unresolved,"unmatched_issues":analysis.unmatched_issue_records.len(),"orphan_inserts":analysis.orphan_insert_records.len(),"unpaired_requeues":analysis.unpaired_requeue_records.len(),"correlation_limit_hits":analysis.correlation_limit_hits,"file_path":"Unresolved: Perfetto block tracepoints expose no file/inode mapping"});
+    let metadata = serde_json::json!({"stage":"complete","raw_trace":raw_trace,"quality":decoded.quality,"block_activity_devices":devices.values().collect::<Vec<_>>(),"block_records":decoded.events.len(),"completion_observations":analysis.completions.len(),"scheduler_iowait_events":decoded.scheduler_waits.len(),"scheduler_iowait_scope":"independent task delay events; absence is not measured zero; kernel schedstats/event support required","unresolved_timing":unresolved,"unmatched_issues":analysis.unmatched_issue_records.len(),"orphan_inserts":analysis.orphan_insert_records.len(),"unpaired_requeues":analysis.unpaired_requeue_records.len(),"correlation_limit_hits":analysis.correlation_limit_hits,"file_path":"Unresolved: Perfetto block tracepoints expose no file/inode mapping"});
     emit(WireRecord::SourceInfo {
         schema_version: SCHEMA_VERSION,
         source: "perfetto".into(),
@@ -92,7 +92,14 @@ pub fn project_records(
             event: StorageEvent::ObservedBlockCompletion(io),
         })?;
     }
-    let count = analysis.completions.len() as u64;
+    for (idx, wait) in decoded.scheduler_waits.iter().enumerate() {
+        emit(WireRecord::Event {
+            schema_version: SCHEMA_VERSION,
+            sequence: (analysis.completions.len() + idx + 1) as u64,
+            event: StorageEvent::SchedulerIoWait(wait.clone()),
+        })?;
+    }
+    let count = (analysis.completions.len() + decoded.scheduler_waits.len()) as u64;
     emit(WireRecord::Footer {
         schema_version: SCHEMA_VERSION,
         events_seen: count,

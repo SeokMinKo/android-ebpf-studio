@@ -415,7 +415,7 @@ impl StudioApp {
     fn time_origin(&self) -> u64 {
         self.reanalysis
             .source_start_ns
-            .or(self.analyzer.session_start_ns())
+            .or_else(||self.analyzer.session_start_ns().into_iter().chain(self.analyzer.scheduler_start_ns()).min())
             .unwrap_or(0)
     }
 
@@ -458,7 +458,7 @@ impl StudioApp {
     }
 
     fn filter_ui(&mut self, ui: &mut egui::Ui) {
-        if self.analyzer.completed_ios().is_empty() {
+        if self.analyzer.completed_ios().is_empty() && self.analyzer.scheduler_waits().is_empty() {
             return;
         }
         let previous = self.query.clone();
@@ -468,7 +468,7 @@ impl StudioApp {
             // restore a previous PID, time or size into the reset query.
             ui.push_id(self.filter_edit_epoch,|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Completion time (ms)");
+                ui.label(if self.y_axis==AxisMetric::SchedulerIoWait {"Scheduler event time (ms)"}else{"Completion time (ms)"});
                 ui.add(egui::DragValue::new(&mut self.query.start_ms).prefix("From ").range(0.0..=f64::MAX));
                 ui.add(egui::DragValue::new(&mut self.query.end_ms).prefix("To ").range(0.0..=f64::MAX));
                 ui.label("To 0 = session end");
@@ -486,7 +486,7 @@ impl StudioApp {
                 });
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label("Process (issuer comm)"); let process=ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
+                ui.label(if self.y_axis==AxisMetric::SchedulerIoWait {"Process (waiting task comm)"}else{"Process (issuer comm)"}); let process=ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
                 qa_region(&mut self.render_qa,"process-filter",process.rect,ui.clip_rect());
                 ui.label("FilePath / inode"); ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
                 ui.label("Device major:minor"); ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
@@ -503,15 +503,19 @@ impl StudioApp {
                     for a in [AccessPattern::Random,AccessPattern::Sequential,AccessPattern::Unknown] {ui.selectable_value(&mut self.query.access,Some(a),format!("{a:?}"));}
                 });
                 let mut cpu=self.query.cpu.is_some();
-                if ui.checkbox(&mut cpu,"Issue CPU").changed(){self.query.cpu=cpu.then_some(0);}
+                if ui.checkbox(&mut cpu,if self.y_axis==AxisMetric::SchedulerIoWait {"Observer CPU"}else{"Issue CPU"}).changed(){self.query.cpu=cpu.then_some(0);}
                 if let Some(cpu)=&mut self.query.cpu {ui.add(egui::DragValue::new(cpu));}
                 egui::ComboBox::from_id_salt("layer-filter").selected_text(self.query.layer.map_or("All observed layers".into(),|a|format!("{a:?}"))).show_ui(ui,|ui| {
                     ui.selectable_value(&mut self.query.layer,None,"All observed layers");
                     for layer in [IoNodeKind::FileOperation,IoNodeKind::Syscall,IoNodeKind::Vfs,IoNodeKind::Filesystem,IoNodeKind::PageCache,IoNodeKind::Writeback,IoNodeKind::Bio,IoNodeKind::BlockQueue,IoNodeKind::BlockRequest,IoNodeKind::ScsiCommand,IoNodeKind::UfsCommand,IoNodeKind::SchedulerContext,IoNodeKind::UicContext] {ui.selectable_value(&mut self.query.layer,Some(layer),format!("{layer:?}"));}
                 });
             });
-            ui.small("Process searches the observed block issuer's comm, case-insensitive substring; it is not an Android package or proven original file process. Issue CPU 0 is a valid CPU. Layer requires related graph evidence; absent observations never match. Capture PID filtering is separate.");
-            ui.label("Selection uses the loaded completed-request window; file-operation evidence follows that cohort. Capture diagnostics and Compare baseline remain session-wide. File candidates are preserved together. Sequential/random classification remains from the original device/direction stream.");
+            if self.y_axis==AxisMetric::SchedulerIoWait {
+                ui.small("Process searches waiting-task comm, case-insensitive substring. TID is the payload task; unknown PID never matches a specific PID. CPU is the observer and CPU 0 is valid. Device, operation, size, path, access, layer and block-request selection cannot identify scheduler events; clear those filters to view samples.");
+            } else {
+                ui.small("Process searches the observed block issuer's comm, case-insensitive substring; it is not an Android package or proven original file process. Issue CPU 0 is a valid CPU. Layer requires related graph evidence; absent observations never match. Capture PID filtering is separate.");
+                ui.label("Selection uses the loaded completed-request window; file-operation evidence follows that cohort. Capture diagnostics and Compare baseline remain session-wide. File candidates are preserved together. Sequential/random classification remains from the original device/direction stream.");
+            }
             });
         });
         qa_region(&mut self.render_qa,"analysis-filters",header.header_response.rect,ui.clip_rect());

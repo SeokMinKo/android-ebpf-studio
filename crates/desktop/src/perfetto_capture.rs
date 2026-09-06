@@ -41,6 +41,7 @@ data_sources {{ config {{ name: "linux.ftrace" ftrace_config {{
  ftrace_events: "block/block_rq_complete"
  ftrace_events: "block/block_rq_insert"
  ftrace_events: "block/block_rq_requeue"
+ ftrace_events: "sched/sched_stat_iowait"
  drain_period_ms: 100
 }} }} }}
 data_sources {{ config {{ name: "linux.process_stats" process_stats_config {{

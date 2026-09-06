@@ -10,7 +10,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u16 = 7;
+pub const SCHEMA_VERSION: u16 = 8;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 const MAX_DERIVED_CACHE_ENTRIES: usize = 4_096;
@@ -52,6 +52,21 @@ pub struct BlockIssue {
     pub tid: u32,
     pub cpu: u32,
     pub comm: String,
+}
+
+/// One scheduler-accounted I/O wait delay for a task, not a block request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerIoWait {
+    pub ts_ns: u64,
+    pub delay_ns: u64,
+    /// Kernel task ID from the event payload, not the emitting/waking task.
+    pub tid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub comm: String,
+    /// CPU where delay accounting was observed, not a duration's CPU affinity.
+    pub cpu: Option<u32>,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -762,6 +777,7 @@ impl IoPipeline {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum StorageEvent {
+    SchedulerIoWait(SchedulerIoWait),
     BlockInsert(BlockInsert),
     BlockIssue(BlockIssue),
     BlockComplete(BlockComplete),
@@ -2306,6 +2322,9 @@ pub struct AnalysisEngine {
     first_ts_ns: Option<u64>,
     last_ts_ns: Option<u64>,
     completed: Vec<CompletedIo>,
+    scheduler_waits: Vec<SchedulerIoWait>,
+    scheduler_waits_dropped: usize,
+    scheduler_start_ns: Option<u64>,
     file_ios: Vec<FileIo>,
     pipeline_observations: Vec<PipelineObservation>,
     pending_pipeline: HashMap<(PipelineLayer, u64, String), PipelineObservation>,
@@ -2342,6 +2361,9 @@ impl AnalysisEngine {
             first_ts_ns: None,
             last_ts_ns: None,
             completed: Vec::new(),
+            scheduler_waits: Vec::new(),
+            scheduler_waits_dropped: 0,
+            scheduler_start_ns: None,
             file_ios: Vec::new(),
             pipeline_observations: Vec::new(),
             pending_pipeline: HashMap::new(),
@@ -2382,6 +2404,23 @@ impl AnalysisEngine {
             self.slow_reason_cache.get_mut().clear();
         }
         match event {
+            StorageEvent::SchedulerIoWait(wait) => {
+                self.scheduler_start_ns = Some(
+                    self.scheduler_start_ns
+                        .map_or(wait.ts_ns, |ts| ts.min(wait.ts_ns)),
+                );
+                if self
+                    .completion_window
+                    .is_none_or(|(a, b)| wait.ts_ns >= a && wait.ts_ns <= b)
+                {
+                    if self.scheduler_waits.len() >= MAX_ANALYSIS_SAMPLES {
+                        self.scheduler_waits.drain(..MAX_ANALYSIS_SAMPLES / 10);
+                        self.scheduler_waits_dropped += MAX_ANALYSIS_SAMPLES / 10;
+                    }
+                    self.scheduler_waits.push(wait);
+                }
+                None
+            }
             StorageEvent::BlockInsert(insert) => {
                 self.observe_ts(insert.ts_ns);
                 self.correlator.on_insert(insert);
@@ -2848,6 +2887,9 @@ impl AnalysisEngine {
     pub fn select_completed(&self, mut predicate: impl FnMut(&CompletedIo) -> bool) -> Self {
         let mut result = Self::new();
         result.file_ios = self.file_ios.clone();
+        result.scheduler_waits = self.scheduler_waits.clone();
+        result.scheduler_waits_dropped = self.scheduler_waits_dropped;
+        result.scheduler_start_ns = self.scheduler_start_ns;
         result.pipeline_observations = self.pipeline_observations.clone();
         result.graph_nodes = self.graph_nodes.clone();
         result.graph_edges = self.graph_edges.clone();
@@ -2862,6 +2904,16 @@ impl AnalysisEngine {
             result.completed.push(io.clone());
         }
         result
+    }
+
+    pub fn scheduler_waits(&self) -> &[SchedulerIoWait] {
+        &self.scheduler_waits
+    }
+    pub fn scheduler_waits_dropped(&self) -> usize {
+        self.scheduler_waits_dropped
+    }
+    pub fn scheduler_start_ns(&self) -> Option<u64> {
+        self.scheduler_start_ns
     }
 
     pub fn completed_ios(&self) -> &[CompletedIo] {

@@ -44,6 +44,7 @@ include!("graph_summary_ui.rs");
 include!("footprint_ui.rs");
 include!("window_series_ui.rs");
 include!("timeline_ui.rs");
+include!("scheduler_ui.rs");
 include!("host_bw_ui.rs");
 include!("plot_style.rs");
 include!("axis_range.rs");
@@ -124,10 +125,11 @@ enum ExplorerPreset {
     CommandTimeline,
     RequestGantt,
     CpuEvents,
+    SchedulerIoWait,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 27] = [
+    const ALL: [Self; 28] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -155,6 +157,7 @@ impl ExplorerPreset {
         Self::CommandTimeline,
         Self::RequestGantt,
         Self::CpuEvents,
+        Self::SchedulerIoWait,
     ];
 
     fn label(self) -> &'static str {
@@ -186,6 +189,7 @@ impl ExplorerPreset {
             Self::CommandTimeline => "Block command timeline",
             Self::RequestGantt => "Request Gantt",
             Self::CpuEvents => "Issue / completion CPU timeline",
+            Self::SchedulerIoWait => "Scheduler I/O wait over time",
         }
     }
 
@@ -216,6 +220,11 @@ impl ExplorerPreset {
                 Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
             }
             Self::Custom => None,
+            Self::SchedulerIoWait => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::SchedulerIoWait,
+                GroupBy::None,
+            )),
             Self::CommandTimeline => Some((
                 AxisMetric::TimeMs,
                 AxisMetric::Timeline(TimelineMode::Commands),
@@ -345,6 +354,7 @@ enum AxisMetric {
     RollingD2dBandwidth,
     Window(crate::window_series::WindowMetric),
     Timeline(TimelineMode),
+    SchedulerIoWait,
 }
 
 impl AxisMetric {
@@ -393,6 +403,7 @@ impl AxisMetric {
             Self::RollingD2dBandwidth => "Rolling D2D BW (MiB/s)",
             Self::Window(metric) => metric.label(),
             Self::Timeline(mode) => mode.label(),
+            Self::SchedulerIoWait => "Scheduler I/O wait (us)",
         }
     }
 
@@ -443,7 +454,7 @@ impl AxisMetric {
                 .issue_bandwidth
                 .as_ref()
                 .and_then(|r| r.mib_s()),
-            Self::Window(_) | Self::Timeline(_) => None,
+            Self::Window(_) | Self::Timeline(_) | Self::SchedulerIoWait => None,
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
@@ -485,7 +496,8 @@ impl AxisMetric {
             | Self::RollingC2cBandwidth
             | Self::RollingD2dBandwidth
             | Self::Window(_)
-            | Self::Timeline(_) => format!("{value:.3}"),
+            | Self::Timeline(_)
+            | Self::SchedulerIoWait => format!("{value:.3}"),
         }
     }
 }
@@ -649,6 +661,7 @@ pub struct StudioApp {
     reanalysis: ReanalysisState,
     file_evidence_positions: Option<Vec<usize>>,
     selection: SelectionState,
+    scheduler: SchedulerState,
     plot_style: PlotStyle,
     render_qa: RenderQa,
     render_qa_scale: Option<f32>,
@@ -732,6 +745,7 @@ impl Default for StudioApp {
             window_width_ms: 1000,
             reanalysis: ReanalysisState::default(),
             file_evidence_positions: None,
+            scheduler: SchedulerState::default(),
             selection: SelectionState {
                 enabled: true,
                 auto_bounds: true,
@@ -1510,6 +1524,7 @@ impl StudioApp {
     }
 
     fn reset_analysis(&mut self) {
+        self.scheduler = SchedulerState::default();
         self.activity = Arc::default();
         self.footprint = FootprintState::default();
         self.reanalysis = ReanalysisState::default();
@@ -1895,7 +1910,7 @@ impl StudioApp {
                 ui.selectable_value(&mut self.selection.enabled, false, "Pan");
                 ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
             });
-            if !matches!(self.y_axis,AxisMetric::Window(_)|AxisMetric::Timeline(_)) {
+            if !matches!(self.y_axis,AxisMetric::Window(_)|AxisMetric::Timeline(_)|AxisMetric::SchedulerIoWait) {
             if !self.connected_footprint() {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color Category");
@@ -1948,6 +1963,8 @@ impl StudioApp {
         {
             self.footprint_lanes_ui(ui);
             self.table_ui(ui);
+        } else if self.y_axis == AxisMetric::SchedulerIoWait {
+            self.scheduler_trend_ui(ui);
         } else if matches!(self.y_axis, AxisMetric::Timeline(_)) {
             self.timeline_ui(ui);
             self.table_ui(ui);

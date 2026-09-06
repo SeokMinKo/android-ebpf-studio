@@ -197,10 +197,15 @@ pub fn load_analysis_window(
     }
     let (mut source_start_ns, mut source_end_ns, mut source_completed_ios) = (u64::MAX, 0, 0);
     let mut selected_count = 0usize;
+    let mut selected_scheduler_count = 0usize;
     let loaded=SessionReader::default().read_events(BufReader::new(File::open(path)?),|event| {
         check_cancel()?;
+        if let StorageEvent::SchedulerIoWait(wait)=&event && window.is_some_and(|(start,end)|wait.ts_ns>=start&&wait.ts_ns<=end) {
+            selected_scheduler_count+=1;
+            if selected_scheduler_count>100_000 {return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"This interval contains more than 100,000 scheduler wait events. Narrow the time range; previous analysis preserved.").into());}
+        }
         if let Some((start,end))=event_interval(&event) {source_start_ns=source_start_ns.min(start);source_end_ns=source_end_ns.max(end);activity.observe_range(start,end);}
-        if (window.is_none() || matches!(&event,StorageEvent::BlockInsert(_)|StorageEvent::BlockIssue(_)|StorageEvent::BlockComplete(_)|StorageEvent::ObservedBlockCompletion(_))) && let Some(io)=engine.ingest(event) {
+        if (window.is_none() || matches!(&event,StorageEvent::BlockInsert(_)|StorageEvent::BlockIssue(_)|StorageEvent::BlockComplete(_)|StorageEvent::ObservedBlockCompletion(_)|StorageEvent::SchedulerIoWait(_))) && let Some(io)=engine.ingest(event) {
                 source_completed_ios+=1;
                 activity.observe(&io);
                 if window.is_some_and(|(start,end)|io.completion.ts_ns>=start&&io.completion.ts_ns<=end) {
@@ -337,6 +342,7 @@ pub fn load_analysis_window(
 
 pub(crate) fn event_interval(event: &StorageEvent) -> Option<(u64, u64)> {
     Some(match event {
+        StorageEvent::SchedulerIoWait(v) => (v.ts_ns, v.ts_ns),
         StorageEvent::ObservedBlockCompletion(io) => (io.start_timestamp(), io.completion.ts_ns),
         StorageEvent::BlockInsert(v) => (v.ts_ns, v.ts_ns),
         StorageEvent::BlockIssue(v) => (v.ts_ns, v.ts_ns),
@@ -606,6 +612,16 @@ fn write_summary(path: &Path, summary: &AnalysisSummary) -> anyhow::Result<()> {
 
 fn write_event_csv(writer: &mut csv::Writer<File>, event: &StorageEvent) -> anyhow::Result<()> {
     match event {
+        StorageEvent::SchedulerIoWait(wait) => {
+            let mut row: [String; 18] = std::array::from_fn(|_| String::new());
+            row[0] = "scheduler_iowait".into();
+            row[1] = wait.ts_ns.to_string();
+            row[8] = wait.pid.map(|pid| pid.to_string()).unwrap_or_default();
+            row[9] = wait.tid.to_string();
+            row[10] = wait.comm.clone();
+            row[17] = serde_json::to_string(wait)?;
+            writer.write_record(row)?;
+        }
         StorageEvent::ObservedBlockCompletion(io) => writer.write_record([
             "observed_block_completion".into(),
             io.completion.ts_ns.to_string(),

@@ -119,6 +119,8 @@ impl TraceQuality {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DecodedTrace {
+    #[serde(default)]
+    pub scheduler_waits: Vec<android_ebpf_protocol::SchedulerIoWait>,
     pub events: Vec<BlockEvent>,
     pub processes: Vec<ProcessMetadata>,
     pub quality: TraceQuality,
@@ -257,6 +259,7 @@ pub fn decode(mut reader: impl Read) -> DecodedTrace {
     }
     // Producers and CPUs emit separate packet sequences, not a global timeline.
     result.events.sort_by_key(|e| (e.timestamp_ns, e.record_id));
+    result.scheduler_waits.sort_by_key(|e| e.ts_ns);
     result
 }
 
@@ -295,6 +298,70 @@ impl DecodedTrace {
         self.quality.parse_errors += children(&f, 8).count() as u64;
         for raw in children(&f, 2) {
             let e = fields(raw)?;
+            if let Some(generic) = bytes(&e, 327) {
+                let parsed = (|| -> io::Result<()> {
+                    let generic = fields(generic)?;
+                    if bytes(&generic, 1).is_some_and(|name| {
+                        name == b"sched_stat_iowait" || name == b"sched/sched_stat_iowait"
+                    }) && clock == 0
+                    {
+                        let mut delay = None;
+                        let mut task = None;
+                        let mut comm = String::new();
+                        for field in children(&generic, 2) {
+                            let field = fields(field)?;
+                            match bytes(&field, 1) {
+                                Some(b"delay") => {
+                                    delay = number(&field, 5).or_else(|| {
+                                        number(&field, 4).filter(|n| *n <= i64::MAX as u64)
+                                    })
+                                }
+                                Some(b"pid") => {
+                                    task = number(&field, 5)
+                                        .or_else(|| number(&field, 4))
+                                        .and_then(|n| u32::try_from(n).ok())
+                                        .filter(|n| *n > 0)
+                                }
+                                Some(b"comm") => {
+                                    comm = bytes(&field, 3)
+                                        .map(|s| {
+                                            String::from_utf8_lossy(s)
+                                                .trim_end_matches('\0')
+                                                .to_owned()
+                                        })
+                                        .unwrap_or_default()
+                                }
+                                _ => {}
+                            }
+                        }
+                        let wait = android_ebpf_protocol::SchedulerIoWait {
+                            ts_ns: required(&e, 1)?,
+                            delay_ns: delay.ok_or_else(|| {
+                                io::Error::other("sched_stat_iowait missing/invalid delay")
+                            })?,
+                            tid: task.ok_or_else(|| {
+                                io::Error::other("sched_stat_iowait missing/invalid task pid")
+                            })?,
+                            pid: None,
+                            comm,
+                            cpu,
+                            source: "Perfetto sched_stat_iowait".into(),
+                        };
+                        if self.scheduler_waits.len() < MAX_EVENTS {
+                            self.scheduler_waits.push(wait);
+                        } else {
+                            self.quality.projection_limited = true;
+                        }
+                    }
+                    Ok(())
+                })();
+                // A malformed independent scheduler sample must not erase
+                // subsequent block observations in the same CPU packet.
+                if let Err(error) = parsed {
+                    self.quality.parse_errors += 1;
+                    self.quality.diagnostic(error.to_string());
+                }
+            }
             for (id, kind) in [
                 (45, BlockKind::Issue),
                 (125, BlockKind::Complete),

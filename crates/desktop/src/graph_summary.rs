@@ -98,11 +98,19 @@ impl Distribution {
                 count: 0,
             })
             .collect();
-        // Use the actual displayed boundaries, avoiding arithmetic rounding
-        // disagreement between a sample exactly on a boundary and its bin.
-        for &value in &self.values {
-            let i = bins.partition_point(|b| b.upper <= value).min(count - 1);
-            bins[i].count += 1;
+        // Values are sorted by finish(). Count at the displayed boundaries in
+        // O(bins * log(samples)), rather than rescanning the cohort every frame.
+        // Values equal to an upper boundary belong to the next bin; only the
+        // final bin includes its upper boundary, preserving ties exactly.
+        let mut previous = 0;
+        for (i, bin) in bins.iter_mut().enumerate() {
+            let end = if i + 1 == count {
+                self.values.len()
+            } else {
+                self.values.partition_point(|value| *value < bin.upper)
+            };
+            bin.count = end - previous;
+            previous = end;
         }
         bins
     }
@@ -313,6 +321,35 @@ impl AddressAccumulator {
 mod tests {
     use super::*;
     use android_ebpf_protocol::{AnalysisEngine, BlockComplete, BlockIssue, StorageEvent};
+
+    #[test]
+    fn sorted_boundary_histogram_matches_independent_interval_counts_with_many_ties() {
+        for values in [
+            vec![0.; 100_000],
+            (0..100_000)
+                .map(|i| ((i * 37) % 201) as f64 / 7. - 10.)
+                .collect(),
+            (0..100_000).map(|i| 1e12 + (i % 17) as f64 / 8.).collect(),
+        ] {
+            let mut d = Distribution { values, missing: 0 };
+            d.finish();
+            for requested in [1, 16, 128] {
+                let bins = d.histogram(requested);
+                for (i, bin) in bins.iter().enumerate() {
+                    let expected = d
+                        .values
+                        .iter()
+                        .filter(|v| {
+                            **v >= bin.lower
+                                && (**v < bin.upper || i + 1 == bins.len() && **v <= bin.upper)
+                        })
+                        .count();
+                    assert_eq!(bin.count, expected);
+                }
+                assert_eq!(bins.iter().map(|b| b.count).sum::<usize>(), d.values.len());
+            }
+        }
+    }
 
     #[test]
     fn histogram_boundaries_percentiles_missing_and_constant_are_independent() {

@@ -4,6 +4,8 @@ Completion CPU is implemented and verified at checkpoint5489a96. The following s
 
 ## I/O wait
 
+Update: [UPAS_SCHEDULER_CHECKPOINT.md](UPAS_SCHEDULER_CHECKPOINT.md) implements the optional Perfetto generic event path through schema8 storage, analysis and linked Trend/Summary. Native/root eBPF emission and physical kernel/runtime acceptance remain pending. The following source audit is retained.
+
 uPAS `UpasParser.py`1188-1236 defines `Parser_SCHED_IOWait`: extracts trace timestamp and integer `delay=`, subtracts session origin, and writes scheduler delay records to a separate CSV. Its declared pattern is currently the placeholder`aaaddd`; actual enabled dispatch and source event availability still need verification. `UpasAnalyzer.py`8120-8158 reads `iowait_parsing_file`, divides delay by1000 and plots time(s)/iowait(us), with log Y. This is a scheduler delay event population, not `/proc/stat` CPU percentage, per-block-request latency, or device Idle. Do not relabel those available quantities as I/O wait.
 
 Next: inspect actual scheduler event/configuration support and implement optional collector/protocol/storage/event-cohort analysis when feasible. Keep scheduler events distinct from block request counts/payload/BW and state which common filters apply. Current ADB device list is empty; physical event/configuration acceptance requires reconnection. Offline fixture/decoder/collector builds remain possible. This is not grounds for declaring the whole Goal blocked.

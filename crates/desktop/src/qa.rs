@@ -105,6 +105,15 @@ impl StudioApp {
                 raw.events.push(egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}});
                 raw.events.push(egui::Event::Text(if pid {if step==4 {std::env::var("ANDROID_EBPF_QA_PID").unwrap_or("1".into())}else{"2147483647".into()}}else if step==4 {std::env::var("ANDROID_EBPF_QA_PROCESS").unwrap_or("F2FS".into())}else{"__no_such_process__".into()}));
             }else if [5,7,10].contains(&step) {
+                if self.y_axis==AxisMetric::SchedulerIoWait {
+                    let Some(s)=&self.scheduler.view else{return;};
+                    if self.scheduler.pending.is_some() || self.scheduler.signature.as_ref().is_none_or(|(g,q)|*g!=self.analysis_generation||q!=&self.query){return;}
+                    let path=self.render_qa.output.as_ref().unwrap().with_extension(format!("filter-{step}.csv"));
+                    let result=write_scheduler_csv(&path,s,false).map_err(|e|e.to_string());
+                    self.render_qa.filter_states.push(serde_json::json!({"step":step,"query":self.query,"scheduler_count":s.rows.len(),"p50":s.distribution.percentile(50),"csv":path,"export":result}));
+                    if step==10 {self.render_qa.input_step=7;self.render_qa.filter_step=11;return;}
+                    self.render_qa.filter_step+=1;self.render_qa.range_wait_frame=self.render_qa.frames;return;
+                }
                 let Some((g,x,y,s))=&self.selection.all_summary else{return;};
                 if *g!=self.analysis_generation || *x!=self.x_axis || *y!=self.y_axis || self.selection.all_pending.is_some() || self.footprint.pending.is_some(){return;}
                 let path=self.render_qa.output.as_ref().unwrap().with_extension(format!("filter-{step}.csv"));
@@ -492,7 +501,7 @@ impl StudioApp {
         if self.render_qa.frames < 12 {
             return;
         }
-        if self.render_qa.input_step == 3 && self.selection.summary.is_none() {
+        if self.render_qa.input_step == 3 && self.selection.summary.is_none() && !(self.y_axis==AxisMetric::SchedulerIoWait&&self.scheduler.selected.is_some()) {
             return;
         }
         if gesture.starts_with("inspector-") && self.render_qa.input_step >= 3 {
@@ -846,6 +855,16 @@ impl StudioApp {
             }
             report["displayed_summary"] =
                 serde_json::json!(self.summary_view.as_ref().map(|(_, _, summary)| summary));
+            if self.y_axis==AxisMetric::SchedulerIoWait && let Some(s)=self.scheduler.selected.as_ref().or(self.scheduler.view.as_ref()) {
+                report["scheduler"]=serde_json::json!(s);
+                report["selection_count"]=serde_json::json!(self.scheduler.selected.as_ref().map(|v|v.rows.len()));
+                report["graph_summary"]=serde_json::json!({"metric":"Scheduler I/O wait (us)","samples":s.rows.len(),"p50":s.distribution.percentile(50),"p95":s.distribution.percentile(95),"histogram":s.distribution.histogram(16),"selected":self.scheduler.selected.is_some()});
+                let csv=path.with_extension("summary.csv");
+                report["graph_summary_export"]=serde_json::json!({"path":csv,"result":write_scheduler_csv(&csv,s,true).map_err(|e|e.to_string())});
+                let csv=path.with_extension("scheduler.csv");
+                report["scheduler_export"]=serde_json::json!({"path":csv,"result":write_scheduler_csv(&csv,s,false).map_err(|e|e.to_string())});
+                report["graph_io_export"]=serde_json::Value::Null;
+            }
             report["trend_request_count"] = serde_json::json!(
                 self.trend_view
                     .as_ref()
@@ -880,6 +899,7 @@ impl StudioApp {
                 || (self.render_qa.frames >= 40
                     && self.selection.pending.is_none()
                     && self.selection.all_pending.is_none()
+                    && (self.y_axis!=AxisMetric::SchedulerIoWait || (self.scheduler.pending.is_none() && self.scheduler.selected_pending.is_none()))
                     && self.footprint.pending.is_none()
                     && self.compare_explore.pending.is_none()
                     && self

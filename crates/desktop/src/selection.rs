@@ -419,6 +419,13 @@ impl StudioApp {
     }
 
     fn selection_panel(&mut self, ui: &mut egui::Ui) {
+        if self.y_axis == AxisMetric::SchedulerIoWait {
+            // This population has no request-summary consumer. Detach old work
+            // when changing views so neither stale statistics nor pending state survives.
+            self.selection.all_pending=None;self.selection.all_summary=None;
+            self.selection.pending=None;self.selection.summary=None;self.selection.queued=None;
+            self.scheduler_panel(ui); return;
+        }
         self.poll_selection();
         self.poll_graph_summary();
         let live=self.is_running();
