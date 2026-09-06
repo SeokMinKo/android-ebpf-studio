@@ -1031,6 +1031,7 @@ fn compare_pane(
             // narrow layout scrolls; an off-screen point cannot receive a click.
             if qa.output.is_some()
                 && qa.input_step == 0
+                && qa.frames >= 28
                 && label == "Baseline"
                 && !ui.clip_rect().contains(point)
                 && std::env::var("ANDROID_EBPF_QA_GESTURE").is_ok_and(|s| s == "compare-point")
