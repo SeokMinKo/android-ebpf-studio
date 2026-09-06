@@ -38,6 +38,17 @@ struct RenderQa {
     recovery_original: Option<PathBuf>,
     device_recording_at: Option<Instant>,
     device_phases: Vec<(String, f64)>,
+    progress_at: Option<Instant>,
+}
+
+fn qa_record_duration() -> Duration {
+    Duration::from_secs(
+        std::env::var("ANDROID_EBPF_QA_RECORD_SECONDS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(6)
+            .clamp(6, 1800),
+    )
 }
 
 impl StudioApp {
@@ -56,6 +67,9 @@ impl StudioApp {
         let Ok(gesture) = std::env::var("ANDROID_EBPF_QA_GESTURE") else {
             return;
         };
+        if gesture == "stream-replay" {
+            return;
+        }
         if gesture == "device-start-stop" {
             let Ok(serial) = std::env::var("ANDROID_EBPF_QA_DEVICE_SERIAL") else {
                 return;
@@ -88,7 +102,7 @@ impl StudioApp {
                     && self
                         .render_qa
                         .device_recording_at
-                        .is_some_and(|t| t.elapsed() >= Duration::from_secs(6)))
+                        .is_some_and(|t| t.elapsed() >= qa_record_duration()))
             {
                 return;
             }
@@ -109,14 +123,33 @@ impl StudioApp {
             }
             return;
         }
-        if matches!(gesture.as_str(), "recover-local" | "export-raw") {
+        if matches!(
+            gesture.as_str(),
+            "recover-local" | "recover-phone" | "export-raw"
+        ) {
+            let recovery = gesture != "export-raw";
+            if gesture == "recover-phone" {
+                let owner_serial = self
+                    .render_qa
+                    .recovery_original
+                    .as_deref()
+                    .and_then(crate::perfetto_session::recovery_manifest)
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|v| v.get("serial").and_then(|s| s.as_str()).map(str::to_owned));
+                if owner_serial.is_none()
+                    || owner_serial != std::env::var("ANDROID_EBPF_QA_DEVICE_SERIAL").ok()
+                {
+                    return;
+                }
+            }
             if self.render_qa.frames < 24
                 || self.render_qa.frames < self.render_qa.range_wait_frame + 4
             {
                 return;
             }
             let step = self.render_qa.input_step;
-            if gesture == "recover-local" && step == 2 {
+            if recovery && step == 2 {
                 if self.phase == CapturePhase::Complete
                     && self.session_path != self.render_qa.recovery_original
                 {
@@ -132,10 +165,14 @@ impl StudioApp {
                 }
                 return;
             }
-            let pos = if gesture == "recover-local" {
+            let pos = if recovery {
                 self.render_qa
                     .inspector_buttons
-                    .get("Reanalyze saved raw trace")
+                    .get(if gesture == "recover-phone" {
+                        "Recover from original phone"
+                    } else {
+                        "Reanalyze saved raw trace"
+                    })
                     .copied()
             } else if step < 2 {
                 self.render_qa.session_button
@@ -145,7 +182,7 @@ impl StudioApp {
                     .get("Export Perfetto raw trace")
                     .copied()
             };
-            if step < if gesture == "recover-local" { 2 } else { 4 }
+            if step < if recovery { 2 } else { 4 }
                 && let Some(pos) = pos
             {
                 raw.events.push(egui::Event::PointerMoved(pos));
@@ -470,6 +507,35 @@ impl StudioApp {
         };
         self.render_qa.output = Some(PathBuf::from(output));
         self.render_qa.started = Some(Instant::now());
+        if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref() == Ok("stream-replay")
+            && let Some(path) = std::env::var_os("ANDROID_EBPF_QA_STREAM_SESSION")
+        {
+            // Read-only replay through the same bounded channel and UI drain as
+            // capture. No writer is opened against the original session.
+            let path = PathBuf::from(path);
+            self.session_path = Some(path.clone());
+            self.phase = CapturePhase::Analyzing;
+            self.render_qa.stop_at = Some(Instant::now());
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                let result = (|| -> anyhow::Result<()> {
+                    tx.send(HostMessage::AnalysisStarted)
+                        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                    let input = std::io::BufReader::new(std::fs::File::open(path)?);
+                    for line in input.lines() {
+                        let line = line?;
+                        if !line.trim().is_empty() {
+                            tx.send(HostMessage::Record(serde_json::from_str(&line)?))
+                                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                        }
+                    }
+                    Ok(())
+                })()
+                .map_err(|e| e.to_string());
+                let _ = tx.send(HostMessage::Ended(result));
+            });
+        }
         if let Some(path) = std::env::var_os("ANDROID_EBPF_QA_SESSION") {
             let path = PathBuf::from(path);
             match session::load_analysis(&path) {
@@ -483,7 +549,10 @@ impl StudioApp {
         if let Some(path) = std::env::var_os("ANDROID_EBPF_QA_BASELINE") {
             self.start_comparison_load(PathBuf::from(path));
         }
-        if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref() == Ok("recover-local") {
+        if matches!(
+            std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref(),
+            Ok("recover-local" | "recover-phone")
+        ) {
             self.render_qa.recovery_original = self.session_path.clone();
             self.phase = CapturePhase::Error;
             self.status = "QA interrupted-session state; original raw capture retained".into();
@@ -570,7 +639,15 @@ impl StudioApp {
                     label,
                     self.render_qa.started.unwrap().elapsed().as_secs_f64() * 1000.0,
                 ));
-                let _=std::fs::write(path.with_extension("progress.json"),serde_json::to_vec_pretty(&serde_json::json!({"phase":self.phase.label(),"phases":self.render_qa.device_phases,"session":self.session_path,"status":self.status})).unwrap());
+                self.render_qa.progress_at = None;
+            }
+            if self
+                .render_qa
+                .progress_at
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+            {
+                let _=std::fs::write(path.with_extension("progress.json"),serde_json::to_vec_pretty(&serde_json::json!({"phase":self.phase.label(),"phases":self.render_qa.device_phases,"session":self.session_path,"status":self.status,"frames":self.render_qa.frames,"ui_performance":self.performance.snapshot(),"elapsed_ms":self.render_qa.started.unwrap().elapsed().as_secs_f64()*1000.0})).unwrap());
+                self.render_qa.progress_at = Some(Instant::now());
             }
             if self.phase == CapturePhase::Recording && self.render_qa.device_recording_at.is_none()
             {
@@ -579,6 +656,17 @@ impl StudioApp {
         }
         if self.render_qa.frames == 1 {
             self.apply_qa_preset();
+        }
+        if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref() == Ok("stream-replay")
+            && matches!(self.phase, CapturePhase::Complete | CapturePhase::Error)
+        {
+            if self.render_qa.stop_analysis_ms.is_none() {
+                self.render_qa.stop_analysis_ms = self
+                    .render_qa
+                    .stop_at
+                    .map(|t| t.elapsed().as_secs_f64() * 1000.0);
+            }
+            self.render_qa.input_step = 7;
         }
         if let Some(scale) = self.render_qa_scale.take() {
             ctx.set_pixels_per_point(scale);
@@ -617,7 +705,11 @@ impl StudioApp {
                     if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref()
                         == Ok("device-start-stop")
                     {
-                        55
+                        qa_record_duration().as_secs() + 49
+                    } else if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref()
+                        == Ok("stream-replay")
+                    {
+                        120
                     } else {
                         8
                     },
