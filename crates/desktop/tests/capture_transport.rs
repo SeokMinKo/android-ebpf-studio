@@ -28,6 +28,10 @@ fn phones_with_different_root_methods_get_fresh_scoped_profiles() {
     assert_eq!(second.serial, "su-phone");
     assert!(second.full_ebpf_ready());
     assert!(client.preflight("root-phone").unwrap().full_ebpf_ready());
+    assert!(
+        first.perfetto,
+        "Root preflight must also detect available fallback tracing"
+    );
 }
 
 #[test]

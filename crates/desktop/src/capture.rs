@@ -196,6 +196,7 @@ pub fn start_adb(
         ));
         let mut detected = None;
         let mut capture_ready = false;
+        let mut measurement_seen = false;
         let result = (|| -> Result<(), String> {
             tx.send(HostMessage::Status(
                 "Preparing: detecting root, kernel and file mapping capabilities…".into(),
@@ -286,14 +287,23 @@ pub fn start_adb(
 
             let error_tx = tx.clone();
             let error_session = session_id.clone();
+            let error_log = agent_log.clone();
             let stderr_thread = thread::spawn(move || {
-                read_stderr_lines(stderr, &agent_log, &error_session, error_tx)
+                read_stderr_lines(stderr, &error_log, &error_session, error_tx)
             });
             for line in bounded_lines(stdout, 1024 * 1024) {
                 match line {
                     Ok(line) if line.len() <= 1024 * 1024 => {
                         match serde_json::from_str::<WireRecord>(&line) {
                             Ok(record) => {
+                                measurement_seen |= match &record {
+                                    WireRecord::Hello { .. } | WireRecord::Control { .. } => false,
+                                    WireRecord::Health { emitted_events, .. } => {
+                                        *emitted_events > 0
+                                    }
+                                    WireRecord::Footer { events_seen, .. } => *events_seen > 0,
+                                    _ => true,
+                                };
                                 if matches!(&record, WireRecord::Capabilities { .. }) {
                                     capture_ready = true;
                                     readiness.store(true, Ordering::Release);
@@ -356,6 +366,11 @@ pub fn start_adb(
             if let Some(error) = exit_error {
                 return Err(error);
             }
+            if !capture_ready && !stop.load(Ordering::Acquire) {
+                return Err(
+                    "collector ended before reporting readiness; partial data preserved".into(),
+                );
+            }
             if let Ok(mut guard) = control_slot.lock() {
                 guard.take();
             }
@@ -375,6 +390,7 @@ pub fn start_adb(
         let result = match result {
             Err(error)
                 if !capture_ready
+                    && !measurement_seen
                     && !stop.load(Ordering::Acquire)
                     && detected.as_ref().is_some_and(|r| r.full_ebpf_ready()) =>
             {
@@ -384,9 +400,45 @@ pub fn start_adb(
                     "capture.fallback",
                     "EBPF_UNAVAILABLE",
                     "degraded",
-                    Some(error),
+                    Some(error.clone()),
                 ));
-                capture_diskstats(&client, detected.as_ref().unwrap(), &stop, &tx)
+                (|| -> Result<(), String> {
+                    // Revalidate the original target after the failed collector
+                    // exits. Never continue across a reboot in the same session.
+                    let original = detected.as_ref().unwrap();
+                    let mut report = client.preflight(&serial).map_err(|e| e.to_string())?;
+                    if original.boot_id.is_empty() || original.boot_id != report.boot_id {
+                        return Err("Device boot changed during preparation; partial data preserved. Start a new session after reconnecting".into());
+                    }
+                    report.ebpf_start_error = Some(error);
+                    report.diagnostics.push("eBPF collector startup failed; automatic fallback uses Perfetto when available, otherwise accessible device counters".into());
+                    std::fs::write(
+                        agent_log.with_file_name("device-profile-before-fallback.json"),
+                        serde_json::to_vec_pretty(original).map_err(|e| e.to_string())?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    std::fs::write(
+                        agent_log.with_file_name("device-profile.json"),
+                        serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    tx.send(HostMessage::Preflight(Ok(report.clone()))).ok();
+                    tx.send(HostMessage::Record(WireRecord::SourceInfo {
+                        schema_version: android_ebpf_protocol::SCHEMA_VERSION,
+                        source: "ebpf".into(),
+                        status: "eBPF startup failed; automatic fallback selected · see Diagnostics for the original error".into(),
+                        metadata: serde_json::json!({"stage":"fallback", "error":report.ebpf_start_error.as_deref(),
+                            "next_source":if report.perfetto {"perfetto"} else {"device_counters"}}),
+                    })).ok();
+                    if stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    if report.perfetto {
+                        capture_perfetto(&client, &report, &stop, &tx, &agent_log)
+                    } else {
+                        capture_diskstats(&client, &report, &stop, &tx)
+                    }
+                })()
             }
             value => value,
         };

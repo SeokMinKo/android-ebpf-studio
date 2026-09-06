@@ -22,6 +22,13 @@ This ledger supersedes older statements that no phone was available.
   requests as the graphs, including after retention eviction and filter changes.
   Session totals remain available separately for export. File-operation evidence
   keeps its independent scope and follows request filters where applicable.
+- Root preflight also detects shell-accessible Perfetto. If the eBPF collector
+  fails before readiness or measurements, it rechecks the same boot and selects
+  Perfetto, then device counters when that service cannot start. Host fixtures
+  exercise the production transport, including zero-exit without readiness,
+  failure after readiness/data, Stop, cancellation during recheck and reboot.
+  Initial and updated profiles plus the original failure evidence are preserved.
+  This fallback boundary has not been exercised on a physical root phone.
 
 The retained-summary regression reproduces 100,001 observed completions with
 90,001 remaining in the analysis window. It checks count, separate Read/Write
@@ -132,8 +139,6 @@ layout was verified separately on saved actual data in all three themes.
   require further work or evidence.
 - Unknown Perfetto clocks need a consistent unavailable-time representation
   across plot axes, time filters, and whole-session temporal aggregation.
-- Root eBPF attach failure currently falls back to counters; choosing Perfetto
-  at that failure boundary still needs implementation and regression coverage.
 - Retained-detail FilePath coverage is labeled as such. A whole-session coverage
   denominator beyond the retained analysis window is not yet provided.
 - A previously observed intermittent native startup access violation has not

@@ -41,6 +41,28 @@ name nor a nearby file operation establishes a file association.
 
 ## Quality and recovery
 
+### Automatic fallback after root collector startup failure
+
+Preflight checks shell-accessible Perfetto even when root, ABI and readable
+tracepoints suggest eBPF can start. A verifier/deployment/startup failure before
+readiness and before measurements triggers fresh detection for the same serial.
+The boot must still match. The failed collector is stopped before another source
+is started. Perfetto is preferred to device counters; counters remain available
+if the service is absent or rejects startup. Block-only FilePath stays Unresolved.
+
+The first profile is preserved as `device-profile-before-fallback.json` and the
+updated `device-profile.json` includes `ebpf_start_error`. The original failure
+and selected fallback are also recorded in a session SourceInfo record. A new
+Start performs a fresh preflight rather than persisting that failure across runs.
+Already emitted measurements, readiness followed by failure, a changed boot or
+cancellation prevent an unrelated collector from continuing the same session.
+Exit code zero without readiness is not treated as successful capture.
+
+Host-only fake ADB tests exercise these transitions through the production
+capture code and owned Perfetto transport. They are not physical root acceptance.
+
+### Saved source quality
+
 The decoder preserves ftrace lost-bundle flags, parse errors, unavailable and
 failed events, kernel start/end counters, service loss counters and final-flush
 status. Missing counter pairs and counter resets are unknown rather than zero.
@@ -71,6 +93,21 @@ New device recordings keep `capture.ndjson`, device profile, logs and the
 `perfetto/` subdirectory together in a unique session directory. This makes raw
 export and recovery locate the same run without searching another session's log
 tree. Existing standalone NDJSON sessions remain readable.
+
+### Stage timing probe
+
+```text
+cargo run --release -p android-ebpf-studio --example perfetto_benchmark -- <saved-capture.pftrace>
+```
+
+This read-only probe reports decoder, correlation, index, projection and
+projection-plus-serialization timings. Serialization repeats projection, so do
+not sum the two projection measurements. The benchmark excludes ADB operations,
+GUI ingestion, disk writes and fsync; native Start/Stop remains the end-to-end
+acceptance gate. A 45,147,958-byte real trace with 515,961 completion observations
+measured approximately 492 ms decode, 288 ms correlation, 110 ms index and
+384 ms projection plus serialization to a sink on the recorded Windows host.
+These figures identify component costs, not a five-second capture guarantee.
 
 ## Evidence recorded on 2026-09-06
 
