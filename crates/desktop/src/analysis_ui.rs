@@ -1,5 +1,147 @@
 // Shared query for all request-oriented analysis surfaces. Capture filters are
 // intentionally separate: these controls never discard incoming measurements.
+#[cfg(test)]
+mod diskstats_performance_tests {
+    use super::*;
+
+    fn snapshot(boot: &str, second: u64, counters: u64) -> WireRecord {
+        WireRecord::DiskStats {
+            schema_version: android_ebpf_protocol::SCHEMA_VERSION,
+            boot_id: boot.into(),
+            elapsed_ms: second * 1000,
+            raw: format!("253 0 dm-0 {counters} 0 {counters} 0 {counters} 0 {counters} 0 0 0 0\n"),
+        }
+    }
+
+    #[test]
+    fn counter_projection_preserves_deltas_without_double_counting() {
+        let mut view = DiskStatsView::default();
+        let mut records = vec![snapshot("a", 0, 10), snapshot("a", 1, 20)];
+        view.sync(&records);
+        assert_eq!(view.totals["253:0 dm-0"], [10; 4]);
+        view.sync(&records);
+        assert_eq!(view.samples["253:0 dm-0"].len(), 1);
+        records.push(snapshot("a", 2, 25));
+        view.sync(&records);
+        assert_eq!(view.totals["253:0 dm-0"], [15; 4]);
+        assert_eq!(view.samples["253:0 dm-0"][1].y, 10.0 * 512.0 / 1_048_576.0);
+        // Reboot with larger counters must not create an artificial spike.
+        records.push(snapshot("b", 3, 1000));
+        records.push(snapshot("b", 4, 1002));
+        records.push(snapshot("b", 5, 1));
+        view.sync(&records);
+        assert_eq!(view.totals["253:0 dm-0"], [17; 4]);
+        assert_eq!(view.reset_intervals, 2);
+        let mut missing = snapshot("b", 6, 2);
+        if let WireRecord::DiskStats { raw, .. } = &mut missing {
+            raw.clear();
+        }
+        records.extend([missing, snapshot("b", 7, 100), snapshot("b", 8, 101)]);
+        view.sync(&records);
+        assert_eq!(view.totals["253:0 dm-0"], [18; 4]);
+    }
+
+    #[test]
+    fn new_session_discards_counter_projection() {
+        let mut app = StudioApp {
+            disk_stats: vec![snapshot("a", 0, 10), snapshot("a", 1, 20)],
+            ..StudioApp::default()
+        };
+        app.disk_stats_view.sync(&app.disk_stats);
+        app.reset_analysis();
+        app.disk_stats = vec![snapshot("b", 0, 100), snapshot("b", 1, 103)];
+        app.disk_stats_view.sync(&app.disk_stats);
+        assert_eq!(app.disk_stats_view.totals["253:0 dm-0"], [3; 4]);
+    }
+
+    #[test]
+    fn pending_analysis_does_not_rebuild_partial_results() {
+        let mut app = StudioApp {
+            session_path: Some(PathBuf::from("test-session.ndjson")),
+            ..StudioApp::default()
+        };
+        app.tx.send(HostMessage::AnalysisStarted).unwrap();
+        app.drain_messages();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| app.analysis_page_ui(ui));
+        });
+        output.textures_delta.clear();
+        assert!(
+            app.summary_view.is_none(),
+            "pending batches must not rebuild results on every frame"
+        );
+        app.tx.send(HostMessage::Finalized(Ok(()))).unwrap();
+        app.drain_messages();
+        let mut output = ctx.run_ui(Default::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| app.analysis_page_ui(ui));
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.phase, CapturePhase::Complete);
+        assert!(
+            app.summary_view.is_some(),
+            "final results must appear automatically"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual host performance probe; run with --ignored --nocapture"]
+    fn repeated_live_counter_render() {
+        let mut app = StudioApp::default();
+        for second in 0..600 {
+            let raw = (0..64)
+                .map(|dev| {
+                    format!(
+                        "253 {dev} dm-{dev} {} 0 {} 0 {} 0 {} 0 0 0 0\n",
+                        second * 10,
+                        second * 80,
+                        second * 5,
+                        second * 40
+                    )
+                })
+                .collect::<String>();
+            app.disk_stats.push(WireRecord::DiskStats {
+                schema_version: android_ebpf_protocol::SCHEMA_VERSION,
+                boot_id: "fixture-boot".into(),
+                elapsed_ms: second * 1000,
+                raw,
+            });
+        }
+        let ctx = egui::Context::default();
+        let mut timings = Vec::new();
+        for frame in 0..12 {
+            let start = Instant::now();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 800.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| app.diskstats_ui(ui));
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            if frame >= 2 {
+                timings.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        timings.sort_by(f64::total_cmp);
+        eprintln!(
+            "diskstats warm render: median {:.3} ms, max {:.3} ms",
+            timings[5], timings[9]
+        );
+        assert!(
+            timings[5] < 40.0,
+            "live counter screen blocks repeated frames: {timings:?}"
+        );
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 struct AnalysisFilter {
     request_keys: Option<std::collections::HashSet<IoSelectionKey>>,
@@ -104,11 +246,71 @@ impl AnalysisFilter {
     }
 }
 
+/// Append-only projection of the raw session snapshots. Reset with the session,
+/// and never derive a delta across boots or a device's disappearance.
+#[derive(Default)]
+struct DiskStatsView {
+    processed: usize,
+    previous: Option<(String, u64, BTreeMap<String, [u64; 4]>)>,
+    totals: BTreeMap<String, [u64; 4]>,
+    samples: BTreeMap<String, Vec<egui_plot::PlotPoint>>,
+    reset_intervals: usize,
+}
+
+impl DiskStatsView {
+    fn sync(&mut self, records: &[WireRecord]) {
+        if self.processed > records.len() {
+            *self = Self::default();
+        }
+        for record in &records[self.processed..] {
+            let WireRecord::DiskStats {
+                boot_id,
+                elapsed_ms,
+                raw,
+                ..
+            } = record
+            else {
+                continue;
+            };
+            let current = parse_diskstats(raw);
+            if let Some((boot, time, old)) = self.previous.as_ref() {
+                if boot == boot_id && elapsed_ms > time {
+                    let interval = (elapsed_ms - time) as f64 / 1000.0;
+                    for (key, counters) in &current {
+                        if let Some(before) = old.get(key) {
+                            if let Some(delta) = disk_delta(before, counters) {
+                                let sum = self.totals.entry(key.clone()).or_default();
+                                for i in 0..4 {
+                                    sum[i] = sum[i].saturating_add(delta[i]);
+                                }
+                                self.samples.entry(key.clone()).or_default().push(
+                                    egui_plot::PlotPoint::new(
+                                        *elapsed_ms as f64 / 1000.0,
+                                        delta[1].saturating_add(delta[3]) as f64 * 512.0
+                                            / 1_048_576.0
+                                            / interval,
+                                    ),
+                                );
+                            } else {
+                                self.reset_intervals += 1;
+                            }
+                        }
+                    }
+                } else {
+                    self.reset_intervals += 1;
+                }
+            }
+            self.previous = Some((boot_id.clone(), *elapsed_ms, current));
+        }
+        self.processed = records.len();
+    }
+}
+
 impl StudioApp {
     fn perfetto_pending(&self) -> bool {
         self.is_running() && self.source_info.last().is_some_and(|r| matches!(r, WireRecord::SourceInfo {source, metadata,..} if source=="perfetto" && metadata.get("stage").and_then(|s|s.as_str())==Some("recording")))
     }
-    fn diskstats_ui(&self, ui: &mut egui::Ui) {
+    fn diskstats_ui(&mut self, ui: &mut egui::Ui) {
         section_header(
             ui,
             "Device counter analysis",
@@ -118,42 +320,14 @@ impl StudioApp {
             ui,
             "These counters do not provide individual I/O, FilePath, PID/TID, latency percentiles or LBA. Device-mapper and partition rows can represent the same I/O; rows are never summed across devices.",
         );
-        let mut previous: Option<(u64, BTreeMap<String, [u64; 4]>)> = None;
-        let mut totals = BTreeMap::<String, [u64; 4]>::new();
-        let mut samples = BTreeMap::<String, Vec<[f64; 2]>>::new();
-        let mut reset_intervals = 0;
-        for record in &self.disk_stats {
-            let WireRecord::DiskStats {
-                elapsed_ms, raw, ..
-            } = record
-            else {
-                continue;
-            };
-            let current = parse_diskstats(raw);
-            if let Some((time, old)) = previous.as_ref() {
-                let interval = elapsed_ms.saturating_sub(*time) as f64 / 1000.0;
-                if interval > 0.0 {
-                    for (key, counters) in &current {
-                        if let Some(before) = old.get(key) {
-                            if let Some(delta) = disk_delta(before, counters) {
-                                let sum = totals.entry(key.clone()).or_default();
-                                for i in 0..4 {
-                                    sum[i] = sum[i].saturating_add(delta[i]);
-                                }
-                                samples.entry(key.clone()).or_default().push([
-                                    *elapsed_ms as f64 / 1000.0,
-                                    (delta[1] + delta[3]) as f64 * 512.0 / 1_048_576.0 / interval,
-                                ]);
-                            } else {
-                                reset_intervals += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            previous = Some((*elapsed_ms, current));
-        }
-        ui.label(format!("{} snapshots · {} counter-reset intervals excluded; new/disappearing devices have no inferred delta", self.disk_stats.len(), reset_intervals));
+        self.disk_stats_view.sync(&self.disk_stats);
+        let DiskStatsView {
+            totals,
+            samples,
+            reset_intervals,
+            ..
+        } = &self.disk_stats_view;
+        ui.label(format!("{} snapshots · {} counter/clock-reset intervals excluded; new/disappearing devices have no inferred delta", self.disk_stats.len(), reset_intervals));
         egui::ScrollArea::horizontal().show(ui, |ui| {
             egui::Grid::new("diskstats-summary")
                 .striped(true)
@@ -184,9 +358,10 @@ impl StudioApp {
             .x_axis_label("Host elapsed seconds")
             .y_axis_label("MiB/s · per device")
             .show(ui, |plot| {
-                for (i, (name, points)) in samples.into_iter().enumerate() {
+                for (i, (name, points)) in samples.iter().enumerate() {
                     plot.line(
-                        Line::new(name, points).color([accent(), green(), amber(), red()][i % 4]),
+                        Line::new(name, points.as_slice())
+                            .color([accent(), green(), amber(), red()][i % 4]),
                     );
                 }
             });
@@ -482,6 +657,74 @@ mod query_regressions {
     }
 
     #[test]
+    fn overview_metrics_match_retained_graph_cohort_after_eviction() {
+        let seed = engine().completed_ios()[0].clone();
+        let mut app = StudioApp::default();
+        for id in 0..100_001u64 {
+            let mut io = seed.clone();
+            io.issue.request_id = id;
+            io.issue.ts_ns = id * 10_000_000;
+            io.completion.ts_ns = io.issue.ts_ns + if id < 10_000 { 5_000_000 } else { 100_000 };
+            io.completion.request_id = id;
+            io.total_latency_ns = Some(io.completion.ts_ns - io.issue.ts_ns);
+            io.issue.bytes = if id < 10_000 { 65_536 } else { 4096 };
+            io.issue.operation = if id.is_multiple_of(2) {
+                IoOperation::Read
+            } else {
+                IoOperation::Write
+            };
+            app.analyzer
+                .ingest(StorageEvent::ObservedBlockCompletion(io));
+        }
+        app.rebuild_filtered();
+        let summary = app.analysis_summary();
+        let detail = app.analysis().completed_ios();
+        assert_eq!(detail.len(), 90_001);
+        assert_eq!(
+            summary.completed_ios,
+            detail.len() as u64,
+            "Overview KPI must describe the same requests as its graphs"
+        );
+        assert_eq!(
+            summary.read_bytes,
+            detail
+                .iter()
+                .filter(|io| io.issue.operation == IoOperation::Read)
+                .map(|io| io.issue.bytes as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            summary.write_bytes,
+            detail
+                .iter()
+                .filter(|io| io.issue.operation == IoOperation::Write)
+                .map(|io| io.issue.bytes as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(summary.p95_latency_ns, Some(100_000));
+        assert_eq!(
+            summary
+                .category_summaries
+                .iter()
+                .map(|c| c.completed_ios)
+                .sum::<u64>(),
+            detail.len() as u64
+        );
+        app.query.operation = Some(IoOperation::Write);
+        app.invalidate_query();
+        app.rebuild_filtered();
+        let filtered = app.analysis_summary();
+        assert_eq!(filtered.completed_ios, 45_000);
+        assert_eq!(filtered.read_bytes, 0);
+        assert_eq!(filtered.write_bytes, 45_000 * 4096);
+        assert_eq!(
+            app.analyzer.summary().completed_ios,
+            100_001,
+            "Original session totals remain available for export"
+        );
+    }
+
+    #[test]
     fn projection_preserves_original_sequential_classification_and_latency() {
         let engine = engine();
         let selected = engine.select_completed(|io| io.issue.pid == 2);
@@ -689,6 +932,118 @@ impl TrendData {
             coverage,
             multi,
             targets,
+        }
+    }
+}
+
+impl StudioApp {
+    fn analysis_page_ui(&mut self, ui: &mut egui::Ui) {
+        if matches!(self.phase, CapturePhase::Stopping | CapturePhase::Analyzing)
+            && self.page != Page::Diagnostics
+        {
+            section_header(
+                ui,
+                "Preparing analysis",
+                "Saving the session and processing remaining observations",
+            );
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(&self.status);
+            });
+            ui.label(format!(
+                "{} records received · {} completed I/O retained · {} queued messages",
+                self.received_events,
+                self.analyzer.completed_ios().len(),
+                self.rx.len()
+            ));
+            ui.label("Results open automatically when processing and saving finish. Source data and quality evidence stay with this session.");
+            return;
+        }
+        if matches!(
+            self.page,
+            Page::Overview | Page::Explore | Page::Investigate
+        ) {
+            self.reanalysis_ui(ui);
+        }
+        if self.session_path.is_none()
+            && self.analyzer.completed_ios().is_empty()
+            && self.disk_stats.is_empty()
+            && self.page == Page::Overview
+        {
+            section_header(
+                ui,
+                "Connect. Start. Stop. Analyze.",
+                "Automatic storage tracing for your Android phone",
+            );
+            ui.add_space(18.0);
+            ui.label("1. Connect the phone with USB debugging enabled and approve the phone's authorization prompt.");
+            ui.label("2. Select a target if more than one phone is connected, then choose Start analysis.");
+            ui.label("3. Run the workload on your phone. Stop & analyze saves the session and opens the results.");
+            ui.add_space(18.0);
+            info_banner(
+                ui,
+                "Root and kernel capabilities are checked at every Start. The app prepares tracing automatically and explains FilePath confidence or unsupported metrics. No mapping file or kernel offset is required.",
+            );
+            if self.is_running() {
+                ui.spinner();
+                ui.label(&self.status);
+            }
+            return;
+        }
+        if matches!(
+            self.page,
+            Page::Overview | Page::Explore | Page::Investigate
+        ) {
+            self.filter_ui(ui);
+        }
+        if self.phase == CapturePhase::Error && !self.is_running() {
+            self.perfetto_recovery_ui(ui);
+        }
+        if !self.is_running()
+            && self
+                .source_info
+                .iter()
+                .any(|r| matches!(r,WireRecord::SourceInfo{source,..} if source=="perfetto"))
+        {
+            ui.small("Perfetto block layer · timing matches are Probable; PID/name metadata are snapshot candidates. Missing timing stays unmeasured. FilePath is Unresolved. Device layers may count the same physical I/O more than once.");
+        }
+        self.rebuild_filtered();
+
+        match self.page {
+            Page::Overview => {
+                if !self.analyzer.completed_ios().is_empty() {
+                    self.summary_ui(ui);
+                } else if self.perfetto_pending() {
+                    info_banner(
+                        ui,
+                        "Perfetto is recording. Individual I/O counts, latency and loss statistics will be available after Stop. Device counters below are a separate live source.",
+                    );
+                    if !self.disk_stats.is_empty() {
+                        self.diskstats_ui(ui);
+                    }
+                } else if self.disk_stats.is_empty() {
+                    self.summary_ui(ui);
+                } else {
+                    self.diskstats_ui(ui);
+                }
+            }
+            Page::Investigate => self.investigate_ui(ui),
+            Page::Explore => self.explorer_ui(ui),
+            Page::Compare => self.compare_ui(ui),
+            Page::Diagnostics => {
+                self.diagnostics_ui(ui);
+                ui.collapsing("Capture source & quality evidence", |ui| {
+                    for record in &self.source_info {
+                        ui.label(serde_json::to_string_pretty(record).unwrap_or_default());
+                    }
+                });
+            }
+        }
+        if self.page == Page::Diagnostics
+            && let Some(report) = &self.preflight
+        {
+            ui.add_space(14.0);
+            capability_panel(ui, report);
         }
     }
 }

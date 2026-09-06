@@ -2,7 +2,7 @@
 
 기존 설치 위치의 앱을 실행하면 됩니다. 폰이 없을 때는 Start가 비활성화됩니다.
 
-1. Root 폰을 USB로 연결하고 USB 디버깅을 허용합니다.
+1. Android 폰을 USB로 연결하고 USB 디버깅을 허용합니다. Root 및 추적 지원 여부는 앱이 확인합니다.
 2. 여러 폰이 있으면 분석할 폰을 선택합니다.
 3. **Start analysis**를 누르고 폰에서 작업합니다. Root·커널 점검과 추적 준비는 자동입니다.
 4. **Stop & analyze**를 누르면 세션 저장 후 분석 화면으로 이동합니다.
@@ -21,9 +21,9 @@
 
 오른쪽 패널은 독립적으로 스크롤할 수 있습니다. 작은 창에서는 **Device / Views**에서 기기와 분석 화면을 선택합니다. Light, Dark, HighContrast, System은 상단 테마 메뉴에 있습니다.
 
-원본 세션은 `%LOCALAPPDATA%\AndroidEbpfStudio\sessions`에 자동 저장됩니다. 상단 **Session → Open session**으로 다시 열고 **Session → Export CSV**로 원본 이벤트와 분석 요약을 내보낼 수 있습니다. 기기 탐지 기록은 같은 앱 데이터 폴더의 `logs\<session-id>\device-profile.json`에 저장됩니다.
+원본 세션은 `%LOCALAPPDATA%\AndroidEbpfStudio\sessions\android-storage-<timestamp>-<uuid>\capture.ndjson`에 자동 저장됩니다. 상단 **Session → Open session**으로 다시 열고 **Session → Export CSV**로 원본 이벤트와 분석 요약을 내보낼 수 있습니다. 새 세션의 기기 탐지 기록·로그와 Perfetto 원본은 같은 세션 디렉터리에 보존됩니다.
 
-현재 상세 분석은 최대 10만 완료 I/O를 유지합니다. 원본 전체는 NDJSON에 남습니다. 이 빌드는 폰 없이 호스트·시뮬레이터·과거 실제 세션 재생으로 검증했으며, 실제 폰에서 새로 수집하는 검증은 아직 하지 못했습니다.
+현재 상세 분석은 최대 10만 완료 I/O를 유지합니다. 원본 전체는 NDJSON에 남으며 오래된 구간은 재분석할 수 있습니다. 실제 비루팅 폰 한 대의 새 수집과 Start → Stop → 자동 분석을 검증했습니다. 여러 Root 폰에서의 새 FilePath 검증이나 물리적 재연결까지 검증했다는 뜻은 아닙니다.
 
 ## X/Y축 범위 직접 조절
 
