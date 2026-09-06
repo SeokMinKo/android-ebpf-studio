@@ -453,7 +453,7 @@ pub struct StudioApp {
     disk_stats_view: DiskStatsView,
     filtered: Option<AnalysisEngine>,
     filtered_generation: u64,
-    trend_view: Option<(u64, TrendData)>,
+    trend_view: Option<(u64, Arc<TrendData>)>,
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
     simulator_stop: Option<Arc<AtomicBool>>,

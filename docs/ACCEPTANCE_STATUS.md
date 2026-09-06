@@ -46,6 +46,13 @@ file-evidence test verifies that clearing filters restores independent file rows
 
 ## Performance regression and verification
 
+Overview activity graphs now share cached trend data/coordinates and select a
+display resolution without changing their original bins or analytical population.
+The large-fixture diagnosis and repeatable native input/frame gate are documented
+in [Activity plots](ACTIVITY_PLOTS.md). Clicks also populate the chosen interval's
+Selection Summary. This component improvement does not close the physical
+Stop-to-analysis budget below.
+
 A ten-minute physical capture exposed repeated analysis in the render loop.
 The session saved 187,077 completion observations, but Stop to Complete took
 88.85 seconds. A QA screenshot timed out while analysis was still running; its
