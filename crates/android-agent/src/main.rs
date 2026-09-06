@@ -3306,6 +3306,19 @@ fn emit_diagnostic(
     }
 }
 
+fn trace_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let path = path.as_ref();
+    if !std::path::Path::new("/sys/kernel/tracing/events").is_dir()
+        && let Ok(suffix) = path.strip_prefix("/sys/kernel/tracing")
+    {
+        return std::path::Path::new("/sys/kernel/debug/tracing").join(suffix);
+    }
+    path.to_owned()
+}
+fn read_kernel_text(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    fs::read_to_string(trace_path(path))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3594,17 +3607,4 @@ mod tests {
                 .all(|plan| plan.state == CapabilityState::Unavailable)
         );
     }
-}
-
-fn trace_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    let path = path.as_ref();
-    if !std::path::Path::new("/sys/kernel/tracing/events").is_dir()
-        && let Ok(suffix) = path.strip_prefix("/sys/kernel/tracing")
-    {
-        return std::path::Path::new("/sys/kernel/debug/tracing").join(suffix);
-    }
-    path.to_owned()
-}
-fn read_kernel_text(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
-    fs::read_to_string(trace_path(path))
 }
