@@ -137,8 +137,8 @@ impl SessionWriter {
 
 #[derive(Debug)]
 pub struct LoadedAnalysis {
-    pub source_start_ns: u64,
-    pub source_end_ns: u64,
+    pub source_start_ns: Option<u64>,
+    pub source_end_ns: Option<u64>,
     pub source_completed_ios: u64,
     pub window_ns: Option<(u64, u64)>,
     pub load_elapsed_ms: f64,
@@ -200,7 +200,7 @@ pub fn load_analysis_window(
         if let Some((start,end))=event_interval(&event) {source_start_ns=source_start_ns.min(start);source_end_ns=source_end_ns.max(end);}
         if (window.is_none() || matches!(&event,StorageEvent::BlockInsert(_)|StorageEvent::BlockIssue(_)|StorageEvent::BlockComplete(_)|StorageEvent::ObservedBlockCompletion(_))) && let Some(io)=engine.ingest(event) {
                 source_completed_ios+=1;
-                if window.is_some_and(|(start,end)|io.completion.ts_ns>=start&&io.completion.ts_ns<=end) {
+                if window.is_some_and(|(start,end)|io.completion_timestamp().is_some_and(|ts| ts>=start&&ts<=end)) {
                     selected_count+=1;
                     if selected_count>100_000 {return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"This interval contains more than 100,000 I/O. Narrow the time range; previous analysis preserved.").into());}
                 }
@@ -305,12 +305,8 @@ pub fn load_analysis_window(
         .unwrap_or(loss_status);
     Ok(LoadedAnalysis {
         source_info: loaded.source_info,
-        source_start_ns: if source_start_ns == u64::MAX {
-            0
-        } else {
-            source_start_ns
-        },
-        source_end_ns,
+        source_start_ns: (source_start_ns != u64::MAX).then_some(source_start_ns),
+        source_end_ns: (source_start_ns != u64::MAX).then_some(source_end_ns),
         source_completed_ios,
         window_ns: window,
         load_elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -332,7 +328,9 @@ pub fn load_analysis_window(
 
 fn event_interval(event: &StorageEvent) -> Option<(u64, u64)> {
     Some(match event {
-        StorageEvent::ObservedBlockCompletion(io) => (io.start_timestamp(), io.completion.ts_ns),
+        StorageEvent::ObservedBlockCompletion(io) => {
+            io.start_timestamp().zip(io.completion_timestamp())?
+        }
         StorageEvent::BlockInsert(v) => (v.ts_ns, v.ts_ns),
         StorageEvent::BlockIssue(v) => (v.ts_ns, v.ts_ns),
         StorageEvent::BlockComplete(v) => (v.ts_ns, v.ts_ns),
@@ -462,7 +460,14 @@ fn write_summary(path: &Path, summary: &AnalysisSummary) -> anyhow::Result<()> {
         ("random_ios", summary.random_ios.to_string()),
         ("small_ios", summary.small_ios.to_string()),
         ("large_ios", summary.large_ios.to_string()),
-        ("logging_ns", summary.logging_ns.to_string()),
+        ("unplaced_time_ios", summary.unplaced_time_ios.to_string()),
+        (
+            "logging_ns",
+            summary
+                .logging_ns
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        ),
         (
             "busy_ns",
             summary.busy_ns.map(|n| n.to_string()).unwrap_or_default(),
@@ -535,7 +540,9 @@ fn write_event_csv(writer: &mut csv::Writer<File>, event: &StorageEvent) -> anyh
     match event {
         StorageEvent::ObservedBlockCompletion(io) => writer.write_record([
             "observed_block_completion".into(),
-            io.completion.ts_ns.to_string(),
+            io.completion_timestamp()
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
             io.issue_timestamp()
                 .map(|n| n.to_string())
                 .unwrap_or_default(),

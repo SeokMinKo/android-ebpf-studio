@@ -585,6 +585,15 @@ impl StudioApp {
     }
 
     fn apply_qa_preset(&mut self) {
+        if std::env::var("ANDROID_EBPF_QA_AXES").as_deref() == Ok("address-chunk") {
+            self.x_axis = AxisMetric::Sector;
+            self.y_axis = AxisMetric::ChunkKiB;
+            self.compare_explore.preset = ExplorerPreset::Custom;
+            self.compare_explore.axes = [self.x_axis, self.y_axis];
+            self.compare_explore.needs_apply = true;
+            self.compare_explore.fit = true;
+            self.render_qa.compare_ready_ms = None;
+        }
         if let Ok(filter) = std::env::var("ANDROID_EBPF_QA_FILTER") {
             match filter.as_str() {
                 "read" => self.query.operation = Some(IoOperation::Read),

@@ -145,8 +145,10 @@ layout was verified separately on saved actual data in all three themes.
 - The complete visible-graph/filter/theme/drilldown matrix is not finished.
   Histogram drilldown, full OS accessibility, and all system-theme transitions
   require further work or evidence.
-- Unknown Perfetto clocks need a consistent unavailable-time representation
-  across plot axes, time filters, and whole-session temporal aggregation.
+- Unsupported Perfetto clocks now have unavailable normalized time across axes,
+  filters, temporal aggregation, selection Summary, Compare and exports. Host
+  regressions preserve full count/volume and raw evidence for unknown/mixed clocks;
+  physical unsupported-clock capture and clock normalization remain unverified.
 - Retained-detail FilePath coverage is labeled as such. A whole-session coverage
   denominator beyond the retained analysis window is not yet provided.
 - A previously observed intermittent native startup access violation has not

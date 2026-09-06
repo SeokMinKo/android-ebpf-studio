@@ -30,6 +30,21 @@ assignment. Multiple candidates remain attached to the completion. Missing
 latency and queue wait are `None`, never a fabricated zero. Request insert is
 optional and queue wait requires a unique, earlier insert candidate.
 
+Unsupported ftrace bundle clocks also make normalized completion/start time
+unavailable. Those observations retain raw timestamps and clock IDs, device,
+sector and bytes, but cannot establish a session origin or enter temporal bins.
+Time filters exclude them explicitly; address/chunk views can still select them.
+If any selected observation lacks normalized time, the full selection's span and
+throughput are unavailable, including when known and unknown clocks are mixed.
+Known-clock subset bounds are labeled separately. Compare follows the same rule
+independently for each side; JSON uses null and CSV leaves normalized time empty
+while retaining the original timestamp/clock in its evidence column.
+
+This is an explicit limitation of the current decoder, not ClockSnapshot-based
+normalization support. Host regressions exercise all-unknown and mixed clocks,
+replay, time filters, selection summaries and exports. Physical unsupported-clock
+acceptance has not been performed.
+
 The tracepoint PID is a **TID**. Completion context is not used as the issuer.
 Raw process/thread snapshots and process age metadata are preserved. The latest
 dated snapshot at or before issue provides a candidate TGID/name only if process

@@ -222,7 +222,9 @@ impl AxisMetric {
         graph: Option<&IoTransactionGraph>,
     ) -> Option<f64> {
         match self {
-            Self::TimeMs => Some(io.completion.ts_ns.saturating_sub(origin_ns) as f64 / 1e6),
+            Self::TimeMs => io
+                .completion_timestamp()
+                .map(|ts| ts.saturating_sub(origin_ns) as f64 / 1e6),
             Self::Sector => Some(io.issue.sector as f64),
             Self::AddressKiB => Some(io.issue.sector as f64 / 2.0),
             Self::ChunkKiB => Some(io.issue.bytes as f64 / 1024.0),
@@ -854,18 +856,21 @@ impl StudioApp {
     }
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
-        self.reanalysis.source_start_ns = Some(loaded.source_start_ns);
+        self.reanalysis.source_start_ns = loaded.source_start_ns;
         self.reanalysis.source_end_ns = loaded.source_end_ns;
         self.reanalysis.source_count = loaded.source_completed_ios;
         self.reanalysis.window = loaded.window_ns;
         self.reanalysis.elapsed_ms = loaded.load_elapsed_ms;
-        let (a, b) = loaded
-            .window_ns
-            .unwrap_or((loaded.source_start_ns, loaded.source_end_ns));
-        self.reanalysis.draft = [
-            ((a - loaded.source_start_ns) as f64 / 1e6).to_string(),
-            ((b - loaded.source_start_ns) as f64 / 1e6).to_string(),
-        ];
+        self.reanalysis.draft = loaded.source_start_ns.zip(loaded.source_end_ns).map_or(
+            [String::new(), String::new()],
+            |(origin, end)| {
+                let (a, b) = loaded.window_ns.unwrap_or((origin, end));
+                [
+                    ((a.saturating_sub(origin)) as f64 / 1e6).to_string(),
+                    ((b.saturating_sub(origin)) as f64 / 1e6).to_string(),
+                ]
+            },
+        );
         self.recent = loaded
             .engine
             .completed_ios()
@@ -1986,29 +1991,29 @@ impl StudioApp {
             summary_card(
                 &mut columns[0],
                 "Logging time (observed)",
-                format_duration(summary.logging_ns),
+                summary
+                    .logging_ns
+                    .map_or("Unavailable".into(), format_duration),
             );
             summary_card(
                 &mut columns[1],
                 "Busy time",
-                summary.busy_ns.map_or("Not measured".into(), |busy| {
-                    format!(
-                        "{} ({:.1}%)",
-                        format_duration(busy),
-                        ratio(busy, summary.logging_ns)
-                    )
-                }),
+                summary
+                    .busy_ns
+                    .zip(summary.logging_ns)
+                    .map_or("Not measured".into(), |(busy, span)| {
+                        format!("{} ({:.1}%)", format_duration(busy), ratio(busy, span))
+                    }),
             );
             summary_card(
                 &mut columns[2],
                 "Idle time",
-                summary.idle_ns.map_or("Not measured".into(), |idle| {
-                    format!(
-                        "{} ({:.1}%)",
-                        format_duration(idle),
-                        ratio(idle, summary.logging_ns)
-                    )
-                }),
+                summary
+                    .idle_ns
+                    .zip(summary.logging_ns)
+                    .map_or("Not measured".into(), |(idle, span)| {
+                        format!("{} ({:.1}%)", format_duration(idle), ratio(idle, span))
+                    }),
             );
             summary_card(
                 &mut columns[3],
@@ -2397,6 +2402,13 @@ impl StudioApp {
         ui.small("Queue: insert to issue, when measured. The device/driver interval is issue to completion. No request chosen? This page starts with the slowest in the current filters.");
         if let Some(evidence) = &io.evidence {
             ui.heading("Perfetto block observation");
+            ui.label(format!(
+                "Raw completion timestamp {} ns · ftrace clock {}",
+                io.completion.ts_ns, evidence.clock
+            ));
+            if io.completion_timestamp().is_none() {
+                ui.label("Session time unavailable: this ftrace clock has no supported normalization. Raw timestamp, count, bytes and address are preserved.");
+            }
             ui.label(format!(
                 "Timing: {:?} · {}",
                 evidence.timing_confidence, evidence.reason
@@ -2872,7 +2884,11 @@ impl StudioApp {
                                     .unwrap_or_else(|| origins[0].file.fallback_label())
                             };
                             for (value, width) in [
-                                (io.completion.ts_ns.to_string(), 145.0),
+                                (
+                                    io.completion_timestamp()
+                                        .map_or("Unavailable".into(), |ts| ts.to_string()),
+                                    145.0,
+                                ),
                                 (operation_label(io.issue.operation).into(), 65.0),
                                 (access_label(io.access_pattern).into(), 100.0),
                                 (io.issue.bytes.to_string(), 80.0),
