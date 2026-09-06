@@ -217,6 +217,7 @@ impl DirectionSummary {
 
 #[derive(Debug, Default)]
 struct SelectionSummary {
+    timeline:Option<TimelineView>,
     window_series:Option<crate::window_series::WindowSeries>,
     categories:BTreeMap<String,BTreeMap<String,(u64,u64)>>,
     host_bw:Option<crate::host_bw::HostBandwidth>,

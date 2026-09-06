@@ -75,6 +75,7 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
     constrain_summary_width(ui);
     let Some(axis)=summary.metric_axis else {return;};
     ui.strong(format!("{} · distribution",axis.label()));
+    if summary.timeline.is_some() {ui.small("Timeline cohort: measured issue-to-completion latency distribution and request categories. Unpaired completions remain in request/byte totals; their missing latency is excluded from percentiles.");}
     ui.small(if summary.window_series.as_ref().is_some_and(|s|s.metric.device_activity()) {"Full-source device activity, before display sampling. Exact nearest-rank percentiles of available activity samples."}else{"Retained graph cohort, before display sampling. Exact nearest-rank percentiles; unmeasured values are excluded."});
     match axis {
         AxisMetric::IssueQueueDepth=> {ui.small("Observed per-device requests in flight immediately after issue, before analysis filters. Perfetto reconstructs uniquely paired intervals; unpaired/sampled requests are absent. This is not hardware or unsampled device QD.");}
@@ -325,6 +326,10 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
     writer.write_record(["definition",metric,"all","histogram [lower,upper); final upper inclusive","","exact nearest-rank percentiles; retained graph cohort","not kernel aggregate"])?;
     writer.write_record(["population",metric,"all","","",&s.keys.len().to_string(),"full-resolution graph requests"])?;
     writer.write_record(["unplottable_source",metric,"all","","",&s.unplottable_rows.to_string(),"filtered source requests with missing axes"])?;
+    if let Some(t)=&s.timeline {
+        writer.write_record(["timeline_definition",t.mode.label(),"all","","","Issue/complete events, request lifetime only when issue measured. Rectangle selects completion endpoints and shown rows. Latency histogram excludes missing duration; request/byte totals retain unpaired completions.","timestamps ns; one unique request per row export"])?;
+        for p in &t.points {writer.write_record(["timeline_request",t.mode.label(),&format!("{} / {:?}",t.lanes[p.row-1],p.key),&p.start_ns.map_or("unavailable".into(),|v|v.to_string()),&p.end_ns.to_string(),operation_label(p.operation),"issue/complete ns"])?;}
+    }
     if let Some(b)=&s.host_bw {
         writer.write_record(["definition","Host BW","all",&b.start_ns.to_string(),&b.end_ns.to_string(),"Inclusive completion-counted full Read + Write payload; Discard/Flush/Other extents excluded; issue-to-completion activity union includes all operations and processes, clipped to range; multiple devices use any-device-active wall time","ns"])?;
         writer.write_record(["excluded_extent_bytes","Host BW","Other","","",&b.bytes.other.to_string(),"bytes, not transferred payload"])?;

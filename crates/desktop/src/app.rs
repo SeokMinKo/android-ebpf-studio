@@ -43,6 +43,7 @@ include!("selection.rs");
 include!("graph_summary_ui.rs");
 include!("footprint_ui.rs");
 include!("window_series_ui.rs");
+include!("timeline_ui.rs");
 include!("host_bw_ui.rs");
 include!("plot_style.rs");
 include!("axis_range.rs");
@@ -120,10 +121,12 @@ enum ExplorerPreset {
     IdleIntervals,
     BurstPayload,
     ConnectedFootprint,
+    CommandTimeline,
+    RequestGantt,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 24] = [
+    const ALL: [Self; 26] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -148,6 +151,8 @@ impl ExplorerPreset {
         Self::IdleIntervals,
         Self::BurstPayload,
         Self::ConnectedFootprint,
+        Self::CommandTimeline,
+        Self::RequestGantt,
     ];
 
     fn label(self) -> &'static str {
@@ -176,6 +181,8 @@ impl ExplorerPreset {
             Self::IdleIntervals => "Continuous idle intervals",
             Self::BurstPayload => "Cumulative data within bursts",
             Self::ConnectedFootprint => "Connected LBA footprint",
+            Self::CommandTimeline => "Block command timeline",
+            Self::RequestGantt => "Request Gantt",
         }
     }
 
@@ -206,6 +213,16 @@ impl ExplorerPreset {
                 Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
             }
             Self::Custom => None,
+            Self::CommandTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Timeline(TimelineMode::Commands),
+                GroupBy::Direction,
+            )),
+            Self::RequestGantt => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Timeline(TimelineMode::Requests),
+                GroupBy::Direction,
+            )),
             Self::ChunkTimeline => {
                 Some((AxisMetric::TimeMs, AxisMetric::ChunkKiB, GroupBy::Direction))
             }
@@ -319,6 +336,7 @@ enum AxisMetric {
     RollingC2cBandwidth,
     RollingD2dBandwidth,
     Window(crate::window_series::WindowMetric),
+    Timeline(TimelineMode),
 }
 
 impl AxisMetric {
@@ -366,6 +384,7 @@ impl AxisMetric {
             Self::RollingC2cBandwidth => "Rolling C2C BW (MiB/s)",
             Self::RollingD2dBandwidth => "Rolling D2D BW (MiB/s)",
             Self::Window(metric) => metric.label(),
+            Self::Timeline(mode) => mode.label(),
         }
     }
 
@@ -416,7 +435,7 @@ impl AxisMetric {
                 .issue_bandwidth
                 .as_ref()
                 .and_then(|r| r.mib_s()),
-            Self::Window(_) => None,
+            Self::Window(_) | Self::Timeline(_) => None,
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
@@ -457,7 +476,8 @@ impl AxisMetric {
             | Self::LatencyPerKiB
             | Self::RollingC2cBandwidth
             | Self::RollingD2dBandwidth
-            | Self::Window(_) => format!("{value:.3}"),
+            | Self::Window(_)
+            | Self::Timeline(_) => format!("{value:.3}"),
         }
     }
 }
@@ -1867,7 +1887,7 @@ impl StudioApp {
                 ui.selectable_value(&mut self.selection.enabled, false, "Pan");
                 ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
             });
-            if !matches!(self.y_axis,AxisMetric::Window(_)) {
+            if !matches!(self.y_axis,AxisMetric::Window(_)|AxisMetric::Timeline(_)) {
             if !self.connected_footprint() {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color Category");
@@ -1919,6 +1939,9 @@ impl StudioApp {
             && matches!(self.y_axis, AxisMetric::Sector | AxisMetric::AddressKiB)
         {
             self.footprint_lanes_ui(ui);
+            self.table_ui(ui);
+        } else if matches!(self.y_axis, AxisMetric::Timeline(_)) {
+            self.timeline_ui(ui);
             self.table_ui(ui);
         } else if matches!(self.y_axis, AxisMetric::Window(_)) {
             self.window_series_ui(ui);

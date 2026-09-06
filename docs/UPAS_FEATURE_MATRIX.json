@@ -70,12 +70,12 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified block request slice; other-layer acquisition, exhaustive sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "send/complete timestamps by command/layer",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Measured issue/completion endpoints on relative ms axis. Separate device/operation lanes; hollow issue and filled completion markers. Rectangle selects completion endpoints and displayed rows; point/segment selects one unique request. Summary latency distributions exclude missing duration but request/payload totals retain it.",
+    "target_ui": "Explore Block command timeline preset24; existing right-hand Summary latency histogram/percentiles/CDF and cohort category pies",
+    "capture_changes": "Uses measured CompletedIo.issue_timestamp and completion, preserving timing confidence; no fabricated issue. Current plot covers block requests. Other acquired layers remain in Investigate; protocol-specific command/device extensions still require acquisition audit.",
+    "verification": "Actual uPAS preparation AST executed on equivalent 3-request fixture (1983-1995 and2121-2140). Independent raw-event/CSV oracle and native real8247 I/O, Read7415, point1, area/zoom/back, missing issue, and all207 Gantt pages with invariant Summary. Desktop lib84 passed/2ignored and compatible all-target tests/Clippy/fmt passed. See UPAS_TIMELINE_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -248,12 +248,12 @@
       "send_q",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified block request slice; other-layer acquisition, exhaustive sweep/performance/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "[send_time,complete_time] request intervals",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Measured issue/completion endpoints on relative ms axis. One chronological request row with issue-to-completion lifetime segment, completion-only when issue unmeasured. 40 rows/page. Rectangle selects completion endpoints and displayed rows; point/segment selects one unique request. Summary latency distributions exclude missing duration but request/payload totals retain it.",
+    "target_ui": "Explore Request Gantt preset25; existing right-hand Summary latency histogram/percentiles/CDF and cohort category pies",
+    "capture_changes": "Uses measured CompletedIo.issue_timestamp and completion, preserving timing confidence; no fabricated issue. Current plot covers block requests. Other acquired layers remain in Investigate; protocol-specific command/device extensions still require acquisition audit.",
+    "verification": "Actual uPAS preparation AST executed on equivalent 3-request fixture (1983-1995 and2121-2140). Independent raw-event/CSV oracle and native real8247 I/O, Read7415, point1, area/zoom/back, missing issue, and all207 Gantt pages with invariant Summary. Desktop lib84 passed/2ignored and compatible all-target tests/Clippy/fmt passed. See UPAS_TIMELINE_CHECKPOINT.md.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

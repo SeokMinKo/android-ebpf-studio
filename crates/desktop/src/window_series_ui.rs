@@ -1,4 +1,5 @@
 fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:AxisMetric,y:AxisMetric,origin:u64,mut bw:BandwidthContext,width_ms:u64)->SelectionSummary {
+    if let AxisMetric::Timeline(mode)=y {return compute_timeline_selection(engine,request,mode,origin,bw);}
     let AxisMetric::Window(metric)=y else {
         let mut summary=compute_selection(engine,request,x,y,origin);bw.attach(&mut summary);return summary;
     };

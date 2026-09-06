@@ -679,7 +679,7 @@ fn compare_controls(
     ui.horizontal_wrapped(|ui| {
         let old=state.preset;
         egui::ComboBox::from_id_salt("compare-preset").selected_text(state.preset.label()).show_ui(ui,|ui| {
-            for preset in ExplorerPreset::ALL.into_iter().filter(|p|!p.query().is_some_and(|(_,y,_)|matches!(y,AxisMetric::Window(_)))) { ui.selectable_value(&mut state.preset,preset,preset.label()); }
+            for preset in ExplorerPreset::ALL.into_iter().filter(|p|*p!=ExplorerPreset::ConnectedFootprint&&!p.query().is_some_and(|(_,y,_)|matches!(y,AxisMetric::Window(_)|AxisMetric::Timeline(_)))) { ui.selectable_value(&mut state.preset,preset,preset.label()); }
         });
         if old!=state.preset && let Some((x,y,group))=state.preset.query() {state.axes=[x,y];state.category=group;}
         ui.checkbox(&mut state.linked_bounds,"Link X/Y view");

@@ -22,6 +22,7 @@ struct RenderQa {
     stable_rect: Option<egui::Rect>,
     layout_stable_since: Option<Instant>,
     point_target: Option<egui::Pos2>,
+    stable_point: Option<egui::Pos2>,
     color_picker_button: Option<egui::Pos2>,
     reanalysis_restore_button: Option<egui::Pos2>,
     reanalysis_before_first: Option<u64>,
@@ -74,15 +75,15 @@ impl StudioApp {
         let Ok(gesture) = std::env::var("ANDROID_EBPF_QA_GESTURE") else {
             return;
         };
-        if gesture=="lane-pagination" {
+        if gesture=="lane-pagination" || gesture=="timeline-pagination" {
             if self.render_qa.input_step>=7 || self.render_qa.frames<20 || self.render_qa.frames<self.render_qa.range_wait_frame+6 || self.footprint.pending.is_some() || self.render_qa.lane_pages==0 {return;}
             let press=self.render_qa.filter_step.is_multiple_of(2);
             if press {
-                self.render_qa.lane_page_states.push(serde_json::json!({"page":self.render_qa.lane_page,"pages":self.render_qa.lane_pages,"visible":self.render_qa.lane_visible}));
+                self.render_qa.lane_page_states.push(serde_json::json!({"page":self.render_qa.lane_page,"pages":self.render_qa.lane_pages,"visible":self.render_qa.lane_visible,"summary":self.selection.all_summary.as_ref().map(|s|serde_json::json!({"count":s.3.keys.len(),"p50":s.3.metric.total.percentile(50),"p95":s.3.metric.total.percentile(95)}))}));
                 if self.render_qa.lane_returning || self.render_qa.lane_pages==1 {self.render_qa.input_step=7;return;}
                 if self.render_qa.lane_page+1==self.render_qa.lane_pages {self.render_qa.lane_returning=true;}
             }
-            let target=if self.render_qa.lane_returning {"previous-lanes"}else{"next-lanes"};
+            let target=if gesture=="timeline-pagination" {if self.render_qa.lane_returning {"timeline-previous"}else{"timeline-next"}}else if self.render_qa.lane_returning {"previous-lanes"}else{"next-lanes"};
             if let Some((rect,_))=self.render_qa.regions.get(target) {
                 let pos=rect.center();raw.events.push(egui::Event::PointerMoved(pos));
                 raw.events.push(egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:press,modifiers:Default::default()});
@@ -457,9 +458,13 @@ impl StudioApp {
         let Some(rect) = self.render_qa.plot_rect else {
             return;
         };
+        if gesture=="point" && self.render_qa.input_step==0 && self.render_qa.point_target.is_none_or(|p|!rect.contains(p)) {
+            self.render_qa.stable_rect=None;self.render_qa.stable_point=None;self.render_qa.layout_stable_since=None;return;
+        }
         if self.render_qa.input_step == 0 {
-            if self.render_qa.stable_rect != Some(rect) {
+            if self.render_qa.stable_rect != Some(rect) || gesture=="point" && self.render_qa.stable_point!=self.render_qa.point_target {
                 self.render_qa.stable_rect = Some(rect);
+                self.render_qa.stable_point = self.render_qa.point_target;
                 self.render_qa.layout_stable_since = Some(Instant::now());
             }
             if self
@@ -470,7 +475,7 @@ impl StudioApp {
                 return;
             }
         }
-        let point = self.render_qa.point_target.unwrap_or(rect.center());
+        let point = self.render_qa.stable_point.or(self.render_qa.point_target).unwrap_or(rect.center());
         let (start, end) = if gesture == "point" {
             (point, point)
         } else if gesture == "window-area" {
@@ -639,6 +644,11 @@ impl StudioApp {
     }
 
     fn apply_qa_preset(&mut self) {
+        // The preset is applied after the first rendered frame. Discard that
+        // frame's old-axis coordinates before a background summary becomes ready.
+        self.render_qa.plot_rect=None;self.render_qa.point_target=None;
+        self.render_qa.stable_rect=None;self.render_qa.stable_point=None;
+        self.render_qa.layout_stable_since=None;
         if let Ok(device)=std::env::var("ANDROID_EBPF_QA_DEVICE_FILTER") {self.query.device=device;self.invalidate_query();}
         if let Ok(mode) = std::env::var("ANDROID_EBPF_QA_FOOTPRINT") {
             self.footprint.mode = match mode.as_str() {
@@ -783,6 +793,10 @@ impl StudioApp {
                     {
                         120
                     } else if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref()
+                        == Ok("timeline-pagination")
+                    {
+                        180
+                    } else if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref()
                         == Ok("lane-pagination")
                     {
                         45
@@ -809,6 +823,7 @@ impl StudioApp {
             report["comparison_explore"] = self.compare_qa_report();
             report["filter_states"]=serde_json::json!(self.render_qa.filter_states);
             report["lane_page_states"]=serde_json::json!(self.render_qa.lane_page_states);
+            report["timeline"]=self.selection.summary.as_ref().or_else(||self.selection.all_summary.as_ref().map(|v|&v.3)).and_then(|s|s.timeline.as_ref()).map_or(serde_json::Value::Null,|v|serde_json::json!(v));
             report["footprint"] = self.footprint.view.as_ref().map_or(serde_json::Value::Null, |v| serde_json::json!({"mode":v.mode.label(),"unique":v.unique,"memberships":v.memberships,"groups":v.lanes.iter().map(|(k,p)|(k,p.len())).collect::<BTreeMap<_,_>>() }));
             if self.connected_footprint() && let Some(view)=&self.footprint.view {
                 report["connected_footprint"]=serde_json::json!({"completion_selected_rectangles":true,"points":view.lanes.iter().flat_map(|(lane,points)|points.iter().map(move|p|serde_json::json!({"lane":lane,"key":p.point.request,"issue_ms":p.issue_ms,"completion_ms":p.point.coordinates[0],"sector":p.point.coordinates[1],"end_sector":p.end_sector,"operation":p.operation}))).collect::<Vec<_>>()});
