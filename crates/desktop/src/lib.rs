@@ -13,3 +13,4 @@ pub mod perfetto_session;
 pub mod performance;
 pub mod session;
 pub mod simulator;
+pub mod window_series;

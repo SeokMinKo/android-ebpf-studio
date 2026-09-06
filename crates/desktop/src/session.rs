@@ -7,9 +7,9 @@ use std::{
 };
 
 use android_ebpf_protocol::{
-    AggregateSnapshot, AnalysisEngine, AnalysisSummary, HeavyHitterSnapshot, ProbeCapabilities,
-    SegmentRecord, SessionError, SessionReader, StackFingerprintRecord, StorageEvent,
-    TriggerRecord, WireRecord, write_record,
+    AggregateSnapshot, AnalysisEngine, AnalysisSummary, HeavyHitterSnapshot, IoOperation,
+    ProbeCapabilities, SegmentRecord, SessionError, SessionReader, StackFingerprintRecord,
+    StorageEvent, TriggerRecord, WireRecord, write_record,
 };
 
 pub struct SessionWriter {
@@ -452,6 +452,58 @@ pub(crate) fn ensure_distinct_export(source: &Path, destination: &Path) -> anyho
             "Choose a different export filename; the original session must be preserved"
         );
     }
+    Ok(())
+}
+
+/// One row per retained request in an already filtered snapshot. File candidates
+/// stay together on that row, so multi-origin membership never duplicates bytes.
+pub fn export_completed_io_csv(path: &Path, engine: &AnalysisEngine) -> anyhow::Result<()> {
+    let mut writer = csv::Writer::from_path(path)?;
+    writer.write_record([
+        "request_id",
+        "device",
+        "issue_ns",
+        "completion_ns",
+        "sector_512b",
+        "end_sector_exclusive",
+        "extent_bytes",
+        "rw_payload_bytes",
+        "operation",
+        "issuer_pid",
+        "issuer_tid",
+        "issuer_comm",
+        "queue_latency_ns",
+        "device_latency_ns",
+        "total_latency_ns",
+        "access_pattern",
+        "issue_depth_observed",
+        "d2d_ns",
+        "c2c_ns",
+        "file_candidates_json",
+        "completed_io_json",
+    ])?;
+    for io in engine.completed_ios() {
+        let graph = engine.transaction_for(io);
+        let origins = graph.file_origins_for(android_ebpf_protocol::block_request_node_id(
+            io.issue.request_id,
+        ));
+        let payload = if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write) {
+            io.issue.bytes
+        } else {
+            0
+        };
+        writer.write_record([
+            io.issue.request_id.to_string(), format!("{}:{}",io.issue.device_major,io.issue.device_minor),
+            io.issue_timestamp().map(|v|v.to_string()).unwrap_or_default(), io.completion.ts_ns.to_string(),
+            io.issue.sector.to_string(), io.issue.sector.saturating_add(io.issue.sectors as u64).to_string(),
+            io.issue.bytes.to_string(), payload.to_string(), format!("{:?}",io.issue.operation),
+            io.issuer_pid().map(|v|v.to_string()).unwrap_or_default(), io.issuer_tid().map(|v|v.to_string()).unwrap_or_default(), io.issue.comm.clone(),
+            io.queue_latency_ns.map(|v|v.to_string()).unwrap_or_default(), io.device_latency_ns.map(|v|v.to_string()).unwrap_or_default(), io.total_latency_ns.map(|v|v.to_string()).unwrap_or_default(), format!("{:?}",io.access_pattern),
+            io.detail_timing.issue_depth.map(|v|v.to_string()).unwrap_or_default(), io.detail_timing.issue_gap_ns.map(|v|v.to_string()).unwrap_or_default(), io.detail_timing.completion_gap_ns.map(|v|v.to_string()).unwrap_or_default(),
+            serde_json::to_string(&origins.iter().map(|v|serde_json::json!({"file":v.file,"path":v.path,"edge_confidence":v.confidence})).collect::<Vec<_>>())?, serde_json::to_string(io)?,
+        ])?;
+    }
+    writer.flush()?;
     Ok(())
 }
 

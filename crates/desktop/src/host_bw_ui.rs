@@ -53,6 +53,12 @@ fn host_bw_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
     if b.bytes.other>0 {ui.small(format!("Excluded non-R/W command extents: {} (for example, Discard ranges)",format_bytes(b.bytes.other)));}
     ui.label(format!("Analysis time: {}",format_latency(Some(b.duration_ns))));
     ui.label(format!("Active/Busy: {} · Idle: {}",format_latency(b.busy_ns),format_latency(b.idle_ns)));
+    if let Some((busy,idle))=b.busy_ns.zip(b.idle_ns).filter(|_|b.duration_ns>0) {
+        egui::CollapsingHeader::new("Device Busy / Idle share").default_open(std::env::var("ANDROID_EBPF_QA_IDLE_SHARE").is_ok()).show(ui,|ui| {
+            ui.small("Denominator: the same analysis wall time. Includes every observed process on the selected devices; overlapping activity counts once.");
+            selection_pie_values(ui,&[busy,idle],&["Busy","Idle"],|ns|format_latency(Some(ns)));
+        });
+    }
     if b.busy_ns.is_none() {
         ui.small(format!("Observed active-time lower bound: {}",format_latency(Some(b.observed_busy_ns))));
         ui.colored_label(amber(),format!("w/o Idle unavailable: {}",b.coverage));
@@ -96,6 +102,7 @@ mod bandwidth_ui_tests {
         write_graph_summary_csv(&path,&s).unwrap();
         let records=csv::Reader::from_path(&path).unwrap().records().collect::<Result<Vec<_>,_>>().unwrap();
         assert!(records.iter().any(|r|&r[1]=="Host BW w/o Idle"&&&r[2]=="Read"&&r[5].parse::<f64>().unwrap()==1./7.&&&r[6]=="MiB/s"));
+        assert!(records.iter().any(|r|&r[0]=="device_time_share"&&&r[2]=="Busy"&&(r[5].parse::<f64>().unwrap()-700./7.5).abs()<1e-10));
         std::fs::remove_file(path).unwrap();
         app.query=AnalysisFilter::default();app.invalidate_query();app.rebuild_filtered();
         assert_eq!(app.analysis().completed_ios().len(),3);

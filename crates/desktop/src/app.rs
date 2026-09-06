@@ -42,6 +42,7 @@ include!("qa.rs");
 include!("selection.rs");
 include!("graph_summary_ui.rs");
 include!("footprint_ui.rs");
+include!("window_series_ui.rs");
 include!("host_bw_ui.rs");
 include!("plot_style.rs");
 include!("axis_range.rs");
@@ -107,10 +108,16 @@ enum ExplorerPreset {
     CompletionGapTimeline,
     NormalizedLatencyTimeline,
     CpuTimeline,
+    WindowBandwidth,
+    WindowIops,
+    CumulativePayload,
+    WindowBusyPercent,
+    WindowBusyMs,
+    WindowIdleMs,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 18] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -123,6 +130,12 @@ impl ExplorerPreset {
         Self::CompletionGapTimeline,
         Self::NormalizedLatencyTimeline,
         Self::CpuTimeline,
+        Self::WindowBandwidth,
+        Self::WindowIops,
+        Self::CumulativePayload,
+        Self::WindowBusyPercent,
+        Self::WindowBusyMs,
+        Self::WindowIdleMs,
     ];
 
     fn label(self) -> &'static str {
@@ -139,10 +152,17 @@ impl ExplorerPreset {
             Self::CompletionGapTimeline => "C2C completion gap over time",
             Self::NormalizedLatencyTimeline => "Latency per KiB over time",
             Self::CpuTimeline => "Issue CPU over time",
+            Self::WindowBandwidth => "Bandwidth by time window",
+            Self::WindowIops => "IOPS by time window",
+            Self::CumulativePayload => "Cumulative transferred data",
+            Self::WindowBusyPercent => "Device busy % over time",
+            Self::WindowBusyMs => "Active time by window",
+            Self::WindowIdleMs => "Idle time by window",
         }
     }
 
     fn query(self) -> Option<(AxisMetric, AxisMetric, GroupBy)> {
+        use crate::window_series::WindowMetric;
         match self {
             Self::LatencyTimeline => Some((
                 AxisMetric::TimeMs,
@@ -192,6 +212,36 @@ impl ExplorerPreset {
                 GroupBy::Direction,
             )),
             Self::CpuTimeline => Some((AxisMetric::TimeMs, AxisMetric::IssueCpu, GroupBy::Process)),
+            Self::WindowBandwidth => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::Bandwidth),
+                GroupBy::Direction,
+            )),
+            Self::WindowIops => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::Iops),
+                GroupBy::Direction,
+            )),
+            Self::CumulativePayload => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::CumulativePayload),
+                GroupBy::Direction,
+            )),
+            Self::WindowBusyPercent => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::BusyPercent),
+                GroupBy::None,
+            )),
+            Self::WindowBusyMs => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::BusyMs),
+                GroupBy::None,
+            )),
+            Self::WindowIdleMs => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::IdleMs),
+                GroupBy::None,
+            )),
         }
     }
 }
@@ -223,6 +273,7 @@ enum AxisMetric {
     CompletionGapMs,
     LatencyPerKiB,
     IssueCpu,
+    Window(crate::window_series::WindowMetric),
 }
 
 impl AxisMetric {
@@ -265,6 +316,7 @@ impl AxisMetric {
             Self::CompletionGapMs => "C2C completion gap (ms)",
             Self::LatencyPerKiB => "Device latency (ms/KiB)",
             Self::IssueCpu => "Issue CPU",
+            Self::Window(metric) => metric.label(),
         }
     }
 
@@ -305,6 +357,7 @@ impl AxisMetric {
                 }
             }
             Self::IssueCpu => io.issuer_cpu().map(|n| n as f64),
+            Self::Window(_) => None,
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
             }
@@ -342,7 +395,8 @@ impl AxisMetric {
             | Self::CriticalPathMs
             | Self::IssueGapMs
             | Self::CompletionGapMs
-            | Self::LatencyPerKiB => format!("{value:.3}"),
+            | Self::LatencyPerKiB
+            | Self::Window(_) => format!("{value:.3}"),
         }
     }
 }
@@ -502,6 +556,7 @@ impl CapturePhase {
 pub struct StudioApp {
     activity: Arc<crate::host_bw::ActivityTimeline>,
     footprint: FootprintState,
+    window_width_ms: u64,
     reanalysis: ReanalysisState,
     file_evidence_positions: Option<Vec<usize>>,
     selection: SelectionState,
@@ -532,6 +587,7 @@ pub struct StudioApp {
     disk_stats_view: DiskStatsView,
     filtered: Option<AnalysisEngine>,
     filtered_generation: u64,
+    filter_edit_epoch: u64,
     trend_view: Option<(u64, TrendData)>,
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
@@ -584,6 +640,7 @@ impl Default for StudioApp {
         Self {
             activity: Arc::default(),
             footprint: FootprintState::default(),
+            window_width_ms: 1000,
             reanalysis: ReanalysisState::default(),
             file_evidence_positions: None,
             selection: SelectionState {
@@ -618,6 +675,7 @@ impl Default for StudioApp {
             query: AnalysisFilter::default(),
             filtered: None,
             filtered_generation: u64::MAX,
+            filter_edit_epoch: 0,
             trend_view: None,
             recent: VecDeque::new(),
             capture: None,
@@ -1747,6 +1805,7 @@ impl StudioApp {
                 ui.selectable_value(&mut self.selection.enabled, false, "Pan");
                 ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
             });
+            if !matches!(self.y_axis,AxisMetric::Window(_)) {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color Category");
                 let previous_category = self.group_by;
@@ -1779,6 +1838,7 @@ impl StudioApp {
                     self.explorer_preset = ExplorerPreset::Custom;
                 }
             });
+            }
         });
         ui.add_space(10.0);
 
@@ -1795,6 +1855,9 @@ impl StudioApp {
             && matches!(self.y_axis, AxisMetric::Sector | AxisMetric::AddressKiB)
         {
             self.footprint_lanes_ui(ui);
+            self.table_ui(ui);
+        } else if matches!(self.y_axis, AxisMetric::Window(_)) {
+            self.window_series_ui(ui);
             self.table_ui(ui);
         } else {
             self.explorer_plot_ui(ui, false);
@@ -2896,6 +2959,9 @@ impl StudioApp {
             "Completed block I/O",
             "Current filters · all loaded detail rows · focus an Open button and press Enter for full I/O and FilePath evidence",
         );
+        if ui.button("Export table I/O CSV").clicked() {
+            self.export_io_cohort_csv(None);
+        }
         let mut open = None;
         let mut table_focused = false;
         card_frame().show(ui, |ui| {

@@ -1,4 +1,15 @@
 impl StudioApp {
+    fn export_io_cohort_csv(&mut self,keys:Option<std::collections::HashSet<IoSelectionKey>>) {
+        let Some(path)=rfd::FileDialog::new().set_file_name("storage-io-cohort.csv").add_filter("I/O CSV", &["csv"]).save_file() else {return;};
+        if let Some(source)=&self.session_path && let Err(error)=session::ensure_distinct_export(source,&path) {self.status=error.to_string();return;}
+        let engine=self.analysis().select_completed(|io|keys.as_ref().is_none_or(|k|k.contains(&selection_key(io))));
+        let tx=self.tx.clone();self.status="Exporting full-resolution I/O cohort in background…".into();
+        std::thread::spawn(move||{
+            let result=session::export_completed_io_csv(&path,&engine).map(|_|path).map_err(|e|e.to_string());
+            let _=tx.send(HostMessage::ViewExported(result));
+        });
+    }
+
     fn export_analysis_view(&mut self) {
         if self.is_running() {
             return;

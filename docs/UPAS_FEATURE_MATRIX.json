@@ -144,7 +144,7 @@
     "formula": "Shared time/LBA axes, device+PID identities, four groups/page, all groups reachable; multi-origin memberships distinct from unique total",
     "target_ui": "FilePath / Process / File I/O process candidate lanes",
     "capture_changes": "Uses full-resolution retained graph cohort and existing source evidence; no new kernel probe in this slice",
-    "verification": "Protocol correlation/device separation/filter-preservation and missing-data regressions; native actual saved Samsung trace8294 I/O; independent Python oracle new-metrics-oracle.json and verify_locality.py. Group-page/PID input/full-feature matrix and performance sweep still pending.",
+    "verification": "Native Next visited all35 pages/139 groups; Previous and unchanged8247-I/O Summary verified. PID7780->absent->Clear:2477->0->8294 across engine/lanes/Summary/detail CSV. Broader matrix/performance remains pending.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -305,12 +305,12 @@
       "idle",
       "send_time"
     ],
-    "status": "pending",
+    "status": "partial: cumulative timeline implemented; idle-separated bursts pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "cumulative chunk_length within idle-separated activity groups (0.5ms threshold)",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Read/Write completion payload cumulative from analysis start; empty windows carry forward and selection preserves drawn cumulative values. uPAS idle-separated0.5ms resets remain pending.",
+    "target_ui": "Explore Cumulative transferred data + linked Summary",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -650,12 +650,12 @@
       "bandwidth",
       "filename"
     ],
-    "status": "pending",
+    "status": "partial: fixed-window distribution verified; rolling C2C equivalent pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "bandwidth values sorted ascending",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Exact fixed-window rate distribution, one sample per elapsed window, independent of I/O density. Rolling bandwidth remains a different population.",
+    "target_ui": "Linked BW Summary",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -692,12 +692,12 @@
       "filename",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified slice; full sweep/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "chunk_length sum / fixed time-bin duration",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Completion-counted retained R/W bytes / actual elapsed window seconds /1048576; empty windows included; final partial duration exact. One statistical sample per window.",
+    "target_ui": "Explore Bandwidth by time window + linked Summary",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -783,12 +783,12 @@
       "lba",
       "send_db"
     ],
-    "status": "pending",
+    "status": "partial: window activity implemented; continuous busy-run duration pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "uPAS complete_q/time_interval heuristic; replace with clipped interval union",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Clipped full-source selected-device issue-completion interval union / actual window duration *100, or active ns/1e6. Exact/proven reconstructed coverage required.",
+    "target_ui": "Explore Device busy % / Active time by window + linked Summary",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -801,12 +801,12 @@
       "busy",
       "filename"
     ],
-    "status": "pending",
+    "status": "partial: window distribution implemented; continuous busy-run distribution pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "sorted busy durations",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Exact active milliseconds per elapsed window; distinct from maximal continuous busy-interval durations.",
+    "target_ui": "Linked Active time Summary",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -824,12 +824,12 @@
       "send_db",
       "send_time"
     ],
-    "status": "pending",
+    "status": "partial: window idle time implemented; continuous idle-gap trend pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "uPAS send_q==1 time_interval; use device busy complement",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Actual elapsed window ns minus full-source clipped busy union, divided by1e6. Unknown coverage remains unavailable.",
+    "target_ui": "Explore Idle time by window + linked Summary",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -843,12 +843,12 @@
       "idle",
       "send_time"
     ],
-    "status": "pending",
+    "status": "implemented and independently verified slice; full sweep/install pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "idle / running_time, active / running_time",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Busy/analysis wall time and Idle/analysis wall time *100; same device-wide union and coverage gates as Host BW. Duration0/unknown unavailable.",
+    "target_ui": "Summary > Host BW > Device Busy / Idle share + CSV",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -861,12 +861,12 @@
       "filename",
       "idle"
     ],
-    "status": "pending",
+    "status": "partial: window distribution implemented; continuous idle-gap distribution pending",
     "source_file": "source/uPAS/UpasAnalyzer.py",
-    "formula": "sorted idle durations",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Exact idle milliseconds per elapsed window, including zero for fully busy windows; not maximal idle-gap durations.",
+    "target_ui": "Linked Idle time Summary",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {
@@ -876,12 +876,12 @@
     "line": 876,
     "source_tab": "RealTime",
     "fields": [],
-    "status": "pending",
+    "status": "implemented slice; full source/log navigation audit pending",
     "source_file": "source/uPAS/UpasCallback.py",
-    "formula": "filtered I/O fields",
-    "target_ui": "Explore main graph with linked right-hand Summary; never a separate aggregate-graph catalogue",
-    "capture_changes": "Audit actual source fields and completeness; not yet finalized",
-    "verification": "Pending per-feature equivalent-input comparison; current linked numeric axes have deterministic and native real-trace tests",
+    "formula": "Common-filter completed I/O table; one-row-per-request table/graph-cohort CSV, candidate paths/confidence together, exact CompletedIo JSON, missing measurements blank.",
+    "target_ui": "Existing Completed block I/O table / Summary I/O CSV",
+    "capture_changes": "Retained CompletedIo plus full-source ActivityTimeline and coverage provenance; no additional kernel probe in this slice.",
+    "verification": "Deterministic boundaries/empty/partial/unknown tests; native real8247-I/O trace6 window presets and independent raw oracle; PID input/change/Clear and35 Process lane pages. See2026-09-07 checkpoint.",
     "units": "Explicit eBPF axis unit; binary sizes KiB/MiB, time ms/ns. uPAS MB label often denotes KiB/1024 (MiB)."
   },
   {

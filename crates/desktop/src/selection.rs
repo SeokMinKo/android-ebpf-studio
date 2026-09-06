@@ -217,6 +217,7 @@ impl DirectionSummary {
 
 #[derive(Debug, Default)]
 struct SelectionSummary {
+    window_series:Option<crate::window_series::WindowSeries>,
     categories:BTreeMap<String,BTreeMap<String,(u64,u64)>>,
     host_bw:Option<crate::host_bw::HostBandwidth>,
     source_rows: usize,
@@ -388,13 +389,13 @@ impl StudioApp {
         self.selection.discard_pending = false;
         self.selection.requested_at = Some(Instant::now());
         let engine = self.analysis().select_completed(|_| true);
-        let bw=self.bandwidth_context(Some(request));
+        let bw=self.bandwidth_context(if matches!(self.y_axis,AxisMetric::Window(_)){None}else{Some(request)});
+        let width=self.window_width_ms;
         let (tx, rx) = bounded(1);
         self.selection.pending = Some(rx);
         let (x, y, origin) = (self.x_axis, self.y_axis, self.time_origin());
         std::thread::spawn(move || {
-            let mut s=compute_selection(&engine, request, x, y, origin);
-            bw.attach(&mut s);
+            let s=compute_graph_selection(&engine,request,x,y,origin,bw,width);
             let _ = tx.send(s);
         });
     }
@@ -420,6 +421,7 @@ impl StudioApp {
         self.poll_graph_summary();
         let live=self.is_running();
         let mut target_query = None;
+        let mut export_keys = None;
         let mut panel = egui::Panel::right("selection-summary")
             .default_size(340.0)
             .size_range(260.0..=440.0)
@@ -430,7 +432,7 @@ impl StudioApp {
         panel.show(ui, |ui| {
             ui.heading("Graph summary");
             ui.horizontal_wrapped(|ui| {
-                let zoom_response = ui.add_enabled(self.selection.summary.as_ref().is_some_and(|s|!s.keys.is_empty()),egui::Button::new("Zoom selection"));
+                let zoom_response = ui.add_enabled(self.selection.summary.as_ref().is_some_and(|s|s.bounds.is_some()),egui::Button::new("Zoom selection"));
                 qa_region(&mut self.render_qa,"zoom",zoom_response.rect,ui.clip_rect());
                 self.render_qa.zoom_button = Some(zoom_response.rect.center());
                 if zoom_response.clicked() {
@@ -465,7 +467,8 @@ impl StudioApp {
                 let selected = self.selection.summary.is_some();
                 let Some(s) = self.selection.summary.as_ref().or_else(|| self.selection.all_summary.as_ref().map(|v| &v.3)) else { ui.spinner(); ui.label("Calculating current graph summary…"); return; };
                 ui.small(if selected { "Selected graph region · Clear restores full filtered graph" } else { "Full filtered graph · select an area to narrow the summary" });
-                ui.small(format!("{} filtered source I/O · {} cannot be plotted on these axes",s.source_rows,s.unplottable_rows));
+                if let Some(series)=&s.window_series {ui.small(format!("{} filtered source I/O · {} time-window samples",s.source_rows,series.samples.len()));}
+                else {ui.small(format!("{} filtered source I/O · {} cannot be plotted on these axes",s.source_rows,s.unplottable_rows));}
                 if live && !selected {ui.small("Live snapshot · refreshed in background; incoming I/O may be newer");}
                 if selected && ui.button("Apply selection to analysis filters").clicked() {
                     let mut query=self.query.clone();
@@ -482,7 +485,7 @@ impl StudioApp {
                 }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(s.keys.len().to_string()).size(24.0).strong().color(ink()));
-                    ui.label(if selected {"selected I/O"} else {"plottable I/O"}).on_hover_text("Full-resolution completed requests in this graph cohort; display sampling never changes this count");
+                    ui.label(if selected {"selected I/O"} else if s.window_series.is_some() {"contributing I/O"}else{"plottable I/O"}).on_hover_text("Full-resolution completed requests in this graph cohort; display sampling never changes this count");
                 });
                 ui.label(format!("End − Start: {}",format_latency(s.duration_ns())));
                 if let Some((start,end))=s.start_ns.zip(s.end_ns) {
@@ -494,6 +497,8 @@ impl StudioApp {
                 });
                 ui.add_space(6.0);ui.separator();
                 graph_distribution_ui(ui, s);
+                if ui.button("Export this graph's I/O CSV").clicked() {export_keys=Some(s.keys.clone());}
+                ui.small("One row per graph-cohort request. Empty timing fields mean unavailable; file candidates share one row.");
                 ui.separator();
                 host_bw_ui(ui,s);
                 ui.separator();
@@ -529,6 +534,7 @@ impl StudioApp {
                 if let Some(key) = s.keys.iter().next() && s.keys.len()==1 && ui.button("Investigate this I/O").clicked() {self.selected_pipeline_request=Some(*key);self.page=Page::Investigate;}
             });
         });
+        if let Some(keys)=export_keys {self.export_io_cohort_csv(Some(keys));}
         if let Some(query) = target_query {
             self.query = query;
             self.invalidate_query();
@@ -554,6 +560,9 @@ fn summary_metric_row(ui: &mut egui::Ui, label: &str, read: String, write: Strin
 }
 
 fn selection_pie(ui: &mut egui::Ui, values: &[u64], labels: &[&str]) {
+    selection_pie_values(ui,values,labels,|value|value.to_string());
+}
+fn selection_pie_values(ui:&mut egui::Ui,values:&[u64],labels:&[&str],format_value:impl Fn(u64)->String) {
     let total: u64 = values.iter().sum();
     if total == 0 {
         ui.label("No selected requests");
@@ -587,7 +596,7 @@ fn selection_pie(ui: &mut egui::Ui, values: &[u64], labels: &[&str]) {
             for (i, (value, label)) in values.iter().zip(labels).enumerate() {
                 ui.colored_label(
                     colors[i % colors.len()],
-                    format!("{label}: {value} ({:.1}%)", ratio(*value, total)),
+                    format!("{label}: {} ({:.1}%)", format_value(*value),ratio(*value, total)),
                 );
             }
         });

@@ -29,14 +29,44 @@ impl StudioApp {
             let engine=self.analysis().select_completed(|_|true);
             let origin=self.time_origin();
             let bw=self.bandwidth_context(None);
+            let width=self.window_width_ms;
             let (g,x,y)=signature;
             let (tx,rx)=bounded(1);
             self.selection.all_pending=Some((g,x,y,rx));
             std::thread::spawn(move || {
-                let mut s=compute_selection(&engine,SelectionRequest::Rectangle {min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},x,y,origin);
-                bw.attach(&mut s);
+                let s=compute_graph_selection(&engine,SelectionRequest::Rectangle {min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},x,y,origin,bw,width);
                 let _=tx.send(s);
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod summary_layout_tests {
+    use super::*;
+    #[test]
+    fn wide_lba_histogram_tick_text_stays_within_the_summary_panel() {
+        let mut metric=crate::graph_summary::MetricDistribution::default();
+        metric.total.values=vec![2_629_824.,987_000_000.];
+        for width in [280.,340.] {
+            let ctx=egui::Context::default();
+            let mut checked=0;
+            for _ in 0..3 {
+                let mut output=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(width,1000.))),..Default::default()},|root| {
+                    egui::CentralPanel::default().show(root,|ui|metric_distribution_ui(ui,&metric,"Sector"));
+                });
+                output.textures_delta.clear();
+                for clipped in &output.shapes {
+                    if let egui::Shape::Text(text)=&clipped.shape {
+                        let label=text.galley.text();
+                        if label.ends_with('M') || label.ends_with('G') {
+                            checked+=1;
+                            assert!(clipped.shape.visual_bounding_rect().right()<=clipped.clip_rect.right()+1.,"{width}px Summary clips {label}");
+                        }
+                    }
+                }
+            }
+            assert!(checked>0,"must inspect rendered axis labels");
         }
     }
 }
@@ -133,6 +163,9 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
                 ui.label(r.reads.to_string());ui.label(r.writes.to_string());ui.end_row();
             }
         });
+    } else if let Some(series)=&summary.window_series {
+        ui.small(format!("{} time windows; each window contributes one sample. Empty windows are included, partial windows use their actual duration. Payload excludes non-R/W extents.",series.samples.len()));
+        metric_distribution_named_ui(ui,&summary.metric,axis.label(),"Time windows");
     } else {
         metric_distribution_ui(ui,&summary.metric,axis.label());
     }
@@ -180,6 +213,9 @@ fn category_distribution_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
 }
 
 fn metric_distribution_ui(ui:&mut egui::Ui, metric:&crate::graph_summary::MetricDistribution, unit:&str) {
+    metric_distribution_named_ui(ui,metric,unit,"I/O count");
+}
+fn metric_distribution_named_ui(ui:&mut egui::Ui, metric:&crate::graph_summary::MetricDistribution, unit:&str,sample_label:&str) {
     constrain_summary_width(ui);
     let id=ui.id().with("distribution-direction");
     let mut direction=ui.data_mut(|d|d.get_temp::<usize>(id).unwrap_or(0));
@@ -205,10 +241,10 @@ fn metric_distribution_ui(ui:&mut egui::Ui, metric:&crate::graph_summary::Metric
     if unit=="Sector" || unit=="Address (KiB)" {ui.collapsing("Address percentiles",percentile_table);} else {percentile_table(ui);}
     let bins=d.histogram(16);
     summary_plot(ui,ui.id().with("metric-histogram")).height(160.).allow_zoom(false).allow_drag(false)
-        .grid_spacing(35.0..=120.0).x_grid_spacer(summary_grid).x_axis_formatter(|mark,_| compact_tick(mark.value))
-        .x_axis_label(unit).y_axis_label("I/O count").show(ui,|plot| {
+        .grid_spacing(35.0..=120.0).x_grid_spacer(summary_grid).x_axis_formatter(summary_axis_tick)
+        .x_axis_label(unit).y_axis_label(sample_label).show(ui,|plot| {
             let bars=bins.iter().map(|b|egui_plot::Bar::new((b.lower+b.upper)*0.5,b.count as f64).width((b.upper-b.lower).max(b.lower.abs()*0.01).max(0.000001)*0.95)).collect();
-            plot.bar_chart(egui_plot::BarChart::new("Requests",bars).color(accent()));
+            plot.bar_chart(egui_plot::BarChart::new(sample_label,bars).color(accent()));
         });
     ui.small("Equal-width bins [lower, upper); final bin includes maximum. Constant samples form one bin.");
     ui.collapsing("Histogram values",|ui| {
@@ -223,8 +259,8 @@ fn metric_distribution_ui(ui:&mut egui::Ui, metric:&crate::graph_summary::Metric
         let points=if rank {d.rank_points(512)}else{d.cdf_points(512)};
         summary_plot(ui,ui.id().with("cumulative-plot")).height(150.).allow_zoom(false).allow_drag(false)
             .x_axis_label(if rank {"Rank (1-based)"}else{unit})
-            .y_axis_label(if rank {unit}else{"Requests ≤ value (%)"})
-            .x_grid_spacer(summary_grid).x_axis_formatter(|mark,_|compact_tick(mark.value))
+            .y_axis_label(if rank {unit.to_owned()}else{format!("{sample_label} ≤ value (%)")})
+            .x_grid_spacer(summary_grid).x_axis_formatter(summary_axis_tick)
             .show(ui,|plot| {plot.line(Line::new(if rank {"Sorted samples"}else{"Empirical CDF"},points).color(accent()));});
         ui.small("CDF includes all tied values. At most 512 original values are drawn; connecting lines interpolate the display. CSV contains every value, rank and exact cumulative count.");
     });
@@ -235,8 +271,8 @@ fn violin_ui(ui:&mut egui::Ui,d:&crate::graph_summary::Distribution,unit:&str) {
     let maximum=bins.iter().map(|b|b.count).max().unwrap_or(1).max(1) as f64;
     let mut shape:Vec<[f64;2]>=bins.iter().map(|b|[(b.lower+b.upper)*0.5,b.count as f64/maximum]).collect();
     shape.extend(bins.iter().rev().map(|b|[(b.lower+b.upper)*0.5,-(b.count as f64)/maximum]));
-    studio_plot(ui.id().with("violin")).height(130.).x_axis_label(unit).y_axis_label("Relative density")
-        .grid_spacing(35.0..=120.0).x_grid_spacer(summary_grid).x_axis_formatter(|mark,_| compact_tick(mark.value))
+    summary_plot(ui,ui.id().with("violin")).height(130.).x_axis_label(unit).y_axis_label("Relative density")
+        .grid_spacing(35.0..=120.0).x_grid_spacer(summary_grid).x_axis_formatter(summary_axis_tick)
         .allow_zoom(false).allow_drag(false).show(ui,|plot| {
             if shape.len()>2 {plot.polygon(egui_plot::Polygon::new("Mirrored histogram density",shape).fill_color(accent().gamma_multiply(0.35)));}
         });
@@ -288,10 +324,24 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
         for (label,value) in [("analysis_time",Some(b.duration_ns)),("busy",b.busy_ns),("idle",b.idle_ns),("observed_busy_lower_bound",Some(b.observed_busy_ns))] {
             writer.write_record(["duration","Host BW",label,"","",&value.map_or("unavailable".into(),|v|v.to_string()),"ns"])?;
         }
+        for (label,value) in [("Busy",b.busy_ns),("Idle",b.idle_ns)] {
+            let percent=value.filter(|_|b.duration_ns>0).map(|ns|ns as f64*100./b.duration_ns as f64);
+            writer.write_record(["device_time_share","Analysis wall time",label,"",&b.duration_ns.to_string(),&percent.map_or("unavailable".into(),|v|v.to_string()),"percent; denominator ns"])?;
+        }
         for (i,label) in ["Total","Read","Write"].iter().enumerate() {
             writer.write_record(["bytes","Host BW",label,"","",&[b.bytes.total(),b.bytes.read,b.bytes.write][i].to_string(),"bytes"])?;
             for (metric,value) in [("Host BW with Idle",b.with_idle_mib_s[i]),("Host BW w/o Idle",b.without_idle_mib_s[i])] {
                 writer.write_record(["bandwidth",metric,label,"","",&value.map_or("unavailable".into(),|v|v.to_string()),"MiB/s"])?;
+            }
+        }
+    }
+    if let Some(series)=&s.window_series {
+        writer.write_record(["window_definition",metric,"all",&series.width_ns.to_string(),"","one sample per window; [start,end), final end inclusive; partial-window rates use actual duration; cumulative payload starts at analysis interval start","ns"])?;
+        for sample in &series.samples {
+            for (i,direction) in ["Total","Read","Write"].iter().enumerate() {
+                writer.write_record(["time_window",metric,direction,&sample.start_ns.to_string(),&sample.end_ns.to_string(),&sample.values[i].map_or("unavailable".into(),|v|v.to_string()),metric])?;
+                writer.write_record(["window_payload",metric,direction,&sample.start_ns.to_string(),&sample.end_ns.to_string(),&sample.payload[i].to_string(),"Read+Write bytes"])?;
+                writer.write_record(["window_requests",metric,direction,&sample.start_ns.to_string(),&sample.end_ns.to_string(),&sample.requests[i].to_string(),"requests; Total includes all commands"])?;
             }
         }
     }
@@ -303,9 +353,9 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
                 writer.write_record(["percentile",metric,&group,&p.to_string(),"",&d.percentile(p).map_or("unavailable".into(),|v|v.to_string()),metric])?;
             }
             for b in d.histogram(16) {
-                writer.write_record(["histogram",metric,&group,&b.lower.to_string(),&b.upper.to_string(),&b.count.to_string(),"requests"])?;
+                writer.write_record(["histogram",metric,&group,&b.lower.to_string(),&b.upper.to_string(),&b.count.to_string(),if s.window_series.is_some(){"time windows"}else{"requests"}])?;
             }
-            writer.write_record(["missing",metric,&group,"","",&d.missing.to_string(),"requests"])?;
+            writer.write_record(["missing",metric,&group,"","",&d.missing.to_string(),if s.window_series.is_some(){"time windows"}else{"requests"}])?;
             for (i,value) in d.values.iter().enumerate() {
                 writer.write_record(["sorted_rank",metric,&group,&(i+1).to_string(),"",&value.to_string(),metric])?;
                 if i+1==d.values.len() || d.values[i+1]!=*value {

@@ -1,6 +1,47 @@
 // Shared query for all request-oriented analysis surfaces. Capture filters are
 // intentionally separate: these controls never discard incoming measurements.
 #[cfg(test)]
+mod filter_input_tests {
+    use super::*;
+    use android_ebpf_protocol::{BlockIssue,BlockComplete,StorageEvent};
+    fn frame(app:&mut StudioApp,ctx:&egui::Context,time:&mut f64,events:Vec<egui::Event>) {
+        *time+=0.1;
+        let mut output=ctx.run_ui(egui::RawInput{time:Some(*time),screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1600.,1000.))),events,..Default::default()},|root| {
+            egui::CentralPanel::default().show(root,|ui|app.filter_ui(ui));
+        });
+        output.textures_delta.clear();
+        app.rebuild_filtered();
+    }
+    fn click(app:&mut StudioApp,ctx:&egui::Context,time:&mut f64,region:&str) {
+        let pos=app.render_qa.regions[region].0.center();
+        for pressed in [true,false] {frame(app,ctx,time,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
+        for _ in 0..6 {frame(app,ctx,time,vec![]);}
+    }
+    #[test]
+    fn clear_filters_does_not_restore_pid_from_numeric_editor_on_lost_focus() {
+        let mut app=StudioApp::default();
+        for pid in [10,20] {
+            app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:pid as u64*1000,request_id:pid as u64,device_major:8,device_minor:0,sector:0,sectors:8,bytes:4096,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"same".into()}));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete{ts_ns:pid as u64*1000+100,request_id:pid as u64,device_major:8,device_minor:0,status:0}));
+        }
+        app.render_qa.output=Some(PathBuf::from("unused-test-region-marker"));
+        let ctx=egui::Context::default();let mut time=0.;
+        frame(&mut app,&ctx,&mut time,vec![]);
+        click(&mut app,&ctx,&mut time,"analysis-filters");
+        click(&mut app,&ctx,&mut time,"pid-filter");
+        for value in ["10","2147483647"] {
+            frame(&mut app,&ctx,&mut time,vec![egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}},egui::Event::Text(value.into())]);
+            for _ in 0..6 {frame(&mut app,&ctx,&mut time,vec![]);}
+            assert_eq!(app.query.pid,value.parse::<u32>().unwrap());
+            assert_eq!(app.analysis().completed_ios().len(),if value=="10"{1}else{0});
+        }
+        click(&mut app,&ctx,&mut time,"clear-filters");
+        assert_eq!(app.query,AnalysisFilter::default());
+        assert_eq!(app.analysis().completed_ios().len(),2);
+    }
+}
+
+#[cfg(test)]
 mod diskstats_performance_tests {
     use super::*;
 
@@ -422,12 +463,17 @@ impl StudioApp {
         }
         let previous = self.query.clone();
         let header=ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
+            // A numeric editor commits its buffered text when it loses focus.
+            // Replace input identities after Clear so a delayed commit cannot
+            // restore a previous PID, time or size into the reset query.
+            ui.push_id(self.filter_edit_epoch,|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Completion time (ms)");
                 ui.add(egui::DragValue::new(&mut self.query.start_ms).prefix("From ").range(0.0..=f64::MAX));
                 ui.add(egui::DragValue::new(&mut self.query.end_ms).prefix("To ").range(0.0..=f64::MAX));
                 ui.label("To 0 = session end");
-                ui.add(egui::DragValue::new(&mut self.query.pid).prefix("PID "));
+                let pid=ui.add(egui::DragValue::new(&mut self.query.pid).prefix("PID "));
+                qa_region(&mut self.render_qa,"pid-filter",pid.rect,ui.clip_rect());
                 ui.add(egui::DragValue::new(&mut self.query.tid).prefix("TID "));
                 ui.label("0 = all");
                 egui::ComboBox::from_id_salt("analysis-op").selected_text(self.query.operation.map_or("All operations", operation_label)).show_ui(ui, |ui| {
@@ -445,7 +491,7 @@ impl StudioApp {
                 ui.label("FilePath / inode"); ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
                 ui.label("Device major:minor"); ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
                 let clear=ui.button("Clear filters");qa_region(&mut self.render_qa,"clear-filters",clear.rect,ui.clip_rect());
-                if clear.clicked() { self.query = AnalysisFilter::default(); }
+                if clear.clicked() { self.query = AnalysisFilter::default();self.filter_edit_epoch=self.filter_edit_epoch.wrapping_add(1); }
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Size (bytes)");
@@ -466,6 +512,7 @@ impl StudioApp {
             });
             ui.small("Process searches the observed block issuer's comm, case-insensitive substring; it is not an Android package or proven original file process. Issue CPU 0 is a valid CPU. Layer requires related graph evidence; absent observations never match. Capture PID filtering is separate.");
             ui.label("Selection uses the loaded completed-request window; file-operation evidence follows that cohort. Capture diagnostics and Compare baseline remain session-wide. File candidates are preserved together. Sequential/random classification remains from the original device/direction stream.");
+            });
         });
         qa_region(&mut self.render_qa,"analysis-filters",header.header_response.rect,ui.clip_rect());
         if previous != self.query {

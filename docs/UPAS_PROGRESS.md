@@ -1,5 +1,7 @@
 # Active goal checkpoint — not overall completion
 
+Latest continuation (2026-09-07): see [UPAS_WINDOW_CHECKPOINT.md](UPAS_WINDOW_CHECKPOINT.md). Six elapsed-window trends and linked distributions, PID Clear regression fix, native35-page Process navigation, direct cohort I/O CSV and Busy/Idle share are implemented and verified. The remaining rolling/interval/timeline/acquisition/matrix/performance/Release work is listed there. Goal remains active; installed EXE has not been replaced.
+
 Read the full objective at `C:/Users/AEBIZTRIP5.pub/.codex/attachments/700d9658-a88e-4c81-bb21-c455bd9eb2b2/goal-objective.md`. User subsequently clarified that Summary means the **existing Explore right-hand Summary inspector linked to the main graph**, not Overview or a separate histogram/pie catalogue. This supersedes the initial topology interpretation. Continue all remaining objective work autonomously. Goal remains active.
 
 ## Source/workspace

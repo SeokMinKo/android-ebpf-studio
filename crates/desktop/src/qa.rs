@@ -3,6 +3,11 @@
 // Other scenarios never start device capture; fixtures retain their source.
 #[derive(Default)]
 struct RenderQa {
+    lane_page:usize,
+    lane_pages:usize,
+    lane_visible:Vec<String>,
+    lane_page_states:Vec<serde_json::Value>,
+    lane_returning:bool,
     filter_step:u32,
     filter_states:Vec<serde_json::Value>,
     compare_ready_ms: Option<f64>,
@@ -69,10 +74,27 @@ impl StudioApp {
         let Ok(gesture) = std::env::var("ANDROID_EBPF_QA_GESTURE") else {
             return;
         };
-        if gesture=="process-filter" {
+        if gesture=="lane-pagination" {
+            if self.render_qa.input_step>=7 || self.render_qa.frames<20 || self.render_qa.frames<self.render_qa.range_wait_frame+6 || self.footprint.pending.is_some() || self.render_qa.lane_pages==0 {return;}
+            let press=self.render_qa.filter_step.is_multiple_of(2);
+            if press {
+                self.render_qa.lane_page_states.push(serde_json::json!({"page":self.render_qa.lane_page,"pages":self.render_qa.lane_pages,"visible":self.render_qa.lane_visible}));
+                if self.render_qa.lane_returning || self.render_qa.lane_pages==1 {self.render_qa.input_step=7;return;}
+                if self.render_qa.lane_page+1==self.render_qa.lane_pages {self.render_qa.lane_returning=true;}
+            }
+            let target=if self.render_qa.lane_returning {"previous-lanes"}else{"next-lanes"};
+            if let Some((rect,_))=self.render_qa.regions.get(target) {
+                let pos=rect.center();raw.events.push(egui::Event::PointerMoved(pos));
+                raw.events.push(egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:press,modifiers:Default::default()});
+                self.render_qa.filter_step+=1;self.render_qa.range_wait_frame=self.render_qa.frames;
+            }
+            return;
+        }
+        if gesture=="process-filter" || gesture=="pid-filter" {
+            let pid=gesture=="pid-filter";
             if self.render_qa.frames<20 || self.render_qa.frames<self.render_qa.range_wait_frame+6 {return;}
             let step=self.render_qa.filter_step;
-            let target=match step {0|1=>Some("analysis-filters"),2|3=>Some("process-filter"),8|9=>Some("clear-filters"),_=>None};
+            let target=match step {0|1=>Some("analysis-filters"),2|3=>Some(if pid {"pid-filter"}else{"process-filter"}),8|9=>Some("clear-filters"),_=>None};
             if let Some(target)=target {
                 if let Some((rect,_))=self.render_qa.regions.get(target) {
                     let pos=rect.center();raw.events.push(egui::Event::PointerMoved(pos));
@@ -80,13 +102,15 @@ impl StudioApp {
                 }else{return;}
             }else if step==4 || step==6 {
                 raw.events.push(egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}});
-                raw.events.push(egui::Event::Text(if step==4 {std::env::var("ANDROID_EBPF_QA_PROCESS").unwrap_or("F2FS".into())}else{"__no_such_process__".into()}));
+                raw.events.push(egui::Event::Text(if pid {if step==4 {std::env::var("ANDROID_EBPF_QA_PID").unwrap_or("1".into())}else{"2147483647".into()}}else if step==4 {std::env::var("ANDROID_EBPF_QA_PROCESS").unwrap_or("F2FS".into())}else{"__no_such_process__".into()}));
             }else if [5,7,10].contains(&step) {
                 let Some((g,x,y,s))=&self.selection.all_summary else{return;};
                 if *g!=self.analysis_generation || *x!=self.x_axis || *y!=self.y_axis || self.selection.all_pending.is_some() || self.footprint.pending.is_some(){return;}
                 let path=self.render_qa.output.as_ref().unwrap().with_extension(format!("filter-{step}.csv"));
                 let result=write_graph_summary_csv(&path,s).map_err(|e|e.to_string());
-                self.render_qa.filter_states.push(serde_json::json!({"step":step,"query":self.query,"filtered":self.analysis().completed_ios().len(),"summary":s.keys.len(),"lane_unique":self.footprint.view.as_ref().map(|v|v.unique),"host_bw":s.host_bw,"csv":path,"export":result}));
+                let io_path=self.render_qa.output.as_ref().unwrap().with_extension(format!("filter-{step}.io.csv"));
+                let io_result=session::export_completed_io_csv(&io_path,self.analysis()).map_err(|e|e.to_string());
+                self.render_qa.filter_states.push(serde_json::json!({"step":step,"query":self.query,"filtered":self.analysis().completed_ios().len(),"summary":s.keys.len(),"lane_unique":self.footprint.view.as_ref().map(|v|v.unique),"host_bw":s.host_bw,"csv":path,"export":result,"io_csv":io_path,"io_export":io_result}));
                 if step==10 {self.render_qa.input_step=7;self.render_qa.filter_step=11;return;}
             }else {return;}
             self.render_qa.filter_step+=1;self.render_qa.range_wait_frame=self.render_qa.frames;
@@ -449,6 +473,11 @@ impl StudioApp {
         let point = self.render_qa.point_target.unwrap_or(rect.center());
         let (start, end) = if gesture == "point" {
             (point, point)
+        } else if gesture == "window-area" {
+            (
+                rect.min + egui::vec2(12.0, 12.0),
+                egui::pos2(rect.center().x, rect.max.y - 12.0),
+            )
         } else {
             (
                 rect.min + egui::vec2(12.0, 12.0),
@@ -652,6 +681,7 @@ impl StudioApp {
             && let Some(value) = ExplorerPreset::ALL.get(index)
             && let Some((x, y, group)) = value.query()
         {
+            self.explorer_preset = *value;
             self.x_axis = x;
             self.y_axis = y;
             self.group_by = group;
@@ -661,6 +691,7 @@ impl StudioApp {
             && let Some(axis) = AxisMetric::ALL.get(index) {
             self.x_axis = AxisMetric::TimeMs;
             self.y_axis = *axis;
+            self.explorer_preset = ExplorerPreset::Custom;
         }
     }
     fn render_qa_tick(&mut self, ctx: &egui::Context) {
@@ -751,6 +782,10 @@ impl StudioApp {
                         == Ok("stream-replay")
                     {
                         120
+                    } else if std::env::var("ANDROID_EBPF_QA_GESTURE").as_deref()
+                        == Ok("lane-pagination")
+                    {
+                        45
                     } else {
                         8
                     },
@@ -773,6 +808,7 @@ impl StudioApp {
             let mut report = serde_json::json!({ "capture": path, "result": result.as_ref().map(|_| "saved").map_err(|e| e.to_string()), "phase": self.phase.label(), "page": format!("{:?}", self.page), "theme": format!("{:?}",self.theme), "completed_requests": self.analysis().completed_ios().len(), "received_events": self.received_events, "rejected": self.rejected_records, "frames": self.render_qa.frames, "reanalysis_before_first":self.render_qa.reanalysis_before_first,"reanalysis_window_first":self.render_qa.reanalysis_window_first,"source_completed_ios":self.reanalysis.source_count,"reanalysis_window_ns":self.reanalysis.window,"reanalysis_ms":self.reanalysis.elapsed_ms,"reanalysis_error":self.reanalysis.error,"reanalysis_actions":self.reanalysis.completed_actions,"file_evidence_count":self.file_evidence_positions.as_ref().map(|v|v.len()),"file_evidence_total":self.analysis().file_ios().len(),"filtered_read_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Read).count(),"filtered_write_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Write).count(),"explorer_available":self.explorer_view.as_ref().map(|v|v.available),"range_draft":self.selection.axis_range.values,"range_actions":self.render_qa.range_actions,"range_error":self.selection.axis_range.error,"range_initial":self.render_qa.range_initial.map(|b|[b.min(),b.max()]),"range_expected":self.render_qa.range_expected.map(|b|[b.min(),b.max()]),"range_applied":self.render_qa.range_applied.map(|b|[b.min(),b.max()]),"plot_bounds":self.selection.current_bounds.map(|b|[b.min(),b.max()]),"point_diameter":self.plot_style.point_diameter,"color_category":format!("{:?}",self.group_by),"rendered_colors":self.explorer_view.as_ref().map(|view|view.groups.iter().map(|(name,_)|(name,self.plot_style.color(self.group_by,name).to_array())).collect::<BTreeMap<_,_>>()), "stop_analysis_ms":self.render_qa.stop_analysis_ms,"session_path":self.session_path,"selected_files":self.selection.summary.as_ref().map(|s|s.files.len()),"selected_processes":self.selection.summary.as_ref().map(|s|s.processes.len()),"selection_count": self.selection.summary.as_ref().map(|s|s.keys.len()), "selection_ms": self.selection.summary.as_ref().map(|s|s.elapsed.as_secs_f64()*1000.0), "zoom_history_depth": self.selection.zoom_history.len(), "zoom_actions": self.render_qa.zoom_actions, "back_actions": self.render_qa.back_actions, "ui_performance": self.performance.snapshot() });
             report["comparison_explore"] = self.compare_qa_report();
             report["filter_states"]=serde_json::json!(self.render_qa.filter_states);
+            report["lane_page_states"]=serde_json::json!(self.render_qa.lane_page_states);
             report["footprint"] = self.footprint.view.as_ref().map_or(serde_json::Value::Null, |v| serde_json::json!({"mode":v.mode.label(),"unique":v.unique,"memberships":v.memberships,"groups":v.lanes.iter().map(|(k,p)|(k,p.len())).collect::<BTreeMap<_,_>>() }));
             report["graph_summary"] = self.selection.summary.as_ref()
                 .or_else(||self.selection.all_summary.as_ref().map(|v|&v.3))
@@ -781,11 +817,14 @@ impl StudioApp {
                     "samples":s.metric.total.values.len(),"missing":s.metric.total.missing,
                     "p50":s.metric.total.percentile(50),"p95":s.metric.total.percentile(95),
                     "histogram":s.metric.total.histogram(16),"cdf":s.metric.total.cdf_points(512),"address_counts":s.address_counts,
-                    "cohort_count":s.keys.len(),"selected":self.selection.summary.is_some(),"host_bw":s.host_bw,"categories":s.categories
+                    "cohort_count":s.keys.len(),"selected":self.selection.summary.is_some(),"host_bw":s.host_bw,"categories":s.categories,"window_series":s.window_series
                 }));
             if let Some(s)=self.selection.summary.as_ref().or_else(||self.selection.all_summary.as_ref().map(|v|&v.3)) {
                 let csv=path.with_extension("summary.csv");
                 report["graph_summary_export"]=serde_json::json!({"path":csv,"result":write_graph_summary_csv(&csv,s).map_err(|e|e.to_string())});
+                let io_csv=path.with_extension("io.csv");
+                let cohort=self.analysis().select_completed(|io|s.keys.contains(&selection_key(io)));
+                report["graph_io_export"]=serde_json::json!({"path":io_csv,"result":session::export_completed_io_csv(&io_csv,&cohort).map_err(|e|e.to_string())});
             }
             report["displayed_summary"] =
                 serde_json::json!(self.summary_view.as_ref().map(|(_, _, summary)| summary));

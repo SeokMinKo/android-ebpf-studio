@@ -170,7 +170,17 @@ impl StudioApp {
         let page_id=ui.id().with("footprint-page");
         let mut page=ui.data_mut(|d|d.get_temp::<usize>(page_id).unwrap_or(0));
         let pages=view.lanes.len().div_ceil(4).max(1);page=page.min(pages-1);
-        ui.horizontal(|ui| {if ui.add_enabled(page>0,egui::Button::new("Previous lanes")).clicked(){page-=1;}ui.label(format!("{} / {}",page+1,pages));if ui.add_enabled(page+1<pages,egui::Button::new("Next lanes")).clicked(){page+=1;}});
+        ui.horizontal(|ui| {
+            let previous=ui.add_enabled(page>0,egui::Button::new("Previous lanes"));
+            qa_region(&mut self.render_qa,"previous-lanes",previous.rect,ui.clip_rect());
+            if previous.clicked(){page-=1;}
+            ui.label(format!("{} / {}",page+1,pages));
+            let next=ui.add_enabled(page+1<pages,egui::Button::new("Next lanes"));
+            qa_region(&mut self.render_qa,"next-lanes",next.rect,ui.clip_rect());
+            if next.clicked(){page+=1;}
+        });
+        self.render_qa.lane_page=page;self.render_qa.lane_pages=pages;
+        self.render_qa.lane_visible=view.lanes.keys().skip(page*4).take(4).cloned().collect();
         ui.data_mut(|d|d.insert_temp(page_id,page));
         let divisor=if self.y_axis==AxisMetric::AddressKiB {2.}else{1.};
         let fit=self.footprint.fit;
