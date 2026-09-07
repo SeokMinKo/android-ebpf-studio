@@ -4056,7 +4056,12 @@ fn evenly_sample_indices(length: usize, limit: usize) -> Vec<usize> {
     if length <= limit {
         return (0..length).collect();
     }
-    (0..limit).map(|index| index * length / limit).collect()
+    if limit <= 1 {
+        return (0..limit).collect();
+    }
+    (0..limit)
+        .map(|index| index * (length - 1) / (limit - 1))
+        .collect()
 }
 
 fn operation_label(value: IoOperation) -> &'static str {

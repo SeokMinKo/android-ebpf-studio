@@ -35,6 +35,21 @@ mod sampling_regression {
     use super::*;
     use android_ebpf_protocol::*;
 
+
+    #[test]
+    fn dense_sampling_retains_first_and_last_observed_request() {
+        for (length, limit) in [(12_388, 12_000), (12_388, 2_000), (20_000, 2)] {
+            let indices = evenly_sample_indices(length, limit);
+            assert_eq!(indices.len(), limit);
+            assert_eq!(indices.first(), Some(&0));
+            assert_eq!(indices.last(), Some(&(length - 1)), "length={length}, limit={limit}");
+            assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        assert!(evenly_sample_indices(0, 0).is_empty());
+        assert!(evenly_sample_indices(10, 0).is_empty());
+        assert_eq!(evenly_sample_indices(10, 1), vec![0]);
+    }
+
     #[test]
     fn incomplete_latency_is_not_a_measured_zero() {
         let mut graph = IoTransactionGraph::new(1);
