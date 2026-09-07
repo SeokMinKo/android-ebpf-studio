@@ -52,6 +52,7 @@ fn completed() -> CompletedIo {
 fn span(layer: PipelineLayer, start: u64, end: u64) -> PipelineObservation {
     PipelineObservation {
         ts_ns: start,
+        operation: None,
         end_ts_ns: Some(end),
         phase: PipelinePhase::Span,
         layer,
@@ -193,4 +194,36 @@ fn reused_stage_key_is_not_paired_to_the_wrong_begin() {
     engine.ingest(StorageEvent::Pipeline(end));
 
     assert!(engine.pipeline_observations().is_empty());
+}
+
+#[test]
+fn unknown_observation_metadata_is_not_filled_from_block_request() {
+    let mut observation = span(PipelineLayer::Ufs, 1_300, 1_800);
+    observation.operation = None;
+    observation.bytes = None;
+    observation.pid = 0;
+    observation.tid = 0;
+    let graph =
+        android_ebpf_protocol::build_transaction_graph(&completed(), &[], &[observation], &[], &[]);
+    let ufs = graph
+        .nodes
+        .iter()
+        .find(|node| node.kind == android_ebpf_protocol::IoNodeKind::UfsCommand)
+        .unwrap();
+    assert_eq!(ufs.operation, None);
+    assert_eq!(ufs.bytes, None);
+    assert_eq!((ufs.pid, ufs.tid), (0, 0));
+}
+
+#[test]
+fn a_foreign_request_identity_never_falls_back_to_time_matching() {
+    let mut observation = span(PipelineLayer::Ufs, 1_300, 1_800);
+    observation.correlation_id = Some(999);
+    let pipeline = build_io_pipeline(&completed(), &[observation]);
+    assert!(
+        !pipeline
+            .spans
+            .iter()
+            .any(|span| span.layer == PipelineLayer::Ufs)
+    );
 }

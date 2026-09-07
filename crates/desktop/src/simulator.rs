@@ -140,6 +140,7 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             for (layer, start_ts_ns, end_ts_ns, name, confidence) in pipeline_spans {
                 let event = StorageEvent::Pipeline(PipelineObservation {
                     ts_ns: start_ts_ns,
+                    operation: Some(operation),
                     end_ts_ns: Some(end_ts_ns.max(start_ts_ns)),
                     phase: if layer == PipelineLayer::UicContext {
                         PipelinePhase::Instant

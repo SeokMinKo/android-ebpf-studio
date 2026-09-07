@@ -2650,6 +2650,7 @@ impl StudioApp {
         ui.add_space(10.0);
 
         let origin = pipeline.start_ts_ns;
+        self.render_qa.waterfall.clear();
         card_frame().show(ui, |ui| {
             studio_plot("pipeline-waterfall")
                 .height(390.0)
@@ -2660,9 +2661,11 @@ impl StudioApp {
                 .allow_zoom(true)
                 .show(ui, |plot| {
                     for span in &pipeline.spans {
-                        let x0 = span.start_ts_ns.saturating_sub(origin) as f64 / 1e6;
-                        let x1 = span.end_ts_ns.saturating_sub(origin) as f64 / 1e6;
+                        let [x0, x1] = waterfall_span_times_ms(span.start_ts_ns, span.end_ts_ns, origin);
                         let y = pipeline_layer_y(span.layer);
+                        if self.render_qa.output.is_some() {
+                            self.render_qa.waterfall.push(serde_json::json!({"name":span.name,"layer":span.layer,"x_ms":[x0,x1],"y":y,"duration_ns":span.duration_ns(),"duration_observed":span.duration_observed,"confidence":span.confidence,"operation":span.operation,"bytes":span.bytes,"pid":span.pid,"tid":span.tid,"origin_ns":origin}));
+                        }
                         let label = format!("{} · {} · {}", pipeline_layer_label(span.layer), confidence_label(span.confidence), span.name);
                         if span.duration_ns() == 0 {
                             plot.points(Points::new(label, PlotPoints::from(vec![[x0, y]])).radius(6.0).color(pipeline_layer_color(span.layer)));
@@ -4608,5 +4611,27 @@ mod lba_default_regression {
         assert_eq!(y.value(&io, 0, None), Some(1000.0));
         assert_eq!(y.label(), "Address (MB)");
         assert!(y.is_storage_address());
+    }
+}
+
+fn waterfall_span_times_ms(start: u64, end: u64, origin: u64) -> [f64; 2] {
+    [
+        (i128::from(start) - i128::from(origin)) as f64 / 1e6,
+        (i128::from(end) - i128::from(origin)) as f64 / 1e6,
+    ]
+}
+
+#[cfg(test)]
+mod waterfall_time_regression {
+    #[test]
+    fn physical_syscall_bar_keeps_its_full_duration_before_block_origin() {
+        let points = super::waterfall_span_times_ms(
+            54_572_586_445_013,
+            54_572_589_954_805,
+            54_572_589_629_336,
+        );
+        assert!((points[0] - -3.184323).abs() < 1e-9);
+        assert!((points[1] - 0.325469).abs() < 1e-9);
+        assert!((points[1] - points[0] - 3.509792).abs() < 1e-9);
     }
 }

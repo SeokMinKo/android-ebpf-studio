@@ -3132,6 +3132,7 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
             };
             Some(StorageEvent::Pipeline(PipelineObservation {
                 ts_ns: event.ts_ns,
+                operation: None,
                 end_ts_ns: None,
                 phase,
                 layer,

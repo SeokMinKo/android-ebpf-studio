@@ -714,6 +714,9 @@ pub enum CorrelationConfidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineObservation {
     pub ts_ns: u64,
+    /// Direction observed by the producer; absent in older or context records.
+    #[serde(default)]
+    pub operation: Option<IoOperation>,
     #[serde(default)]
     pub end_ts_ns: Option<u64>,
     pub phase: PipelinePhase,
@@ -743,6 +746,14 @@ pub struct PipelineObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineSpan {
     pub layer: PipelineLayer,
+    #[serde(default)]
+    pub operation: Option<IoOperation>,
+    #[serde(default)]
+    pub bytes: Option<u32>,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub tid: u32,
     pub start_ts_ns: u64,
     pub end_ts_ns: u64,
     /// False for an unpaired boundary or context marker; its plot position is not a latency.
@@ -2458,6 +2469,7 @@ impl AnalysisEngine {
                 if file.end_ts_ns >= file.start_ts_ns {
                     self.pipeline_observations.push(PipelineObservation {
                         ts_ns: file.start_ts_ns,
+                        operation: Some(file.operation),
                         end_ts_ns: Some(file.end_ts_ns),
                         phase: PipelinePhase::Span,
                         layer: PipelineLayer::Syscall,
@@ -2507,6 +2519,7 @@ impl AnalysisEngine {
                                 &mut self.pipeline_observations,
                                 PipelineObservation {
                                     ts_ns: begin.ts_ns,
+                                    operation: begin.operation.or(observation.operation),
                                     end_ts_ns: Some(observation.ts_ns),
                                     phase: PipelinePhase::Span,
                                     layer: begin.layer,
@@ -3416,10 +3429,10 @@ fn build_transaction_graph_refs(
                 origin: IoOrigin::Unknown,
                 file: None,
                 path: None,
-                operation: Some(io.issue.operation),
-                bytes: Some(io.issue.bytes as u64),
-                pid: io.issue.pid,
-                tid: io.issue.tid,
+                operation: span.operation,
+                bytes: span.bytes.map(u64::from),
+                pid: span.pid,
+                tid: span.tid,
                 name: span.name.clone(),
             })
             .is_ok()
@@ -3631,11 +3644,23 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             if end < value.ts_ns {
                 return false;
             }
+            if value
+                .operation
+                .is_some_and(|operation| operation != io.issue.operation)
+                || value.correlation_id.is_some_and(|id| id != request_id)
+            {
+                return false;
+            }
             let exact = value.correlation_id == Some(request_id);
             if exact {
                 return true;
             }
-            let overlaps = value.ts_ns <= probable_window_end && end >= probable_window_start;
+            let overlaps = if value.confidence == CorrelationConfidence::ContextOnly {
+                value.ts_ns <= probable_window_end && end >= probable_window_start
+            } else {
+                // Nearby syscalls are not causal evidence for this request.
+                value.ts_ns <= block_end && end >= block_start
+            };
             let storage_match = value.sector.is_some_and(|sector| sector == io.issue.sector)
                 && value.bytes.is_some_and(|bytes| bytes == io.issue.bytes);
             let thread_match =
@@ -3664,6 +3689,10 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             let end = value.end_ts_ns.unwrap_or(value.ts_ns);
             (end >= value.ts_ns).then(|| PipelineSpan {
                 layer: value.layer,
+                operation: value.operation,
+                bytes: value.bytes,
+                pid: value.pid,
+                tid: value.tid,
                 start_ts_ns: value.ts_ns,
                 end_ts_ns: end,
                 duration_observed: value.end_ts_ns.is_some()
@@ -3695,6 +3724,10 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
     if let Some(insert) = &io.insert {
         spans.push(PipelineSpan {
             layer: PipelineLayer::BlockQueue,
+            operation: Some(io.issue.operation),
+            bytes: Some(io.issue.bytes),
+            pid: io.issue.pid,
+            tid: io.issue.tid,
             start_ts_ns: insert.ts_ns,
             end_ts_ns: io.issue.ts_ns,
             duration_observed: true,
@@ -3707,6 +3740,10 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
     }
     spans.push(PipelineSpan {
         layer: PipelineLayer::BlockDevice,
+        operation: Some(io.issue.operation),
+        bytes: Some(io.issue.bytes),
+        pid: io.issue.pid,
+        tid: io.issue.tid,
         start_ts_ns: io.issue.ts_ns,
         end_ts_ns: io.completion.ts_ns,
         duration_observed: io.device_latency_ns.is_some(),
