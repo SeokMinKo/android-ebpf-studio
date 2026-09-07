@@ -436,7 +436,7 @@ impl StudioApp {
                 qa_region(&mut self.render_qa,"back",back_response.rect,ui.clip_rect());
                 self.render_qa.back_button = Some(back_response.rect.center());
                 if back_response.clicked() { self.render_qa.back_actions += 1; self.selection.bounds_command = self.selection.zoom_history.pop(); }
-                if ui.button("Clear").clicked() { self.selection.clear_selection(); }
+
             });
             ui.horizontal(|ui| {
                 for (tab,label) in [(InspectorTab::Summary,"Summary"),(InspectorTab::Files,"Files"),(InspectorTab::Processes,"Processes")] {
@@ -451,7 +451,7 @@ impl StudioApp {
             if self.render_qa.output.is_some() && let Ok(offset)=std::env::var("ANDROID_EBPF_QA_PANEL_SCROLL") && let Ok(offset)=offset.parse::<f32>() {scroll=scroll.vertical_scroll_offset(offset);}
             let origin=self.time_origin();
             scroll.show(ui, |ui| {
-                let Some(s) = &self.selection.summary else { ui.label("Choose Select above the graph. Click one point or drag a rectangle. Area selection includes all plottable requests in the current filters, even when the plot is sampled."); return; };
+                let Some(s) = &self.selection.summary else { ui.add_space(8.0); ui.strong("Select I/O to inspect"); ui.label("Click a point or drag an area on the graph."); ui.collapsing("How selection works", |ui| { ui.label("Use Select to inspect or Pan to move the view. Area selection includes all plottable requests in the current filters, even when the plot is sampled. Clear selection cancels the selection without changing filters or zoom."); }); return; };
                 if self.selection.inspector_tab != InspectorTab::Summary {
                     target_query=selected_targets_ui(ui,s,self.selection.inspector_tab,true);
                     return;

@@ -1705,7 +1705,7 @@ impl StudioApp {
         ui.heading("Explore I/O");
         ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("VIEW").size(10.0).strong().color(muted()));
+                ui.label("Graph");
                 let previous = self.explorer_preset;
                 egui::ComboBox::from_id_salt("explorer-preset")
                     .selected_text(self.explorer_preset.label())
@@ -1729,8 +1729,11 @@ impl StudioApp {
                 if clear.clicked() {
                     self.selection.clear_selection();
                 }
-                ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
+                ui.label(RichText::new("Click or drag to select").color(muted())).on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
             });
+            egui::CollapsingHeader::new("Plot settings")
+                .open((self.render_qa.output.is_some() && (std::env::var_os("ANDROID_EBPF_QA_RANGE").is_some() || std::env::var_os("ANDROID_EBPF_QA_PLOT_STYLE").is_some() || std::env::var_os("ANDROID_EBPF_QA_SETTINGS").is_some())).then_some(true))
+                .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color Category");
                 let previous_category = self.group_by;
@@ -1763,6 +1766,12 @@ impl StudioApp {
                     self.explorer_preset = ExplorerPreset::Custom;
                 }
             });
+                    self.axis_ranges_ui(ui);
+                    let cache_valid = self.explorer_view.as_ref().is_some_and(|view| view.generation == self.analysis_generation && view.x_axis == self.x_axis && view.y_axis == self.y_axis && view.group_by == self.group_by);
+                    if !cache_valid { self.rebuild_explorer_view(); }
+                    let names = self.explorer_view.as_ref().map(|view| view.groups.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>()).unwrap_or_default();
+                    self.plot_colors_ui(ui, &names);
+                });
         });
         ui.add_space(10.0);
 
@@ -1795,10 +1804,6 @@ impl StudioApp {
             .iter()
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
-        if !compact {
-            self.axis_ranges_ui(ui);
-            self.plot_colors_ui(ui, &names);
-        }
         let legend_id = ui.make_persistent_id(("plot-legend", self.group_by.label()));
         let mut show_legend = ui.ctx().data_mut(|d| {
             d.get_temp::<bool>(legend_id).unwrap_or_else(|| {
@@ -1809,7 +1814,7 @@ impl StudioApp {
             ui.checkbox(&mut show_legend, "Plot legend");
             if !show_legend {
                 ui.small(format!(
-                    "{} categories · full labels and colors in Colors above",
+                    "{} categories · labels and colors in Plot settings",
                     names.len()
                 ));
             }
@@ -3841,7 +3846,7 @@ fn apply_theme(ctx: &egui::Context, choice: ThemeChoice) {
     ctx.global_style_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 5.0);
         style.spacing.button_padding = egui::vec2(9.0, 5.0);
-        style.spacing.interact_size.y = 26.0;
+        style.spacing.interact_size.y = 28.0;
     });
 }
 
