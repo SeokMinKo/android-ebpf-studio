@@ -410,6 +410,8 @@ impl StudioApp {
         self.footprint.pending = None;
         self.footprint.fit = true;
         self.trend_view = None;
+        self.trend_pending = None;
+        self.trend_refreshed = None;
         self.selection = SelectionState {
             enabled: true,
             auto_bounds: true,
@@ -434,6 +436,7 @@ impl StudioApp {
         if self.filtered_generation == self.analysis_generation {
             return;
         }
+        let started=Instant::now();
         let origin = self.time_origin();
         self.filtered = Some(
             self.analyzer
@@ -441,6 +444,7 @@ impl StudioApp {
         );
         self.update_file_evidence_scope();
         self.filtered_generation = self.analysis_generation;
+        if self.render_qa.output.is_some(){self.render_qa.filter_rebuild_ms.push(started.elapsed().as_secs_f64()*1000.);}
     }
 
     fn filter_ui(&mut self, ui: &mut egui::Ui) {
@@ -540,6 +544,7 @@ impl StudioApp {
     }
 
     fn trends_ui(&mut self, ui: &mut egui::Ui) {
+        let origin = self.time_origin();
         if self.analysis().completed_ios().is_empty() {
             return;
         }
@@ -548,16 +553,12 @@ impl StudioApp {
             "I/O activity",
             "Retained completed requests · fixed 1 s bins by completion time · click a time bin to inspect that interval",
         );
-        let origin = self.time_origin();
-        if self
-            .trend_view
-            .as_ref()
-            .is_none_or(|(generation, _)| *generation != self.analysis_generation)
-        {
-            self.trend_view = Some((
-                self.analysis_generation,
-                Arc::new(TrendData::build(self.analysis(), origin)),
-            ));
+        self.refresh_trend_view();
+        if self.trend_view.is_none() {
+            ui.spinner();
+            ui.label("Updating activity and FilePath observations…");
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+            return;
         }
         let data = Arc::clone(&self.trend_view.as_ref().unwrap().1);
         let TrendData {
@@ -1000,6 +1001,7 @@ impl StudioApp {
 }
 
 struct TrendData {
+    live_summary: Option<AnalysisSummary>,
     slowest: Option<CompletedIo>,
     top_issuer: Option<(u32, String, u64, u64)>,
     bins: BTreeMap<u64, [f64; 4]>,
@@ -1081,6 +1083,7 @@ impl TrendData {
             .max_by(|a, b| (a.1[2] + a.1[3]).total_cmp(&(b.1[2] + b.1[3])))
             .map(|(&second, &values)| (second, values));
         Self {
+            live_summary: None,
             activity_points,
             busiest_second,
             slowest,
@@ -1206,6 +1209,44 @@ impl StudioApp {
         {
             ui.add_space(14.0);
             capability_panel(ui, report);
+        }
+    }
+}
+
+impl StudioApp {
+    fn refresh_trend_view(&mut self) {
+        let live=self.is_running();
+        if let Some((generation,rx))=&self.trend_pending {
+            match rx.try_recv() {
+                Ok(data) => {
+                    if live || *generation==self.analysis_generation {
+                        self.trend_view=Some((*generation,Arc::new(data)));
+                        self.trend_refreshed=Some(Instant::now());
+                    }
+                    self.trend_pending=None;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected)=>self.trend_pending=None,
+                Err(crossbeam_channel::TryRecvError::Empty)=>{}
+            }
+        }
+        if self.trend_pending.is_some() || self.trend_view.as_ref().is_some_and(|(generation,_)|
+            *generation==self.analysis_generation || (live && self.trend_refreshed.is_some_and(|t|t.elapsed()<LIVE_ANALYSIS_REFRESH))) {return;}
+        let generation=self.analysis_generation;
+        let origin=self.time_origin();
+        if live {
+            // Transaction attribution can take hundreds of milliseconds on dense
+            // root traces. Work on a bounded retained snapshot off the UI thread.
+            let engine=self.analysis().select_completed(|_|true);
+            let (tx,rx)=bounded(1);
+            self.trend_pending=Some((generation,rx));
+            std::thread::spawn(move || {
+                let mut data=TrendData::build(&engine,origin);
+                data.live_summary=Some(engine.retained_summary());
+                let _=tx.send(data);
+            });
+        } else {
+            self.trend_view=Some((generation,Arc::new(TrendData::build(self.analysis(),origin))));
+            self.trend_refreshed=Some(Instant::now());
         }
     }
 }

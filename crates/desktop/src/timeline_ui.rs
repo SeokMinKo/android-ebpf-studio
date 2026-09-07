@@ -129,7 +129,12 @@ fn build_timeline(engine:&AnalysisEngine,mode:TimelineMode,origin:u64)->Timeline
     }).collect();
     TimelineView {mode,origin,lanes,points}
 }
+#[cfg(test)]
 fn compute_timeline_selection(engine:&AnalysisEngine,request:SelectionRequest,mode:TimelineMode,origin:u64,bw:BandwidthContext)->SelectionSummary {
+    compute_timeline_selection_cancellable(engine,request,mode,origin,bw,None).expect("uncancelled timeline")
+}
+fn compute_timeline_selection_cancellable(engine:&AnalysisEngine,request:SelectionRequest,mode:TimelineMode,origin:u64,bw:BandwidthContext,cancelled:Option<&AtomicBool>)->Option<SelectionSummary> {
+    if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
     let started=Instant::now();
     let mut timeline=build_timeline(engine,mode,origin);
     timeline.points.retain(|p|match request {
@@ -138,7 +143,7 @@ fn compute_timeline_selection(engine:&AnalysisEngine,request:SelectionRequest,mo
     });
     let keys:std::collections::HashSet<_>=timeline.points.iter().map(|p|p.key).collect();
     let cohort=engine.select_completed(|io|keys.contains(&selection_key(io)));
-    let mut result=compute_selection(&cohort,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,origin);
+    let mut result=compute_selection_cancellable(&cohort,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,origin,cancelled)?;
     result.source_rows=engine.completed_ios().len();result.unplottable_rows=engine.completed_ios().iter().filter(|io|io.completion_timestamp().is_none()).count();result.metric_axis=Some(AxisMetric::DeviceLatencyMs);result.metric=Default::default();result.bounds=None;
     for io in cohort.completed_ios() {result.metric.observe(io.issue.operation,io.device_latency_ns.map(|n|n as f64/1e6));}
     result.metric.finish();
@@ -148,7 +153,7 @@ fn compute_timeline_selection(engine:&AnalysisEngine,request:SelectionRequest,mo
         let bounds=result.bounds.get_or_insert_with(||egui_plot::PlotBounds::from_min_max(a,b));
         bounds.extend_with(&egui_plot::PlotPoint::new(a[0],a[1]));bounds.extend_with(&egui_plot::PlotPoint::new(b[0],b[1]));
     }
-    result.timeline=Some(timeline);result.elapsed=started.elapsed();bw.attach(&mut result);result
+    result.timeline=Some(timeline);result.elapsed=started.elapsed();bw.attach(&mut result);Some(result)
 }
 impl StudioApp {
     fn timeline_ui(&mut self,ui:&mut egui::Ui) {

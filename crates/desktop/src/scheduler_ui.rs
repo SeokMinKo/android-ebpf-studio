@@ -34,7 +34,7 @@ mod scheduler_tests {
     #[test]
     fn scheduler_switch_discards_previous_request_summary_work() {
         let mut app=StudioApp{y_axis:AxisMetric::SchedulerIoWait,..Default::default()};
-        let (_tx,rx)=bounded(1);app.selection.all_pending=Some((0,AxisMetric::TimeMs,AxisMetric::Sector,rx));
+        let (_tx,rx)=bounded(1);app.selection.all_pending=Some((0,AxisMetric::TimeMs,AxisMetric::Sector,SummaryWork {receiver:rx,cancelled:Arc::new(AtomicBool::new(false))}));
         let ctx=egui::Context::default();let mut output=ctx.run_ui(Default::default(),|root|app.selection_panel(root));output.textures_delta.clear();
         assert!(app.selection.all_pending.is_none(),"previous request-summary receiver cannot remain pending on scheduler view");
     }

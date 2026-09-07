@@ -217,6 +217,7 @@ impl DirectionSummary {
 
 #[derive(Debug, Default)]
 struct SelectionSummary {
+    companion_distributions:BTreeMap<String,crate::graph_summary::MetricDistribution>,
     timeline:Option<TimelineView>,
     window_series:Option<crate::window_series::WindowSeries>,
     categories:BTreeMap<String,BTreeMap<String,(u64,u64)>>,
@@ -301,11 +302,22 @@ impl SelectionSummary {
     }
 }
 
+struct SummaryWork {
+    receiver: Receiver<SelectionSummary>,
+    cancelled: Arc<AtomicBool>,
+}
+impl Drop for SummaryWork {
+    fn drop(&mut self) {self.cancelled.store(true,Ordering::Relaxed);}
+}
+impl SummaryWork {
+    fn try_recv(&self)->Result<SelectionSummary,crossbeam_channel::TryRecvError> {self.receiver.try_recv()}
+}
+
 #[derive(Default)]
 struct SelectionState {
     all_refresh: Option<Instant>,
     all_summary: Option<(u64, AxisMetric, AxisMetric, SelectionSummary)>,
-    all_pending: Option<(u64, AxisMetric, AxisMetric, Receiver<SelectionSummary>)>,
+    all_pending: Option<(u64, AxisMetric, AxisMetric, SummaryWork)>,
     requested_at: Option<Instant>,
     wall_ms: Option<f64>,
     inspector_tab: InspectorTab,
@@ -329,6 +341,10 @@ fn compute_selection(
     y: AxisMetric,
     origin: u64,
 ) -> SelectionSummary {
+    compute_selection_cancellable(engine,request,x,y,origin,None).expect("uncancelled selection")
+}
+fn compute_selection_cancellable(engine:&AnalysisEngine,request:SelectionRequest,x:AxisMetric,y:AxisMetric,origin:u64,cancelled:Option<&AtomicBool>)->Option<SelectionSummary> {
+    if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
     let started = Instant::now();
     let metric_axis = if y == AxisMetric::TimeMs { x } else { y };
     let mut result = SelectionSummary {
@@ -336,9 +352,11 @@ fn compute_selection(
         metric_axis: Some(metric_axis),
         ..Default::default()
     };
+    let x_categories=AxisCategories::build(engine,x);let y_categories=AxisCategories::build(engine,y);
     let mut addresses = crate::graph_summary::AddressAccumulator::default();
     let mut locality = crate::graph_summary::LocalityAccumulator::default();
     for io in engine.completed_ios() {
+        if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
         if let SelectionRequest::Point(key) = request
             && selection_key(io) != key
         {
@@ -346,8 +364,8 @@ fn compute_selection(
         }
         let graph = (x.needs_graph() || y.needs_graph()).then(|| engine.transaction_for(io));
         let (Some(px), Some(py)) = (
-            x.value(io, origin, graph.as_ref()),
-            y.value(io, origin, graph.as_ref()),
+            x_categories.value(x,io, origin, graph.as_ref()),
+            y_categories.value(y,io, origin, graph.as_ref()),
         ) else {
             result.unplottable_rows += 1;
             continue;
@@ -362,7 +380,11 @@ fn compute_selection(
             continue;
         }
         result.observe(io, [px, py]);
-        result.metric.observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));
+        let mut companion_axes=vec![AxisMetric::ChunkKiB,AxisMetric::IssueQueueDepth];
+        for axis in [x,y] {if axis!=AxisMetric::TimeMs && !matches!(axis,AxisMetric::Category(_)) && !companion_axes.contains(&axis) {companion_axes.push(axis);}}
+        for axis in companion_axes {result.companion_distributions.entry(axis.label().into()).or_default().observe(io.issue.operation,axis.value(io,origin,graph.as_ref()));}
+        for (i,axis) in [x,y].into_iter().enumerate() {if let AxisMetric::Category(c)=axis && (i==0 || x!=y) {result.observe_category(&format!("Axis: {}",c.label()),c.key(io,graph.as_ref()),io);}}
+        if !matches!(metric_axis,AxisMetric::Category(_)) {result.metric.observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));}
         if matches!(metric_axis, AxisMetric::Sector | AxisMetric::AddressKiB) {
             result.address_distributions.entry((io.issue.device_major, io.issue.device_minor)).or_default()
                 .observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));
@@ -374,15 +396,17 @@ fn compute_selection(
         let layers:std::collections::BTreeSet<_>=graph.nodes.iter().map(|n|format!("{:?}",n.kind)).collect();
         for layer in layers {result.observe_category("Observed layer membership",layer,io);}
     }
+    if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
     result.read.latency.sort_unstable();
     result.write.latency.sort_unstable();
     result.metric.finish();
+    for d in result.companion_distributions.values_mut() {d.finish();}
     for dist in result.address_distributions.values_mut() { dist.finish(); }
     result.address_counts = addresses.finish();
     result.locality=locality.finish();
     result.categories.insert("File candidate membership".into(),result.files.iter().map(|((path,identity,confidence),r)|(format!("{path} / {identity} [{confidence}]"),(r.count,r.read_bytes.saturating_add(r.write_bytes)))).collect());
     result.elapsed = started.elapsed();
-    result
+    Some(result)
 }
 
 impl StudioApp {
@@ -714,6 +738,21 @@ mod selection_tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn summary_cancellation_invalidating_a_filter_signals_the_running_worker() {
+        let mut app=StudioApp {analyzer:fixture(4),..Default::default()};
+        app.poll_graph_summary();
+        let cancelled=Arc::clone(&app.selection.all_pending.as_ref().unwrap().3.cancelled);
+        app.query.pid=999;
+        app.invalidate_query();
+        assert!(cancelled.load(Ordering::Relaxed),"discarded receiver must stop obsolete aggregation, not just hide its result");
+    }
+    #[test]
+    fn summary_cancellation_never_publishes_a_partial_or_empty_result() {
+        let cancelled=AtomicBool::new(true);
+        let result=compute_selection_cancellable(&fixture(4),SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,0,Some(&cancelled));
+        assert!(result.is_none(),"cancelled work must not produce an apparent completed summary");
+    }
     #[test]
     fn graph_summary_invalidates_on_filter_reset_and_axis_change() {
         let mut app=StudioApp {analyzer:fixture(4),..Default::default()};

@@ -42,6 +42,16 @@ mod page_purpose_tests {
         e
     }
     #[test]
+    fn live_overview_defers_transaction_analysis_from_the_ui_frame() {
+        let mut app=StudioApp {analyzer:fixture(),phase:CapturePhase::Recording,..Default::default()};
+        let ctx=egui::Context::default();
+        let mut output=ctx.run_ui(Default::default(),|root| {
+            egui::CentralPanel::default().show(root,|ui|app.summary_ui(ui));
+        });
+        output.textures_delta.clear();
+        assert!(app.trend_view.is_none(),"first live frame must enqueue attribution analysis instead of doing it synchronously");
+    }
+    #[test]
     fn activity_cache_reuses_frames_and_rebuilds_after_filter_and_session_reset() {
         let mut app = StudioApp {
             analyzer: fixture(),
@@ -280,16 +290,15 @@ impl StudioApp {
             "Overview · choose where to look",
             "Ranked observations in the current filters, followed by activity and distribution. Rankings are not proof of a fault.",
         );
-        if self
-            .trend_view
-            .as_ref()
-            .is_none_or(|(g, _)| *g != self.analysis_generation)
-        {
-            self.trend_view = Some((
-                self.analysis_generation,
-                Arc::new(TrendData::build(self.analysis(), self.time_origin())),
-            ));
+        self.refresh_trend_view();
+        if self.trend_view.is_none() {
+            ui.spinner();
+            ui.label("Updating activity and FilePath observations…");
+            self.metrics_ui(ui);
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+            return;
         }
+        if self.trend_pending.is_some() { ui.small("Live observations are refreshing in the background."); }
         let data = &self.trend_view.as_ref().unwrap().1;
         let mut findings = Vec::new();
         if let Some(io) = &data.slowest {

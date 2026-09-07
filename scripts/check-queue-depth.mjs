@@ -64,13 +64,13 @@ if (page === "compare") {
   for (const side of ["baseline", "current"]) {
     const c = report.comparison_explore[side];
     checks[side + "_samples"] = samplesMatch(exact.comparison_explore[side]?.queue_depth_samples);
-    checks[side + "_graph"] = coordsMatch(c?.explorer_coordinates) && c.axes[0] === "In-flight at issue" && c.filtered === selected.length;
+    checks[side + "_graph"] = coordsMatch(c?.explorer_coordinates) && c.axes[0] === "Observed QD at issue (all devices)" && c.filtered === selected.length;
   }
   checks.ready_budget = report.comparison_explore.ready_ms < 5000;
 } else {
   checks.samples = samplesMatch(exact.queue_depth_samples) && report.completed_requests === selected.length;
   if (page === "overview") checks.peak_and_measured_count = report.displayed_summary?.max_queue_depth === peak && report.displayed_summary?.measured_queue_depth_ios === known.length;
-  else checks.graph = coordsMatch(report.explorer_coordinates) && report.explorer_axes[0] === "In-flight at issue";
+  else checks.graph = coordsMatch(report.explorer_coordinates) && report.explorer_axes[0] === "Observed QD at issue (all devices)";
 }
 fs.writeFileSync(path.join(out, "verdict.json"), JSON.stringify({checks, page, theme, filter, action, status, expected_count: selected.length, measured: known.length, peak, plottable: points.length, source_sha256: original, exe_sha256: hash(exe)}, null, 2));
 console.log(JSON.stringify(checks));

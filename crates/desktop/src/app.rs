@@ -37,6 +37,10 @@ const MAX_EXPLORER_GROUPS: usize = 32;
 const MAX_MESSAGES_PER_FRAME: usize = 1_000;
 const LIVE_ANALYSIS_REFRESH: Duration = Duration::from_millis(250);
 const PERFORMANCE_WARNING_INTERVAL: Duration = Duration::from_secs(10);
+include!("custom_axes.rs");
+include!("overall_ui.rs");
+include!("raw_log_ui.rs");
+include!("full_graph_tests.rs");
 include!("analysis_ui.rs");
 include!("latency_distribution.rs");
 include!("qa.rs");
@@ -99,6 +103,7 @@ enum Page {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExplorerPreset {
+    Overall,
     LatencyTimeline,
     LatencyByFile,
     QueuePressure,
@@ -130,7 +135,7 @@ enum ExplorerPreset {
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 28] = [
+    const ALL: [Self; 29] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
@@ -159,10 +164,12 @@ impl ExplorerPreset {
         Self::RequestGantt,
         Self::CpuEvents,
         Self::SchedulerIoWait,
+        Self::Overall,
     ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::Overall => "Overall · LBA / QD / Chunk",
             Self::LatencyTimeline => "Latency over time",
             Self::LatencyByFile => "Latency by file",
             Self::QueuePressure => "Queue depth vs latency",
@@ -217,7 +224,7 @@ impl ExplorerPreset {
                 AxisMetric::UfsLatencyMs,
                 GroupBy::File,
             )),
-            Self::LbaDistribution | Self::ConnectedFootprint => {
+            Self::Overall | Self::LbaDistribution | Self::ConnectedFootprint => {
                 Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
             }
             Self::Custom => None,
@@ -334,6 +341,7 @@ enum SetupStep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AxisMetric {
+    Category(CategoryAxis),
     TimeMs,
     Sector,
     AddressKiB,
@@ -360,7 +368,7 @@ enum AxisMetric {
 }
 
 impl AxisMetric {
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 27] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
@@ -381,10 +389,18 @@ impl AxisMetric {
         Self::RollingC2cBandwidth,
         Self::RollingD2dBandwidth,
         Self::QueueDepthAtIssue,
+        Self::Category(CategoryAxis::Command),
+        Self::Category(CategoryAxis::Access),
+        Self::Category(CategoryAxis::Size),
+        Self::Category(CategoryAxis::Device),
+        Self::Category(CategoryAxis::Process),
+        Self::Category(CategoryAxis::File),
+        Self::Category(CategoryAxis::Confidence),
     ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::Category(c) => c.label(),
             Self::TimeMs => "Time (ms)",
             Self::Sector => "Sector",
             Self::AddressKiB => "Address (KiB)",
@@ -415,7 +431,7 @@ impl AxisMetric {
         matches!(
             self,
             Self::FilesystemLatencyMs | Self::UfsLatencyMs | Self::CriticalPathMs
-        )
+        ) || matches!(self,Self::Category(c) if c.needs_graph())
     }
 
     fn value(
@@ -425,6 +441,7 @@ impl AxisMetric {
         graph: Option<&IoTransactionGraph>,
     ) -> Option<f64> {
         match self {
+            Self::Category(_) => None,
             Self::TimeMs => io
                 .completion_timestamp()
                 .map(|ts| ts.saturating_sub(origin_ns) as f64 / 1e6),
@@ -484,7 +501,8 @@ impl AxisMetric {
 
     fn format_value(self, value: f64) -> String {
         match self {
-            Self::Sector
+            Self::Category(_)
+            | Self::Sector
             | Self::Pid
             | Self::QueueDepth
             | Self::QueueDepthAtIssue
@@ -601,6 +619,9 @@ struct ExplorerPoint {
 
 #[derive(Debug, Clone)]
 struct ExplorerView {
+    overall: OverallPoints,
+    x_categories: AxisCategories,
+    y_categories: AxisCategories,
     generation: u64,
     x_axis: AxisMetric,
     y_axis: AxisMetric,
@@ -680,6 +701,7 @@ pub struct StudioApp {
     loss_status: String,
     source_info: Vec<WireRecord>,
     raw_export_pending: bool,
+    raw_log: RawLogState,
     discovery_pending: bool,
     last_discovery: Option<Instant>,
     theme: ThemeChoice,
@@ -700,6 +722,8 @@ pub struct StudioApp {
     filtered_generation: u64,
     filter_edit_epoch: u64,
     trend_view: Option<(u64, Arc<TrendData>)>,
+    trend_pending: Option<(u64, crossbeam_channel::Receiver<TrendData>)>,
+    trend_refreshed: Option<Instant>,
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
     simulator_stop: Option<Arc<AtomicBool>>,
@@ -722,6 +746,7 @@ pub struct StudioApp {
     y_axis: AxisMetric,
     group_by: GroupBy,
     explorer_preset: ExplorerPreset,
+    custom_geometry: CustomGeometry,
     selected_pipeline_request: Option<IoSelectionKey>,
     analysis_generation: u64,
     explorer_view: Option<ExplorerView>,
@@ -770,6 +795,7 @@ impl Default for StudioApp {
             loss_status: "Loss counters not reported".into(),
             source_info: Vec::new(),
             raw_export_pending: false,
+            raw_log: RawLogState::default(),
             discovery_pending: false,
             last_discovery: None,
             theme: ThemeChoice::System,
@@ -790,6 +816,8 @@ impl Default for StudioApp {
             filtered_generation: u64::MAX,
             filter_edit_epoch: 0,
             trend_view: None,
+            trend_pending: None,
+            trend_refreshed: None,
             recent: VecDeque::new(),
             capture: None,
             simulator_stop: None,
@@ -812,6 +840,7 @@ impl Default for StudioApp {
             y_axis: AxisMetric::TotalLatencyMs,
             group_by: GroupBy::Direction,
             explorer_preset: ExplorerPreset::LatencyTimeline,
+            custom_geometry: CustomGeometry::default(),
             selected_pipeline_request: None,
             analysis_generation: 0,
             explorer_view: None,
@@ -1152,6 +1181,8 @@ impl StudioApp {
         self.filtered_generation = u64::MAX;
         self.file_evidence_positions = None;
         self.trend_view = None;
+        self.trend_pending = None;
+        self.trend_refreshed = None;
         self.phase = CapturePhase::Complete;
         self.selected_pipeline_request = None;
         self.loss_status = loaded.loss_status;
@@ -1565,6 +1596,8 @@ impl StudioApp {
             ..Default::default()
         };
         self.trend_view = None;
+        self.trend_pending = None;
+        self.trend_refreshed = None;
         self.query = AnalysisFilter::default();
         self.filtered = None;
         self.capture_error = None;
@@ -1753,7 +1786,19 @@ impl StudioApp {
     }
 
     fn metrics_ui(&mut self, ui: &mut egui::Ui) {
-        let summary = self.analysis_summary();
+        let summary = if self.is_running() {
+            let Some(summary) = self
+                .trend_view
+                .as_ref()
+                .and_then(|(_, data)| data.live_summary.clone())
+            else {
+                ui.label("Retained I/O statistics are updating in the background.");
+                return;
+            };
+            summary
+        } else {
+            self.analysis_summary()
+        };
         if summary.completed_ios == 0 {
             ui.label("No retained completed I/O detail. Per-request volume and latency are unavailable; check the separate kernel snapshot or device counters.");
             return;
@@ -1830,6 +1875,8 @@ impl StudioApp {
         let samples = self.analysis().completed_ios();
         let available = samples.len();
         let origin_ns = self.time_origin();
+        let x_categories = AxisCategories::build(self.analysis(), self.x_axis);
+        let y_categories = AxisCategories::build(self.analysis(), self.y_axis);
         let shows_storage_address =
             self.x_axis.is_storage_address() || self.y_axis.is_storage_address();
         let needs_graph = self.x_axis.needs_graph()
@@ -1847,8 +1894,8 @@ impl StudioApp {
             let graph = needs_graph.then(|| self.analysis().transaction_for(io));
             let graph = graph.as_ref();
             let (Some(x), Some(y)) = (
-                self.x_axis.value(io, origin_ns, graph),
-                self.y_axis.value(io, origin_ns, graph),
+                x_categories.value(self.x_axis, io, origin_ns, graph),
+                y_categories.value(self.y_axis, io, origin_ns, graph),
             ) else {
                 continue;
             };
@@ -1880,6 +1927,13 @@ impl StudioApp {
         }
         groups.sort_by(|left, right| left.0.cmp(&right.0));
         self.explorer_view = Some(ExplorerView {
+            overall: if self.explorer_preset == ExplorerPreset::Overall {
+                OverallPoints::build(self.analysis(), origin_ns)
+            } else {
+                OverallPoints::default()
+            },
+            x_categories,
+            y_categories,
             generation: self.analysis_generation,
             x_axis: self.x_axis,
             y_axis: self.y_axis,
@@ -1932,10 +1986,12 @@ impl StudioApp {
                             ui.selectable_value(&mut self.explorer_preset, preset, preset.label());
                         }
                     });
+                if previous != self.explorer_preset {self.explorer_view=None;}
                 if previous != self.explorer_preset
                     && let Some((x, y, group)) = self.explorer_preset.query()
                 {
                     self.footprint.connected=self.explorer_preset==ExplorerPreset::ConnectedFootprint;
+                    if self.explorer_preset==ExplorerPreset::Overall {self.footprint.mode=FootprintMode::Combined;}
                     self.x_axis = x;
                     self.y_axis = y;
                     self.group_by = group;
@@ -1989,6 +2045,9 @@ impl StudioApp {
                 auto_bounds: true,
                 ..Default::default()
             };
+        }
+        if self.explorer_preset == ExplorerPreset::Custom {
+            self.custom_geometry_ui(ui);
         }
         self.footprint_controls(ui);
         if (self.footprint.mode != FootprintMode::Combined || self.connected_footprint())
@@ -2071,6 +2130,12 @@ impl StudioApp {
             ui.label("Observed in-flight requests across all captured devices: at issue includes this request; after completion excludes it. Filters preserve the original context. Loss, ID ambiguity and expiry can reduce the count; this is not hardware queue depth.");
         }
         let plot = studio_plot("interactive-storage-explorer");
+        let plot = if self.explorer_preset == ExplorerPreset::Overall {
+            plot.link_axis("overall-time", [true, false])
+                .link_cursor("overall-cursor", [true, false])
+        } else {
+            plot
+        };
         let plot = if show_legend {
             plot.legend(Legend::default())
         } else {
@@ -2088,6 +2153,8 @@ impl StudioApp {
             })
             .x_axis_label(self.x_axis.label())
             .y_axis_label(self.y_axis.label())
+            .x_axis_formatter(|m, _| view.x_categories.tick(x_axis, m.value))
+            .y_axis_formatter(|m, _| view.y_categories.tick(y_axis, m.value))
             .label_formatter(|hover| match hover {
                 HoverPosition::NearDataPoint {
                     plot_name,
@@ -2191,6 +2258,31 @@ impl StudioApp {
                     }
                 }
                 for (name, values) in &view.groups {
+                    if self.explorer_preset == ExplorerPreset::Custom
+                        && self.custom_geometry != CustomGeometry::Scatter
+                    {
+                        let mut rows: Vec<_> = values.iter().map(|p| p.coordinates).collect();
+                        rows.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                        let color = self.plot_style.color(self.group_by, name);
+                        if self.custom_geometry == CustomGeometry::Line {
+                            plot.line(
+                                Line::new(format!("{name} line"), rows)
+                                    .color(color)
+                                    .allow_hover(false),
+                            );
+                        } else {
+                            plot.bar_chart(
+                                egui_plot::BarChart::new(
+                                    format!("{name} bars"),
+                                    rows.iter()
+                                        .map(|p| egui_plot::Bar::new(p[0], p[1]).width(0.6))
+                                        .collect(),
+                                )
+                                .color(color)
+                                .allow_hover(false),
+                            );
+                        }
+                    }
                     let points: PlotPoints = values.iter().map(|point| point.coordinates).collect();
                     if let Some(summary) = &self.selection.summary {
                         let selected: PlotPoints = values
@@ -2213,6 +2305,25 @@ impl StudioApp {
                     );
                 }
             });
+        for (axis, categories) in [(x_axis, &view.x_categories), (y_axis, &view.y_categories)] {
+            if !categories.labels.is_empty() {
+                ui.collapsing(
+                    format!("{} axis labels ({})", axis.label(), categories.labels.len()),
+                    |ui| {
+                        let page = target_page(ui, axis.label(), categories.labels.len());
+                        for (i, label) in categories
+                            .labels
+                            .iter()
+                            .enumerate()
+                            .skip(page * 20)
+                            .take(20)
+                        {
+                            ui.label(format!("{i}: {label}"));
+                        }
+                    },
+                );
+            }
+        }
         self.selection.drag_start = drag_start;
         self.selection.current_bounds = Some(*plot_response.transform.bounds());
         // Comparison plots are peers: data-dependent status belongs after the
@@ -2261,6 +2372,9 @@ impl StudioApp {
                 .scroll_to_me(Some(egui::Align::Center));
         }
         if !compact {
+            if self.explorer_preset == ExplorerPreset::Overall {
+                self.overall_companions_ui(ui);
+            }
             self.table_ui(ui);
             ui.label(RichText::new("Queue latency requires block_rq_insert. Missing values are excluded instead of displayed as zero.").small().color(muted()));
         }
@@ -2691,6 +2805,7 @@ impl StudioApp {
             });
             return;
         };
+        self.raw_log_ui(ui, &io);
         ui.label(format!(
             "Focused I/O: {} · PID {} / TID {} · device {}:{}",
             io.issue.comm,
@@ -4532,7 +4647,9 @@ fn axis_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut AxisMetric) 
             .selected_text(value.label())
             .width(180.0)
             .show_ui(ui, |ui| {
-                for metric in AxisMetric::ALL {
+                for metric in AxisMetric::ALL.into_iter().filter(|m| {
+                    !id.starts_with("compare-") || !matches!(m, AxisMetric::Category(_))
+                }) {
                     ui.selectable_value(value, metric, metric.label());
                 }
             });

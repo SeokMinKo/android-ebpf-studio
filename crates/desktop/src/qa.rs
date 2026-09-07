@@ -3,6 +3,7 @@
 // Other scenarios never start device capture; fixtures retain their source.
 #[derive(Default)]
 struct RenderQa {
+    filter_rebuild_ms: Vec<f64>,
     lane_page:usize,
     lane_pages:usize,
     lane_visible:Vec<String>,
@@ -149,53 +150,7 @@ impl StudioApp {
             let Ok(serial) = std::env::var("ANDROID_EBPF_QA_DEVICE_SERIAL") else {
                 return;
             };
-            if self.render_qa.frames < 24
-                || self.render_qa.frames < self.render_qa.range_wait_frame + 4
-            {
-                return;
-            }
-            let step = self.render_qa.input_step;
-            if self.phase == CapturePhase::Error {
-                self.render_qa.input_step = 7;
-                return;
-            }
-            if step >= 4 {
-                if self.phase == CapturePhase::Complete {
-                    self.render_qa.stop_analysis_ms = self
-                        .render_qa
-                        .stop_at
-                        .map(|t| t.elapsed().as_secs_f64() * 1000.0);
-                    self.render_qa.input_step = 7;
-                }
-                return;
-            }
-            if step < 2 && self.selected_serial.as_deref() != Some(serial.as_str()) {
-                return;
-            }
-            if step == 2
-                && !(self.phase == CapturePhase::Recording
-                    && self
-                        .render_qa
-                        .device_recording_at
-                        .is_some_and(|t| t.elapsed() >= qa_record_duration()))
-            {
-                return;
-            }
-            if let Some((rect, _)) = self.render_qa.regions.get("capture-action") {
-                let pos = rect.center();
-                raw.events.push(egui::Event::PointerMoved(pos));
-                raw.events.push(egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: step.is_multiple_of(2),
-                    modifiers: Default::default(),
-                });
-                if step == 3 {
-                    self.render_qa.stop_at = Some(Instant::now());
-                }
-                self.render_qa.input_step += 1;
-                self.render_qa.range_wait_frame = self.render_qa.frames;
-            }
+            self.qa_capture_input(raw, &serial);
             return;
         }
         if matches!(
@@ -323,7 +278,8 @@ impl StudioApp {
         if gesture == "table-keyboard" {
             raw.focused = true;
             raw.events.push(egui::Event::WindowFocused(true));
-            if !self.render_qa.table_button_focused {
+            if self.render_qa.frames < 24 { return; }
+            if self.render_qa.input_step == 0 && !self.render_qa.table_button_focused {
                 return;
             }
             if self.render_qa.input_step < 2 {
@@ -734,6 +690,7 @@ impl StudioApp {
             self.compare_explore.category = group;
             self.compare_explore.needs_apply = true;
         }
+        if let Ok(style)=std::env::var("ANDROID_EBPF_QA_GEOMETRY") {self.custom_geometry=match style.as_str(){"line"=>CustomGeometry::Line,"bar"=>CustomGeometry::Bar,_=>CustomGeometry::Scatter};}
         if let Ok(axis) = std::env::var("ANDROID_EBPF_QA_Y_AXIS")
             && let Ok(index) = axis.parse::<usize>()
             && let Some(axis) = AxisMetric::ALL.get(index) {
@@ -741,6 +698,7 @@ impl StudioApp {
             self.y_axis = *axis;
             self.explorer_preset = ExplorerPreset::Custom;
         }
+        if let Ok(axis)=std::env::var("ANDROID_EBPF_QA_X_AXIS") && let Ok(index)=axis.parse::<usize>() && let Some(axis)=AxisMetric::ALL.get(index) {self.x_axis= *axis;self.explorer_preset=ExplorerPreset::Custom;}
     }
     fn render_qa_tick(&mut self, ctx: &egui::Context) {
         let Some(path) = self.render_qa.output.clone() else {
@@ -858,6 +816,10 @@ impl StudioApp {
                 image::ColorType::Rgba8,
             );
             let mut report = serde_json::json!({ "capture": path, "result": result.as_ref().map(|_| "saved").map_err(|e| e.to_string()), "phase": self.phase.label(), "page": format!("{:?}", self.page), "theme": format!("{:?}",self.theme), "completed_requests": self.analysis().completed_ios().len(), "received_events": self.received_events, "rejected": self.rejected_records, "frames": self.render_qa.frames, "reanalysis_before_first":self.render_qa.reanalysis_before_first,"reanalysis_window_first":self.render_qa.reanalysis_window_first,"source_completed_ios":self.reanalysis.source_count,"reanalysis_window_ns":self.reanalysis.window,"reanalysis_ms":self.reanalysis.elapsed_ms,"reanalysis_error":self.reanalysis.error,"reanalysis_actions":self.reanalysis.completed_actions,"file_evidence_count":self.file_evidence_positions.as_ref().map(|v|v.len()),"file_evidence_total":self.analysis().file_ios().len(),"filtered_read_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Read).count(),"filtered_write_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Write).count(),"explorer_available":self.explorer_view.as_ref().map(|v|v.available),"range_draft":self.selection.axis_range.values,"range_actions":self.render_qa.range_actions,"range_error":self.selection.axis_range.error,"range_initial":self.render_qa.range_initial.map(|b|[b.min(),b.max()]),"range_expected":self.render_qa.range_expected.map(|b|[b.min(),b.max()]),"range_applied":self.render_qa.range_applied.map(|b|[b.min(),b.max()]),"plot_bounds":self.selection.current_bounds.map(|b|[b.min(),b.max()]),"point_diameter":self.plot_style.point_diameter,"color_category":format!("{:?}",self.group_by),"rendered_colors":self.explorer_view.as_ref().map(|view|view.groups.iter().map(|(name,_)|(name,self.plot_style.color(self.group_by,name).to_array())).collect::<BTreeMap<_,_>>()), "stop_analysis_ms":self.render_qa.stop_analysis_ms,"session_path":self.session_path,"selected_files":self.selection.summary.as_ref().map(|s|s.files.len()),"selected_processes":self.selection.summary.as_ref().map(|s|s.processes.len()),"selection_count": self.selection.summary.as_ref().map(|s|s.keys.len()), "selection_ms": self.selection.summary.as_ref().map(|s|s.elapsed.as_secs_f64()*1000.0), "zoom_history_depth": self.selection.zoom_history.len(), "zoom_actions": self.render_qa.zoom_actions, "back_actions": self.render_qa.back_actions, "ui_performance": self.performance.snapshot() });
+            if let Some(text)=&self.raw_log.text {let raw=path.with_extension("raw-log.txt");let _=std::fs::write(&raw,text);report["raw_log"]=serde_json::json!({"path":raw,"loaded":true,"characters":text.len()});}
+            report["overall"]=self.explorer_view.as_ref().map_or(serde_json::Value::Null,|v|serde_json::json!({"points":v.overall.rows.len(),"qd_measured":v.overall.rows.iter().filter(|r|r.2.is_some()).count()}));
+            report["custom_axes"]=self.explorer_view.as_ref().map_or(serde_json::Value::Null,|v|serde_json::json!({"x":v.x_categories.labels,"y":v.y_categories.labels,"geometry":format!("{:?}",self.custom_geometry)}));
+            report["filter_rebuild_ms"]=serde_json::json!(self.render_qa.filter_rebuild_ms);
             report["comparison_explore"] = self.compare_qa_report();
             report["filter_states"]=serde_json::json!(self.render_qa.filter_states);
             report["lane_page_states"]=serde_json::json!(self.render_qa.lane_page_states);
@@ -956,6 +918,7 @@ impl StudioApp {
                     && self.selection.all_pending.is_none()
                     && (self.y_axis!=AxisMetric::SchedulerIoWait || (self.scheduler.pending.is_none() && self.scheduler.selected_pending.is_none()))
                     && self.footprint.pending.is_none()
+                    && self.raw_log.pending.is_none()
                     && self.compare_explore.pending.is_none()
                     && self
                         .comparison
@@ -977,5 +940,108 @@ impl StudioApp {
             self.render_qa.requested = true;
         }
         ctx.request_repaint_after(Duration::from_millis(50));
+    }
+}
+
+impl StudioApp {
+    fn qa_capture_input(&mut self, raw: &mut egui::RawInput, serial: &str) {
+            if self.render_qa.frames < 24
+                || self.render_qa.frames < self.render_qa.range_wait_frame + 4
+            {
+                return;
+            }
+            let step = self.render_qa.input_step;
+            if self.phase == CapturePhase::Error {
+                self.render_qa.input_step = 7;
+                return;
+            }
+            if step >= 4 {
+                if self.phase == CapturePhase::Complete {
+                    self.render_qa.stop_analysis_ms = self
+                        .render_qa
+                        .stop_at
+                        .map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                    self.render_qa.input_step = 7;
+                }
+                return;
+            }
+            if step < 2 && self.selected_serial.as_deref() != Some(serial) {
+                return;
+            }
+            if step == 2
+                && !(self.phase == CapturePhase::Recording
+                    && self
+                        .render_qa
+                        .device_recording_at
+                        .is_some_and(|t| t.elapsed() >= qa_record_duration()))
+            {
+                return;
+            }
+            if let Some((rect, _)) = self.render_qa.regions.get("capture-action") {
+                let pos = rect.center();
+                raw.events.push(egui::Event::PointerMoved(pos));
+                // Press and release in one input frame: a busy renderer must not
+                // turn an automated click into egui's long-press gesture.
+                for pressed in [true, false] {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos, button:egui::PointerButton::Primary, pressed,
+                        modifiers:Default::default(),
+                    });
+                }
+                if step == 2 { self.render_qa.stop_at=Some(Instant::now()); }
+                self.render_qa.input_step += 2;
+                self.render_qa.range_wait_frame = self.render_qa.frames;
+            }
+
+    }
+}
+
+#[cfg(test)]
+mod live_capture_qa_tests {
+    use super::*;
+    #[test]
+    fn capture_button_click_survives_slow_frames() {
+        let ctx=egui::Context::default();
+        let mut app=StudioApp::default();
+        app.render_qa.frames=24;
+        app.render_qa.input_step=2;
+        app.phase=CapturePhase::Recording;
+        app.render_qa.device_recording_at=Some(Instant::now()-Duration::from_secs(3600));
+        let mut clicked=false;
+        for frame in 0..8 {
+            let mut raw=egui::RawInput {time:Some(frame as f64 * 0.6),..Default::default()};
+            app.qa_capture_input(&mut raw,"fixture");
+            let mut output=ctx.run_ui(raw, |root| { egui::CentralPanel::default().show(root, |ui| {
+                let response=ui.button("Stop & analyze");
+                app.render_qa.regions.insert("capture-action".into(),(response.rect,response.rect));
+                clicked |= response.clicked();
+            }); });
+            output.textures_delta.clear();
+            app.render_qa.frames+=1;
+        }
+        assert!(clicked,"synthetic capture gesture must be a click even when each frame takes 600 ms");
+    }
+    #[test]
+    #[ignore = "opt-in saved real trace diagnostic"]
+    fn measure_live_overview_trace() {
+        use std::io::BufRead;
+        let path=std::env::var("ANDROID_EBPF_LIVE_PROBE").unwrap();
+        let mut engine=AnalysisEngine::new();
+        for line in std::io::BufReader::new(std::fs::File::open(path).unwrap()).lines() {
+            if let WireRecord::Event {event,..}=serde_json::from_str(&line.unwrap()).unwrap() {engine.ingest(event);}
+        }
+        let count=engine.completed_ios().len();
+        let mut app=StudioApp {analyzer:engine,phase:CapturePhase::Recording,..Default::default()};
+        let start=Instant::now(); app.refresh_trend_view(); let enqueue_ms=start.elapsed().as_secs_f64()*1000.;
+        assert!(app.trend_view.is_none());
+        assert!(enqueue_ms<150.,"Overview blocks the UI for {enqueue_ms:.2} ms");
+        let deadline=Instant::now()+Duration::from_secs(30);
+        while app.trend_view.is_none() {
+            app.refresh_trend_view();
+            assert!(Instant::now()<deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.trend_view.as_ref().unwrap().1.coverage.iter().sum::<u64>(),count as u64);
+        eprintln!("live overview: count={count} UI enqueue_ms={enqueue_ms:.2}, background result verified");
     }
 }

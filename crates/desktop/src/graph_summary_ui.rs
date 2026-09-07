@@ -9,6 +9,9 @@ impl StudioApp {
         if self.selection.all_summary.as_ref().is_some_and(|v| (v.1,v.2)!=(signature.1,signature.2) || (!live && v.0!=signature.0)) {
             self.selection.all_summary = None;
         }
+        if self.selection.all_pending.as_ref().is_some_and(|(g,x,y,_)| (*x,*y)!=(signature.1,signature.2) || (!live && *g!=signature.0)) {
+            self.selection.all_pending=None;
+        }
         if let Some((g,x,y,rx)) = &self.selection.all_pending {
             match rx.try_recv() {
                 Ok(summary) => {
@@ -32,10 +35,11 @@ impl StudioApp {
             let width=self.window_width_ms;
             let (g,x,y)=signature;
             let (tx,rx)=bounded(1);
-            self.selection.all_pending=Some((g,x,y,rx));
+            let cancelled=Arc::new(AtomicBool::new(false));
+            self.selection.all_pending=Some((g,x,y,SummaryWork {receiver:rx,cancelled:Arc::clone(&cancelled)}));
             std::thread::spawn(move || {
-                let s=compute_graph_selection(&engine,SelectionRequest::Rectangle {min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},x,y,origin,bw,width);
-                let _=tx.send(s);
+                let s=compute_graph_selection_cancellable(&engine,SelectionRequest::Rectangle {min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},[x,y],origin,bw,width,Some(&cancelled));
+                if !cancelled.load(Ordering::Relaxed) && let Some(s)=s {let _=tx.send(s);}
             });
         }
     }
@@ -174,9 +178,12 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
             if !series.activity_known {ui.colored_label(amber(),"Interval distribution unavailable: full device activity coverage is not proven. No zero-duration samples are invented.");}
         } else {ui.small(format!("{} time windows; each window contributes one sample. Empty windows are included, partial windows use their actual duration. Payload excludes non-R/W extents.",series.samples.len()));}
         metric_distribution_named_ui(ui,&summary.metric,axis.label(),series.metric.population());
+    } else if matches!(axis,AxisMetric::Category(_)) {
+        ui.small("Categorical axis: use count or payload shares below. Percentiles of category positions are not defined.");
     } else {
         metric_distribution_ui(ui,&summary.metric,axis.label());
     }
+    companion_distributions_ui(ui,summary);
     category_distribution_ui(ui,summary);
     if ui.button("Export graph summary CSV").clicked()
         && let Some(path)=rfd::FileDialog::new().set_file_name("graph-summary.csv").save_file() {
@@ -188,10 +195,10 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
 }
 
 fn category_distribution_ui(ui:&mut egui::Ui,s:&SelectionSummary) {
-    egui::CollapsingHeader::new("Cohort categories · count / payload share").default_open(std::env::var("ANDROID_EBPF_QA_SUMMARY_CATEGORIES").is_ok()).show(ui,|ui| {
+    egui::CollapsingHeader::new("Cohort categories · count / payload share").default_open(matches!(s.metric_axis,Some(AxisMetric::Category(_))) || std::env::var("ANDROID_EBPF_QA_SUMMARY_CATEGORIES").is_ok()).show(ui,|ui| {
         constrain_summary_width(ui);
         let id=ui.id().with("category-dimension");
-        let mut dimension=ui.data_mut(|d|d.get_temp::<String>(id).unwrap_or_else(||std::env::var("ANDROID_EBPF_QA_CATEGORY").unwrap_or("Command".into())));
+        let mut dimension=ui.data_mut(|d|d.get_temp::<String>(id).unwrap_or_else(||std::env::var("ANDROID_EBPF_QA_CATEGORY").unwrap_or_else(|_|if let Some(AxisMetric::Category(c))=s.metric_axis {format!("Axis: {}",c.label())}else{"Command".into()})));
         egui::ComboBox::from_id_salt("category-dimension").selected_text(&dimension).show_ui(ui,|ui| {
             for key in s.categories.keys() {ui.selectable_value(&mut dimension,key.clone(),key);}
         });
@@ -392,6 +399,13 @@ fn write_graph_summary_csv(path:&std::path::Path,s:&SelectionSummary)->anyhow::R
                     writer.write_record(["cdf",metric,&group,&value.to_string(),&(i+1).to_string(),&((i+1) as f64*100./d.values.len() as f64).to_string(),"percent; upper = cumulative count"])?;
                 }
             }
+        }
+    }
+    for (metric,m) in &s.companion_distributions {
+        for (direction,d) in [("Total",&m.total),("Read",&m.read),("Write",&m.write),("Other",&m.other)] {
+            for p in [0,25,50,75,90,95,99,100] {writer.write_record(["companion_percentile",metric,direction,&p.to_string(),"",&d.percentile(p).map_or("unavailable".into(),|v|v.to_string()),metric])?;}
+            for b in d.histogram(16) {writer.write_record(["companion_histogram",metric,direction,&b.lower.to_string(),&b.upper.to_string(),&b.count.to_string(),"requests"])?;}
+            writer.write_record(["companion_missing",metric,direction,"","",&d.missing.to_string(),"requests"])?;
         }
     }
     for r in &s.address_counts {

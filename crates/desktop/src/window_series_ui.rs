@@ -1,7 +1,12 @@
-fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:AxisMetric,y:AxisMetric,origin:u64,mut bw:BandwidthContext,width_ms:u64)->SelectionSummary {
-    if let AxisMetric::Timeline(mode)=y {return compute_timeline_selection(engine,request,mode,origin,bw);}
+fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:AxisMetric,y:AxisMetric,origin:u64,bw:BandwidthContext,width_ms:u64)->SelectionSummary {
+    compute_graph_selection_cancellable(engine,request,[x,y],origin,bw,width_ms,None).expect("uncancelled graph selection")
+}
+fn compute_graph_selection_cancellable(engine:&AnalysisEngine,request:SelectionRequest,axes:[AxisMetric;2],origin:u64,mut bw:BandwidthContext,width_ms:u64,cancelled:Option<&AtomicBool>)->Option<SelectionSummary> {
+    let [x,y]=axes;
+    if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
+    if let AxisMetric::Timeline(mode)=y {return compute_timeline_selection_cancellable(engine,request,mode,origin,bw,cancelled);}
     let AxisMetric::Window(metric)=y else {
-        let mut summary=compute_selection(engine,request,x,y,origin);bw.attach(&mut summary);return summary;
+        let mut summary=compute_selection_cancellable(engine,request,x,y,origin,cancelled)?;bw.attach(&mut summary);return Some(summary);
     };
     let started=Instant::now();
     let full_graph=matches!(request,SelectionRequest::Rectangle{min,max} if min==[f64::NEG_INFINITY;2] && max==[f64::INFINITY;2]);
@@ -16,7 +21,7 @@ fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:Axi
         }
     }).collect();
     let cohort=engine.select_completed(|io|io.completion_timestamp().is_some_and(|ts|if metric.intervals() && full_graph {ts>=bw.range.0 && ts<=bw.range.1}else{series.index_at(ts).is_some_and(|i|selected[i])}));
-    let mut summary=compute_selection(&cohort,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,origin);
+    let mut summary=compute_selection_cancellable(&cohort,SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,origin,cancelled)?;
     summary.source_rows=engine.completed_ios().len();summary.unplottable_rows=engine.completed_ios().iter().filter(|io|io.completion_timestamp().is_none()).count();summary.metric_axis=Some(y);summary.metric=Default::default();summary.bounds=None;
     let mut chosen=series;chosen.samples=std::mem::take(&mut chosen.samples).into_iter().zip(selected).filter_map(|(s,yes)|yes.then_some(s)).collect();
     if !(metric.intervals() && full_graph) {
@@ -33,7 +38,7 @@ fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:Axi
             bounds.extend_with(&egui_plot::PlotPoint::new(a[0],a[1]));bounds.extend_with(&egui_plot::PlotPoint::new(b[0],b[1]));
         }
     }
-    summary.metric.finish();summary.window_series=Some(chosen);summary.elapsed=started.elapsed();bw.attach(&mut summary);summary
+    summary.metric.finish();summary.window_series=Some(chosen);summary.elapsed=started.elapsed();bw.attach(&mut summary);Some(summary)
 }
 
 impl StudioApp {
