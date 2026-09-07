@@ -144,9 +144,11 @@ impl ExplorerPreset {
                 AxisMetric::UfsLatencyMs,
                 GroupBy::File,
             )),
-            Self::LbaDistribution => {
-                Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
-            }
+            Self::LbaDistribution => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::AddressMB,
+                GroupBy::Direction,
+            )),
             Self::Custom => None,
         }
     }
@@ -165,6 +167,7 @@ enum AxisMetric {
     TimeMs,
     Sector,
     AddressKiB,
+    AddressMB,
     ChunkKiB,
     TotalLatencyMs,
     QueueLatencyMs,
@@ -178,10 +181,11 @@ enum AxisMetric {
 }
 
 impl AxisMetric {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
+        Self::AddressMB,
         Self::ChunkKiB,
         Self::TotalLatencyMs,
         Self::QueueLatencyMs,
@@ -199,6 +203,7 @@ impl AxisMetric {
             Self::TimeMs => "Time (ms)",
             Self::Sector => "Sector",
             Self::AddressKiB => "Address (KiB)",
+            Self::AddressMB => "Address (MB)",
             Self::ChunkKiB => "Chunk (KiB)",
             Self::TotalLatencyMs => "Total latency (ms)",
             Self::QueueLatencyMs => "Queue latency (ms)",
@@ -231,6 +236,7 @@ impl AxisMetric {
                 .map(|ts| ts.saturating_sub(origin_ns) as f64 / 1e6),
             Self::Sector => Some(io.issue.sector as f64),
             Self::AddressKiB => Some(io.issue.sector as f64 / 2.0),
+            Self::AddressMB => Some(io.issue.sector as f64 * 512.0 / 1_000_000.0),
             Self::ChunkKiB => Some(io.issue.bytes as f64 / 1024.0),
             Self::TotalLatencyMs => io.total_latency_ns.map(|n| n as f64 / 1e6),
             Self::QueueLatencyMs => io.queue_latency_ns.map(|value| value as f64 / 1e6),
@@ -255,7 +261,7 @@ impl AxisMetric {
     }
 
     fn is_storage_address(self) -> bool {
-        matches!(self, Self::Sector | Self::AddressKiB)
+        matches!(self, Self::Sector | Self::AddressKiB | Self::AddressMB)
     }
 
     fn format_value(self, value: f64) -> String {
@@ -264,6 +270,7 @@ impl AxisMetric {
                 format!("{value:.0}")
             }
             Self::AddressKiB | Self::ChunkKiB => format!("{value:.1}"),
+            Self::AddressMB => format!("{value:.6}"),
             Self::TimeMs
             | Self::TotalLatencyMs
             | Self::QueueLatencyMs
@@ -585,11 +592,11 @@ impl Default for StudioApp {
             last_sequence: None,
             agent_footer_seen: false,
             agent_graceful: None,
-            page: Page::Overview,
+            page: Page::Explore,
             x_axis: AxisMetric::TimeMs,
-            y_axis: AxisMetric::TotalLatencyMs,
+            y_axis: AxisMetric::AddressMB,
             group_by: GroupBy::Direction,
-            explorer_preset: ExplorerPreset::LatencyTimeline,
+            explorer_preset: ExplorerPreset::LbaDistribution,
             selected_pipeline_request: None,
             analysis_generation: 0,
             explorer_view: None,
@@ -1132,7 +1139,7 @@ impl StudioApp {
                         Ok(coverage) => self.file_path_coverage = coverage,
                         Err(error) => self.capture_error = Some(error),
                     }
-                    self.page = Page::Overview;
+                    self.page = Page::Explore;
                     self.phase = if self.capture_error.is_some() {
                         CapturePhase::Error
                     } else {
@@ -1701,6 +1708,11 @@ impl StudioApp {
                 }
                 ui.selectable_value(&mut self.selection.enabled, true, "Select");
                 ui.selectable_value(&mut self.selection.enabled, false, "Pan");
+                let clear = ui.add_enabled(self.selection.has_selection(), egui::Button::new("Clear selection"));
+                qa_region(&mut self.render_qa, "clear-selection", clear.rect, ui.clip_rect());
+                if clear.clicked() {
+                    self.selection.clear_selection();
+                }
                 ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
             });
             ui.horizontal_wrapped(|ui| {
@@ -4435,7 +4447,7 @@ mod ui_tests {
     fn workflow_starts_with_connect_and_advances_after_device_selection() {
         let mut app = StudioApp::default();
         assert_eq!(app.setup_step(), SetupStep::Connect);
-        assert_eq!(app.page, Page::Overview);
+        assert_eq!(app.page, Page::Explore);
 
         app.selected_serial = Some("device-01".into());
         assert_eq!(app.setup_step(), SetupStep::Verify);
@@ -4546,5 +4558,33 @@ mod ui_tests {
         assert_eq!(relative_delta_percent(100, 125), Some(25.0));
         assert_eq!(relative_delta_percent(100, 75), Some(-25.0));
         assert_eq!(relative_delta_percent(0, 25), None);
+    }
+}
+
+#[cfg(test)]
+mod lba_default_regression {
+    use super::*;
+    #[test]
+    fn default_view_is_lba_in_decimal_megabytes() {
+        let app = StudioApp::default();
+        assert_eq!(app.page, Page::Explore);
+        assert_eq!(app.explorer_preset, ExplorerPreset::LbaDistribution);
+        assert_eq!(app.x_axis.label(), "Time (ms)");
+        assert_eq!(app.y_axis.label(), "Address (MB)");
+    }
+    #[test]
+    fn lba_preset_uses_512_byte_sectors_and_decimal_megabytes() {
+        let mut engine = AnalysisEngine::new();
+        for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+            if let WireRecord::Event { event, .. } = serde_json::from_str(line).unwrap() {
+                engine.ingest(event);
+            }
+        }
+        let mut io = engine.completed_ios()[0].clone();
+        io.issue.sector = 1_953_125;
+        let (_, y, _) = ExplorerPreset::LbaDistribution.query().unwrap();
+        assert_eq!(y.value(&io, 0, None), Some(1000.0));
+        assert_eq!(y.label(), "Address (MB)");
+        assert!(y.is_storage_address());
     }
 }

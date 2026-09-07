@@ -79,8 +79,8 @@ mod diskstats_performance_tests {
         output.textures_delta.clear();
         assert_eq!(app.phase, CapturePhase::Complete);
         assert!(
-            app.summary_view.is_some(),
-            "final results must appear automatically"
+            app.explorer_view.is_some(),
+            "final LBA results must appear automatically"
         );
     }
 
@@ -866,7 +866,7 @@ mod query_regressions {
         app.tx.send(HostMessage::Ended(Ok(()))).unwrap();
         app.drain_messages();
         assert!(!app.is_running());
-        assert_eq!(app.page, Page::Overview);
+        assert_eq!(app.page, Page::Explore);
     }
 
     #[test]

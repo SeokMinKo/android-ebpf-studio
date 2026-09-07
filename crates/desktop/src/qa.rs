@@ -40,6 +40,9 @@ struct RenderQa {
     zoom_actions: u64,
     back_actions: u64,
     input_step: u32,
+    selection_before_clear: Option<usize>,
+    clear_was_pending: bool,
+    clear_before_bounds: Option<egui_plot::PlotBounds>,
     table_button_focused: bool,
     stop_at: Option<Instant>,
     stop_analysis_ms: Option<f64>,
@@ -451,7 +454,27 @@ impl StudioApp {
         if self.render_qa.frames < 12 {
             return;
         }
-        if self.render_qa.input_step == 3 && self.selection.summary.is_none() {
+        if self.render_qa.input_step == 3 && self.selection.summary.is_none() && gesture != "selection-cancel-pending" {
+            return;
+        }
+        if matches!(gesture.as_str(), "selection-clear" | "selection-cancel-pending") && self.render_qa.input_step >= 3 {
+            let step = self.render_qa.input_step;
+            if step == 3 {
+                if !self.selection.has_selection() { return; }
+                self.render_qa.selection_before_clear = self.selection.summary.as_ref().map(|s| s.keys.len());
+                self.render_qa.clear_was_pending = self.selection.pending.is_some();
+                self.render_qa.clear_before_bounds = self.selection.current_bounds;
+            }
+            if step == 6 {
+                if !self.selection.has_selection() { self.render_qa.input_step = 7; }
+                return;
+            }
+            if let Some((rect, _)) = self.render_qa.regions.get("clear-selection") {
+                let pos = rect.center();
+                raw.events.push(egui::Event::PointerMoved(pos));
+                if step > 3 { raw.events.push(egui::Event::PointerButton {pos, button: egui::PointerButton::Primary, pressed: step == 4, modifiers: Default::default()}); }
+                self.render_qa.input_step += 1;
+            }
             return;
         }
         if gesture.starts_with("inspector-") && self.render_qa.input_step >= 3 {
@@ -598,7 +621,8 @@ impl StudioApp {
             Ok("investigate") => Page::Investigate,
             Ok("diagnostics") => Page::Diagnostics,
             Ok("compare") => Page::Compare,
-            _ => Page::Overview,
+            Ok("overview") => Page::Overview,
+            _ => self.page,
         };
     }
 
@@ -806,6 +830,10 @@ impl StudioApp {
             report["loss_status"] = serde_json::json!(self.loss_status);
             report["status"] = serde_json::json!(self.status);
             report["qa_timed_out"] = serde_json::json!(timed_out);
+            report["selection_before_clear"] = serde_json::json!(self.render_qa.selection_before_clear);
+            report["clear_was_pending"] = serde_json::json!(self.render_qa.clear_was_pending);
+            report["selection_pending"] = serde_json::json!(self.selection.pending.is_some());
+            report["clear_before_bounds"] = serde_json::json!(self.render_qa.clear_before_bounds.map(|b| [b.min(), b.max()]));
             report["qa_timeout_override_seconds"] = serde_json::json!(std::env::var("ANDROID_EBPF_QA_TIMEOUT_SECONDS").ok());
             report["active_filter"] = serde_json::json!(self.query);
             report["baseline_count"] =
