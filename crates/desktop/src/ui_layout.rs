@@ -3,12 +3,12 @@ fn studio_plot(id: impl egui::AsId) -> egui_plot::Plot<'static> {
         .custom_x_axes(vec![
             egui_plot::AxisHints::new_x()
                 .tick_label_color(ink())
-                .label_spacing(0.0..=1.0),
+                .label_spacing(64.0..=65.0),
         ])
         .custom_y_axes(vec![
             egui_plot::AxisHints::new_y()
                 .tick_label_color(ink())
-                .label_spacing(0.0..=1.0),
+                .label_spacing(24.0..=25.0),
         ])
 }
 
@@ -281,6 +281,37 @@ impl StudioApp {
 #[cfg(test)]
 mod ui_layout_tests {
     use super::*;
+
+
+    #[test]
+    fn wide_time_axis_labels_do_not_overlap() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, ThemeChoice::Light);
+        let render = || ctx.run_ui(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(2400.0, 300.0))),
+            ..Default::default()
+        }, |root| { egui::CentralPanel::default().show(root, |ui| {
+            studio_plot("wide-time-labels").height(220.0).show(ui, |plot| {
+                plot.points(Points::new("Read", vec![[0.0, 45615.0], [7500.0, 45624.0]]));
+            });
+        }); });
+        let mut first = render(); first.textures_delta.clear();
+        let mut output = render(); output.textures_delta.clear();
+        fn collect(shape: &egui::Shape, labels: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text.parse::<f64>().is_ok() => labels.push(egui::Rect::from_min_size(t.pos, t.galley.size())),
+                egui::Shape::Vec(shapes) => for s in shapes { collect(s, labels); },
+                _ => {}
+            }
+        }
+        let mut labels = Vec::new();
+        for s in output.shapes { collect(&s.shape, &mut labels); }
+        let bottom = labels.iter().map(|r|r.min.y).fold(f32::NEG_INFINITY, f32::max);
+        labels.retain(|r| (r.min.y-bottom).abs()<1.0);
+        labels.sort_by(|a,b| a.min.x.total_cmp(&b.min.x));
+        assert!(labels.len()>=3, "Need visible time ticks");
+        for pair in labels.windows(2) { assert!(pair[0].max.x+4.0 <= pair[1].min.x, "Overlapping time labels: {:?}",pair); }
+    }
 
     #[test]
     fn high_contrast_numeric_tick_text_does_not_fade_with_grid_strength() {

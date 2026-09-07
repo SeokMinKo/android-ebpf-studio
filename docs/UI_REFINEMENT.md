@@ -7,3 +7,5 @@ Primary task: inspect LBA I/O, select a request or area, then read its evidence.
 - Remove duplicate selection cancellation; keep the explicit Clear selection next to Select/Pan. Empty selection has a short action prompt and accessible expandable semantics.
 
 Authority: existing theme and source components; no new visual language or data encodings. Normal and selected real saved-session views, all three themes, and a narrow viewport require native render review. Physical device unavailable; no physical revalidation claimed.
+
+Rendered review correction: wide time-axis labels crowded each other. X tick labels now require 64 logical px and Y labels 24 px; grid and plotted coordinates remain unchanged. Independent painted-text bounds regression failed before the change and passes afterward.
