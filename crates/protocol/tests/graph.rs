@@ -123,7 +123,7 @@ fn identity(inode: u64) -> FileIdentity {
 }
 
 #[test]
-fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
+fn direct_identity_edges_stay_exact_while_enriched_paths_are_probable() {
     let mut engine = AnalysisEngine::new();
     engine.ingest(StorageEvent::FileIo(FileIo {
         start_ts_ns: 90,
@@ -244,10 +244,35 @@ fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
     let origins = graph.file_origins_for(request.node_id);
 
     assert_eq!(origins.len(), 2);
-    assert!(
+    assert_eq!(
         origins
             .iter()
-            .all(|origin| origin.confidence == EdgeConfidence::Exact)
+            .find(|origin| origin.file.inode == 101)
+            .unwrap()
+            .confidence,
+        EdgeConfidence::Probable
+    );
+    assert_eq!(
+        origins
+            .iter()
+            .find(|origin| origin.file.inode == 102)
+            .unwrap()
+            .confidence,
+        EdgeConfidence::Exact
+    );
+    assert!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge
+                .evidence
+                .iter()
+                .any(|evidence| evidence.match_type == "direct_bio_request"))
+            .all(|edge| edge.confidence == EdgeConfidence::Exact)
+    );
+    assert_eq!(
+        android_ebpf_protocol::FilePathConfidence::from_origins(&origins),
+        android_ebpf_protocol::FilePathConfidence::Unresolved
     );
     assert!(origins.iter().all(|origin| origin.file.inode != 999));
     assert_eq!(

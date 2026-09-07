@@ -517,7 +517,17 @@ impl IoTransactionGraph {
                 let candidate = FileOriginView {
                     file: file.clone(),
                     path: node.path.clone(),
-                    confidence,
+                    confidence: if self.edges.iter().any(|edge| {
+                        edge.from_node_id == node.node_id
+                            && edge
+                                .evidence
+                                .iter()
+                                .any(|evidence| evidence.match_type == "inferred_path_snapshot")
+                    }) {
+                        confidence.weakest(EdgeConfidence::Probable)
+                    } else {
+                        confidence
+                    },
                     incomplete: false,
                 };
                 origins
@@ -3467,46 +3477,15 @@ fn build_transaction_graph_refs(
         });
     }
 
+    let mut inferred_path_nodes = HashSet::new();
     for node in raw_nodes {
         if node.transaction_id == Some(request_id) {
             let mut enriched = node.clone();
             if enriched.path.is_none()
-                && let Some(identity) = &enriched.file
-                && let Some(file) = files
-                    .iter()
-                    .filter(|file| {
-                        file.file_identity.as_ref().is_some_and(|candidate| {
-                            file_identities_compatible(candidate, identity)
-                        })
-                    })
-                    .filter(|file| {
-                        file.start_ts_ns <= block_end.saturating_add(30_000_000_000)
-                            && file.end_ts_ns.saturating_add(30_000_000_000) >= block_start
-                    })
-                    // A closed/recycled FD can yield an identity without a path.
-                    // Such an observation cannot replace an existing path snapshot.
-                    .filter(|file| {
-                        file.path_snapshot
-                            .as_ref()
-                            .and_then(|snapshot| snapshot.path.as_deref())
-                            .filter(|path| !path.is_empty())
-                            .or(file.path.as_deref())
-                            .is_some_and(|path| !path.is_empty())
-                    })
-                    .max_by_key(|file| file.end_ts_ns)
+                && let Some(snapshot) = inferred_origin_path(node, files, block_start, block_end)
             {
-                enriched.path = file
-                    .path_snapshot
-                    .clone()
-                    .filter(|snapshot| snapshot.path.as_ref().is_some_and(|path| !path.is_empty()))
-                    .or_else(|| {
-                        file.path.clone().map(|path| PathSnapshot {
-                            deleted: path.ends_with(" (deleted)"),
-                            path: Some(path),
-                            source: PathSource::ProcFd,
-                            captured_ts_ns: file.end_ts_ns,
-                        })
-                    });
+                enriched.path = Some(snapshot);
+                inferred_path_nodes.insert(node.node_id);
             }
             let _ = graph.add_node(enriched);
         }
@@ -3522,10 +3501,94 @@ fn build_transaction_graph_refs(
                 .iter()
                 .any(|node| node.node_id == edge.to_node_id)
         {
-            let _ = graph.add_edge(edge.clone());
+            let mut enriched = edge.clone();
+            if inferred_path_nodes.contains(&edge.from_node_id) {
+                // Preserve identity-edge confidence. A separately looked-up path
+                // is only a probable FilePath, even when the inode edge is exact.
+                enriched.evidence.push(CorrelationEvidence {
+                    match_type: "inferred_path_snapshot".into(),
+                    opaque_key: None,
+                    delta_ns: None,
+                    candidate_count: 1,
+                    sector_match: false,
+                    bytes_match: false,
+                    task_match: false,
+                });
+            }
+            let _ = graph.add_edge(enriched);
         }
     }
     graph
+}
+
+fn recorded_file_path(file: &FileIo) -> Option<&str> {
+    file.path_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.path.as_deref())
+        .filter(|path| !path.is_empty())
+        .or_else(|| file.path.as_deref().filter(|path| !path.is_empty()))
+}
+
+fn inferred_origin_path(
+    node: &IoNode,
+    files: &[&FileIo],
+    block_start: u64,
+    block_end: u64,
+) -> Option<PathSnapshot> {
+    let identity = node.file.as_ref()?;
+    let candidates: Vec<_> = files
+        .iter()
+        .copied()
+        .filter(|file| {
+            file.file_identity
+                .as_ref()
+                .is_some_and(|candidate| file_identities_compatible(candidate, identity))
+                && file.start_ts_ns <= block_end.saturating_add(30_000_000_000)
+                && file.end_ts_ns.saturating_add(30_000_000_000) >= block_start
+                && recorded_file_path(file).is_some()
+        })
+        .collect();
+    // Prefer the syscall that actually spans this origin over later opens,
+    // renames, or reads of another hard link to the same inode.
+    let contemporaneous: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|file| {
+            file.start_ts_ns <= node.start_ts_ns
+                && file.end_ts_ns >= node.start_ts_ns
+                && (node.pid == 0 || node.pid == file.pid)
+                && (node.tid == 0 || node.tid == file.tid)
+                && node
+                    .operation
+                    .is_none_or(|operation| operation == file.operation)
+        })
+        .collect();
+    let eligible = if contemporaneous.is_empty() {
+        &candidates
+    } else {
+        &contemporaneous
+    };
+    let file = eligible.iter().max_by_key(|file| file.end_ts_ns)?;
+    let path = recorded_file_path(file)?;
+    // Conflicting paths without a unique contemporaneous explanation are
+    // unresolved; picking the last record would invent historical attribution.
+    if eligible
+        .iter()
+        .any(|candidate| recorded_file_path(candidate) != Some(path))
+    {
+        return None;
+    }
+    Some(
+        file.path_snapshot
+            .clone()
+            .filter(|snapshot| snapshot.path.as_ref().is_some_and(|path| !path.is_empty()))
+            .unwrap_or_else(|| PathSnapshot {
+                deleted: path.ends_with(" (deleted)"),
+                path: Some(path.to_owned()),
+                source: PathSource::ProcFd,
+                captured_ts_ns: file.end_ts_ns,
+            }),
+    )
 }
 
 fn file_identity_base_key(identity: &FileIdentity) -> (u32, u32, u64) {
