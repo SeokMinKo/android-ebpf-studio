@@ -743,7 +743,11 @@ impl StudioApp {
                     {
                         120
                     } else {
-                        8
+                        std::env::var("ANDROID_EBPF_QA_TIMEOUT_SECONDS")
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .unwrap_or(8)
+                            .clamp(8, 120)
                     },
                 )
         }) && self.render_qa.input_step < 7
@@ -802,6 +806,7 @@ impl StudioApp {
             report["loss_status"] = serde_json::json!(self.loss_status);
             report["status"] = serde_json::json!(self.status);
             report["qa_timed_out"] = serde_json::json!(timed_out);
+            report["qa_timeout_override_seconds"] = serde_json::json!(std::env::var("ANDROID_EBPF_QA_TIMEOUT_SECONDS").ok());
             report["active_filter"] = serde_json::json!(self.query);
             report["baseline_count"] =
                 serde_json::json!(self.comparison.as_ref().map(|b| b.summary.completed_ios));
