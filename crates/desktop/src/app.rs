@@ -224,7 +224,12 @@ impl ExplorerPreset {
                 AxisMetric::UfsLatencyMs,
                 GroupBy::File,
             )),
-            Self::Overall | Self::LbaDistribution | Self::ConnectedFootprint => {
+            Self::LbaDistribution => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::AddressMB,
+                GroupBy::Direction,
+            )),
+            Self::Overall | Self::ConnectedFootprint => {
                 Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
             }
             Self::Custom => None,
@@ -345,6 +350,7 @@ enum AxisMetric {
     TimeMs,
     Sector,
     AddressKiB,
+    AddressMB,
     ChunkKiB,
     TotalLatencyMs,
     QueueLatencyMs,
@@ -368,10 +374,11 @@ enum AxisMetric {
 }
 
 impl AxisMetric {
-    const ALL: [Self; 27] = [
+    const ALL: [Self; 28] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
+        Self::AddressMB,
         Self::ChunkKiB,
         Self::TotalLatencyMs,
         Self::QueueLatencyMs,
@@ -404,6 +411,7 @@ impl AxisMetric {
             Self::TimeMs => "Time (ms)",
             Self::Sector => "Sector",
             Self::AddressKiB => "Address (KiB)",
+            Self::AddressMB => "Address (MB)",
             Self::ChunkKiB => "Chunk (KiB)",
             Self::TotalLatencyMs => "Total latency (ms)",
             Self::QueueLatencyMs => "Queue latency (ms)",
@@ -447,6 +455,7 @@ impl AxisMetric {
                 .map(|ts| ts.saturating_sub(origin_ns) as f64 / 1e6),
             Self::Sector => Some(io.issue.sector as f64),
             Self::AddressKiB => Some(io.issue.sector as f64 / 2.0),
+            Self::AddressMB => Some(io.issue.sector as f64 * 512.0 / 1_000_000.0),
             Self::ChunkKiB => Some(io.issue.bytes as f64 / 1024.0),
             Self::TotalLatencyMs => io.total_latency_ns.map(|n| n as f64 / 1e6),
             Self::QueueLatencyMs => io.queue_latency_ns.map(|value| value as f64 / 1e6),
@@ -496,7 +505,7 @@ impl AxisMetric {
     }
 
     fn is_storage_address(self) -> bool {
-        matches!(self, Self::Sector | Self::AddressKiB)
+        matches!(self, Self::Sector | Self::AddressKiB | Self::AddressMB)
     }
 
     fn format_value(self, value: f64) -> String {
@@ -509,6 +518,7 @@ impl AxisMetric {
             | Self::IssueQueueDepth
             | Self::IssueCpu => format!("{value:.0}"),
             Self::AddressKiB | Self::ChunkKiB => format!("{value:.1}"),
+            Self::AddressMB => format!("{value:.6}"),
             Self::TimeMs
             | Self::TotalLatencyMs
             | Self::QueueLatencyMs
@@ -629,7 +639,30 @@ struct ExplorerView {
     groups: Vec<(String, Vec<ExplorerPoint>)>,
     available: usize,
     displayed: usize,
+    considered: usize,
     built_at: Instant,
+}
+
+impl ExplorerView {
+    fn caption(&self) -> String {
+        format!(
+            "Showing {} of {} completed I/O samples{}",
+            self.displayed,
+            self.available,
+            if self.available > self.considered {
+                " · sampled for display; extrema and sparse-gap boundaries retained"
+            } else {
+                ""
+            }
+        ) + &if self.considered > self.displayed {
+            format!(
+                " · {} requests lack axis measurements",
+                self.considered - self.displayed
+            )
+        } else {
+            String::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -835,11 +868,11 @@ impl Default for StudioApp {
             last_sequence: None,
             agent_footer_seen: false,
             agent_graceful: None,
-            page: Page::Overview,
+            page: Page::Explore,
             x_axis: AxisMetric::TimeMs,
-            y_axis: AxisMetric::TotalLatencyMs,
+            y_axis: AxisMetric::AddressMB,
             group_by: GroupBy::Direction,
-            explorer_preset: ExplorerPreset::LatencyTimeline,
+            explorer_preset: ExplorerPreset::LbaDistribution,
             custom_geometry: CustomGeometry::default(),
             selected_pipeline_request: None,
             analysis_generation: 0,
@@ -1389,7 +1422,7 @@ impl StudioApp {
                         Ok(coverage) => self.file_path_coverage = coverage,
                         Err(error) => self.capture_error = Some(error),
                     }
-                    self.page = Page::Overview;
+                    self.page = Page::Explore;
                     self.phase = if self.capture_error.is_some() {
                         CapturePhase::Error
                     } else {
@@ -1504,15 +1537,19 @@ impl StudioApp {
             WireRecord::Health {
                 emitted_events,
                 kernel_drops,
+                probe_health,
                 userspace_drops,
                 correlation_ambiguous,
                 correlation_expired,
                 key_reused,
                 ..
             } => {
-                self.loss_status = format!(
-                    "Kernel loss: {} · userspace loss: {userspace_drops} · ambiguous: {correlation_ambiguous} · expired: {correlation_expired}",
-                    kernel_drops.map_or_else(|| "not reported".into(), |v| v.to_string())
+                self.loss_status = session::root_health_status(
+                    kernel_drops,
+                    userspace_drops,
+                    correlation_ambiguous,
+                    correlation_expired,
+                    &probe_health,
                 );
                 let mut record = host_record(
                     self.session_id.as_deref().unwrap_or("session"),
@@ -1879,19 +1916,18 @@ impl StudioApp {
         let y_categories = AxisCategories::build(self.analysis(), self.y_axis);
         let shows_storage_address =
             self.x_axis.is_storage_address() || self.y_axis.is_storage_address();
-        let needs_graph = self.x_axis.needs_graph()
-            || self.y_axis.needs_graph()
-            || self.group_by.needs_graph()
-            || shows_storage_address;
+        let needs_measurement_graph =
+            self.x_axis.needs_graph() || self.y_axis.needs_graph() || self.group_by.needs_graph();
+        let needs_graph = needs_measurement_graph || shows_storage_address;
         let limit = if needs_graph {
             MAX_GRAPH_EXPLORER_POINTS
         } else {
             MAX_EXPLORER_POINTS
         };
-        let mut groups: BTreeMap<String, Vec<ExplorerPoint>> = BTreeMap::new();
-        for index in operation_sample_indices(samples, limit) {
-            let io = &samples[index];
-            let graph = needs_graph.then(|| self.analysis().transaction_for(io));
+        let mut measured_groups: BTreeMap<(String, IoOperation), Vec<ExplorerPoint>> =
+            BTreeMap::new();
+        for io in samples {
+            let graph = needs_measurement_graph.then(|| self.analysis().transaction_for(io));
             let graph = graph.as_ref();
             let (Some(x), Some(y)) = (
                 x_categories.value(self.x_axis, io, origin_ns, graph),
@@ -1899,14 +1935,11 @@ impl StudioApp {
             ) else {
                 continue;
             };
-            let file_tooltip = Some({
-                graph.map_or_else(
-                    || "File: <unattributed>".into(),
-                    |graph| file_origin_tooltip(&block_file_origins(graph)),
-                )
-            });
-            groups
-                .entry(self.group_by.key(io, graph))
+            // Not building a transaction graph for these axes is not evidence
+            // that a request has no file. Keep the tooltip absent until evaluated.
+            let file_tooltip = graph.map(|graph| file_origin_tooltip(&block_file_origins(graph)));
+            measured_groups
+                .entry((self.group_by.key(io, graph), io.issue.operation))
                 .or_default()
                 .push(ExplorerPoint {
                     coordinates: [x, y],
@@ -1914,7 +1947,26 @@ impl StudioApp {
                     request: selection_key(io),
                 });
         }
+        let measured: usize = measured_groups.values().map(Vec::len).sum();
+        let io_by_key: std::collections::HashMap<_, _> =
+            samples.iter().map(|io| (selection_key(io), io)).collect();
+        let mut groups: BTreeMap<String, Vec<ExplorerPoint>> = BTreeMap::new();
+        for ((name, _operation), points) in measured_groups {
+            let quota = (limit.saturating_mul(points.len()) / measured.max(1)).max(1);
+            let indices = shape_sample_indices(&points, quota);
+            let target = groups.entry(name).or_default();
+            target.extend(indices.into_iter().map(|index| {
+                let mut point = points[index].clone();
+                if shows_storage_address && point.file_tooltip.is_none() {
+                    let graph = self.analysis().transaction_for(io_by_key[&point.request]);
+                    point.file_tooltip = Some(file_origin_tooltip(&block_file_origins(&graph)));
+                }
+                point
+            }));
+        }
         let displayed = groups.values().map(Vec::len).sum();
+        // Caption accounts for all missing measurements separately from sampling.
+        let considered = displayed + (available - measured);
         let mut groups: Vec<_> = groups.into_iter().collect();
         if groups.len() > MAX_EXPLORER_GROUPS {
             groups.sort_by_key(|group| std::cmp::Reverse(group.1.len()));
@@ -1941,6 +1993,7 @@ impl StudioApp {
             groups,
             available,
             displayed,
+            considered,
             built_at: Instant::now(),
         });
         self.performance.observe_explorer_rebuild(started.elapsed());
@@ -1976,7 +2029,7 @@ impl StudioApp {
         ui.heading("Explore I/O");
         ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("VIEW").size(10.0).strong().color(muted()));
+                ui.label("Graph");
                 let previous = self.explorer_preset;
                 egui::ComboBox::from_id_salt("explorer-preset")
                     .selected_text(self.explorer_preset.label())
@@ -1998,8 +2051,16 @@ impl StudioApp {
                 }
                 ui.selectable_value(&mut self.selection.enabled, true, "Select");
                 ui.selectable_value(&mut self.selection.enabled, false, "Pan");
-                ui.label("Click / drag to select").on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
+                let clear = ui.add_enabled(self.selection.has_selection(), egui::Button::new("Clear selection"));
+                qa_region(&mut self.render_qa, "clear-selection", clear.rect, ui.clip_rect());
+                if clear.clicked() {
+                    self.selection.clear_selection();
+                }
+                ui.label(RichText::new("Click or drag to select").color(muted())).on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
             });
+            egui::CollapsingHeader::new("Plot settings")
+                .open((self.render_qa.output.is_some() && (std::env::var_os("ANDROID_EBPF_QA_RANGE").is_some() || std::env::var_os("ANDROID_EBPF_QA_PLOT_STYLE").is_some() || std::env::var_os("ANDROID_EBPF_QA_SETTINGS").is_some())).then_some(true))
+                .show(ui, |ui| {
             if !matches!(self.y_axis,AxisMetric::Window(_)|AxisMetric::Timeline(_)|AxisMetric::SchedulerIoWait) {
             if !self.connected_footprint() {
             ui.horizontal_wrapped(|ui| {
@@ -2036,6 +2097,12 @@ impl StudioApp {
                 }
             });
             }
+                    self.axis_ranges_ui(ui);
+                    let cache_valid = self.explorer_view.as_ref().is_some_and(|view| view.generation == self.analysis_generation && view.x_axis == self.x_axis && view.y_axis == self.y_axis && view.group_by == self.group_by);
+                    if !cache_valid { self.rebuild_explorer_view(); }
+                    let names = self.explorer_view.as_ref().map(|view| view.groups.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>()).unwrap_or_default();
+                    self.plot_colors_ui(ui, &names);
+                });
         });
         ui.add_space(10.0);
 
@@ -2052,7 +2119,10 @@ impl StudioApp {
         self.footprint_controls(ui);
         if (self.footprint.mode != FootprintMode::Combined || self.connected_footprint())
             && self.x_axis == AxisMetric::TimeMs
-            && matches!(self.y_axis, AxisMetric::Sector | AxisMetric::AddressKiB)
+            && matches!(
+                self.y_axis,
+                AxisMetric::Sector | AxisMetric::AddressKiB | AxisMetric::AddressMB
+            )
         {
             self.footprint_lanes_ui(ui);
             self.table_ui(ui);
@@ -2088,10 +2158,6 @@ impl StudioApp {
             .iter()
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
-        if !compact {
-            self.axis_ranges_ui(ui);
-            self.plot_colors_ui(ui, &names);
-        }
         let legend_id = ui.make_persistent_id(("plot-legend", self.group_by.label()));
         let mut show_legend = ui.ctx().data_mut(|d| {
             d.get_temp::<bool>(legend_id).unwrap_or_else(|| {
@@ -2102,7 +2168,7 @@ impl StudioApp {
             ui.checkbox(&mut show_legend, "Plot legend");
             if !show_legend {
                 ui.small(format!(
-                    "{} categories · full labels and colors in Colors above",
+                    "{} categories · labels and colors in Plot settings",
                     names.len()
                 ));
             }
@@ -2116,6 +2182,7 @@ impl StudioApp {
         let x_axis = self.x_axis;
         let y_axis = self.y_axis;
         let mut selection_request = None;
+        let mut selection_overlay = None;
         let mut drag_start = self.selection.drag_start;
         let selecting = self.selection.enabled;
         let bounds_command = self.selection.bounds_command.take();
@@ -2240,18 +2307,8 @@ impl StudioApp {
                     let p = plot.plot_from_screen(pos);
                     let min = [start[0].min(p.x), start[1].min(p.y)];
                     let max = [start[0].max(p.x), start[1].max(p.y)];
-                    let rectangle: PlotPoints = vec![
-                        [min[0], min[1]],
-                        [max[0], min[1]],
-                        [max[0], max[1]],
-                        [min[0], max[1]],
-                    ]
-                    .into();
-                    plot.polygon(
-                        egui_plot::Polygon::new("Selection area", rectangle)
-                            .fill_color(accent().gamma_multiply(0.15))
-                            .stroke(Stroke::new(1.5, accent())),
-                    );
+                    // Selection is a screen overlay, not data contributing to auto bounds.
+                    selection_overlay = Some((min, max));
                     if plot.response().drag_stopped() {
                         selection_request = Some(SelectionRequest::Rectangle { min, max });
                         drag_start = None;
@@ -2305,6 +2362,25 @@ impl StudioApp {
                     );
                 }
             });
+        if let Some((min, max)) = selection_overlay {
+            let rect = egui::Rect::from_two_pos(
+                plot_response
+                    .transform
+                    .position_from_point(&egui_plot::PlotPoint::new(min[0], min[1])),
+                plot_response
+                    .transform
+                    .position_from_point(&egui_plot::PlotPoint::new(max[0], max[1])),
+            );
+            ui.painter()
+                .with_clip_rect(plot_response.response.rect)
+                .rect(
+                    rect,
+                    0.0,
+                    accent().gamma_multiply(0.15),
+                    Stroke::new(1.5, accent()),
+                    egui::StrokeKind::Inside,
+                );
+        }
         for (axis, categories) in [(x_axis, &view.x_categories), (y_axis, &view.y_categories)] {
             if !categories.labels.is_empty() {
                 ui.collapsing(
@@ -2345,20 +2421,7 @@ impl StudioApp {
                 .color(muted()),
             );
         }
-        ui.label(
-            RichText::new(format!(
-                "Showing {} of {} completed I/O samples{}",
-                view.displayed,
-                view.available,
-                if view.available > view.displayed {
-                    " · sampled within each operation for interactive rendering"
-                } else {
-                    ""
-                }
-            ))
-            .small()
-            .color(muted()),
-        );
+        ui.label(RichText::new(view.caption()).small().color(muted()));
         if let Some(request) = selection_request {
             self.begin_selection(request);
         }
@@ -3002,6 +3065,7 @@ impl StudioApp {
         ui.add_space(10.0);
 
         let origin = pipeline.start_ts_ns;
+        self.render_qa.waterfall.clear();
         card_frame().show(ui, |ui| {
             studio_plot("pipeline-waterfall")
                 .height(390.0)
@@ -3012,9 +3076,11 @@ impl StudioApp {
                 .allow_zoom(true)
                 .show(ui, |plot| {
                     for span in &pipeline.spans {
-                        let x0 = span.start_ts_ns.saturating_sub(origin) as f64 / 1e6;
-                        let x1 = span.end_ts_ns.saturating_sub(origin) as f64 / 1e6;
+                        let [x0, x1] = waterfall_span_times_ms(span.start_ts_ns, span.end_ts_ns, origin);
                         let y = pipeline_layer_y(span.layer);
+                        if self.render_qa.output.is_some() {
+                            self.render_qa.waterfall.push(serde_json::json!({"name":span.name,"layer":span.layer,"x_ms":[x0,x1],"y":y,"duration_ns":span.duration_ns(),"duration_observed":span.duration_observed,"confidence":span.confidence,"operation":span.operation,"bytes":span.bytes,"pid":span.pid,"tid":span.tid,"origin_ns":origin}));
+                        }
                         let label = format!("{} · {} · {}", pipeline_layer_label(span.layer), confidence_label(span.confidence), span.name);
                         if span.duration_ns() == 0 {
                             plot.points(Points::new(label, PlotPoints::from(vec![[x0, y]])).radius(6.0).color(pipeline_layer_color(span.layer)));
@@ -4194,7 +4260,7 @@ fn apply_theme(ctx: &egui::Context, choice: ThemeChoice) {
     ctx.global_style_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 5.0);
         style.spacing.button_padding = egui::vec2(9.0, 5.0);
-        style.spacing.interact_size.y = 26.0;
+        style.spacing.interact_size.y = 28.0;
     });
 }
 
@@ -4450,7 +4516,12 @@ fn evenly_sample_indices(length: usize, limit: usize) -> Vec<usize> {
     if length <= limit {
         return (0..length).collect();
     }
-    (0..limit).map(|index| index * length / limit).collect()
+    if limit <= 1 {
+        return (0..limit).collect();
+    }
+    (0..limit)
+        .map(|index| index * (length - 1) / (limit - 1))
+        .collect()
 }
 
 fn operation_label(value: IoOperation) -> &'static str {
@@ -4685,6 +4756,61 @@ mod ui_tests {
     use android_ebpf_protocol::{FileIdentity, PathSnapshot, PathSource};
 
     #[test]
+    fn direction_presets_do_not_claim_known_file_is_unattributed() {
+        for (x, y) in [
+            (AxisMetric::TimeMs, AxisMetric::TotalLatencyMs),
+            (AxisMetric::QueueDepthAtIssue, AxisMetric::TotalLatencyMs),
+        ] {
+            let mut app = StudioApp::default();
+            for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+                let record: android_ebpf_protocol::WireRecord = serde_json::from_str(line).unwrap();
+                if let android_ebpf_protocol::WireRecord::Event { event, .. } = record {
+                    app.analyzer.ingest(event);
+                }
+            }
+            assert_eq!(app.analyzer.completed_ios().len(), 1);
+            let io = &app.analyzer.completed_ios()[0];
+            let graph = app.analyzer.transaction_for(io);
+            let path = "/data/local/tmp/ebpf-acceptance-1788751800737/alpha/read-A.bin";
+            assert!(file_origin_tooltip(&block_file_origins(&graph)).contains(path));
+            app.x_axis = x;
+            app.y_axis = y;
+            app.group_by = GroupBy::Direction;
+            app.rebuild_explorer_view();
+            let point = &app.explorer_view.as_ref().unwrap().groups[0].1[0];
+            assert!(
+                point
+                    .file_tooltip
+                    .as_ref()
+                    .is_none_or(|tip| !tip.contains("<unattributed>")),
+                "An unevaluated graph is not evidence of an unattributed file: {:?}",
+                point.file_tooltip
+            );
+        }
+    }
+
+    #[test]
+    fn missing_layer_measurements_are_not_display_sampling() {
+        let mut app = StudioApp::default();
+        for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+            let record: android_ebpf_protocol::WireRecord = serde_json::from_str(line).unwrap();
+            if let android_ebpf_protocol::WireRecord::Event { event, .. } = record {
+                app.analyzer.ingest(event);
+            }
+        }
+        let (x, y, group) = ExplorerPreset::ALL[3].query().unwrap();
+        app.x_axis = x;
+        app.y_axis = y;
+        app.group_by = group;
+        app.rebuild_explorer_view();
+        let view = app.explorer_view.as_ref().unwrap();
+        assert_eq!(view.available, 1);
+        assert_eq!(view.displayed, 0);
+        assert!(!view.caption().contains("sampled"), "{}", view.caption());
+        assert!(view.caption().contains("1 request"), "{}", view.caption());
+    }
+
+    #[test]
     fn failed_capture_does_not_leave_capturing_status() {
         let mut app = StudioApp {
             status: "Capturing eBPF storage events".into(),
@@ -4767,7 +4893,7 @@ mod ui_tests {
     fn workflow_starts_with_connect_and_advances_after_device_selection() {
         let mut app = StudioApp::default();
         assert_eq!(app.setup_step(), SetupStep::Connect);
-        assert_eq!(app.page, Page::Overview);
+        assert_eq!(app.page, Page::Explore);
 
         app.selected_serial = Some("device-01".into());
         assert_eq!(app.setup_step(), SetupStep::Verify);
@@ -4878,5 +5004,55 @@ mod ui_tests {
         assert_eq!(relative_delta_percent(100, 125), Some(25.0));
         assert_eq!(relative_delta_percent(100, 75), Some(-25.0));
         assert_eq!(relative_delta_percent(0, 25), None);
+    }
+}
+
+#[cfg(test)]
+mod lba_default_regression {
+    use super::*;
+    #[test]
+    fn default_view_is_lba_in_decimal_megabytes() {
+        let app = StudioApp::default();
+        assert_eq!(app.page, Page::Explore);
+        assert_eq!(app.explorer_preset, ExplorerPreset::LbaDistribution);
+        assert_eq!(app.x_axis.label(), "Time (ms)");
+        assert_eq!(app.y_axis.label(), "Address (MB)");
+    }
+    #[test]
+    fn lba_preset_uses_512_byte_sectors_and_decimal_megabytes() {
+        let mut engine = AnalysisEngine::new();
+        for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+            if let WireRecord::Event { event, .. } = serde_json::from_str(line).unwrap() {
+                engine.ingest(event);
+            }
+        }
+        let mut io = engine.completed_ios()[0].clone();
+        io.issue.sector = 1_953_125;
+        let (_, y, _) = ExplorerPreset::LbaDistribution.query().unwrap();
+        assert_eq!(y.value(&io, 0, None), Some(1000.0));
+        assert_eq!(y.label(), "Address (MB)");
+        assert!(y.is_storage_address());
+    }
+}
+
+fn waterfall_span_times_ms(start: u64, end: u64, origin: u64) -> [f64; 2] {
+    [
+        (i128::from(start) - i128::from(origin)) as f64 / 1e6,
+        (i128::from(end) - i128::from(origin)) as f64 / 1e6,
+    ]
+}
+
+#[cfg(test)]
+mod waterfall_time_regression {
+    #[test]
+    fn physical_syscall_bar_keeps_its_full_duration_before_block_origin() {
+        let points = super::waterfall_span_times_ms(
+            54_572_586_445_013,
+            54_572_589_954_805,
+            54_572_589_629_336,
+        );
+        assert!((points[0] - -3.184323).abs() < 1e-9);
+        assert!((points[1] - 0.325469).abs() < 1e-9);
+        assert!((points[1] - points[0] - 3.509792).abs() < 1e-9);
     }
 }

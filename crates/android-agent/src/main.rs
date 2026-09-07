@@ -13,6 +13,7 @@ use std::{
 };
 
 mod btf_layout;
+mod runtime_health;
 
 use android_ebpf_agent::trace_format::{
     parse_bio_remap_layout, parse_f2fs_extent_layout, parse_f2fs_folio_layout, parse_layout,
@@ -1406,6 +1407,7 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
     let correlation_salt = format_hash64(session_id.as_bytes());
     let mut f2fs_attributor =
         (f2fs_extent_active && !direct_attribution_active).then(F2fsExtentAttributor::default);
+    let runtime_programs = runtime_health::owned_programs(&bpf);
     let mut attached_bpf = Some(bpf);
     loop {
         if !running.load(Ordering::Acquire) {
@@ -1698,6 +1700,7 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
                     )),
                 );
             }
+            runtime_health::observe(&runtime_programs, &mut probe_health);
             write_record(
                 &mut output,
                 &WireRecord::Health {
@@ -3232,6 +3235,7 @@ fn parse_kernel_event(event: KernelEvent, correlation_salt: u64) -> Option<Stora
             };
             Some(StorageEvent::Pipeline(PipelineObservation {
                 ts_ns: event.ts_ns,
+                operation: None,
                 end_ts_ns: None,
                 phase,
                 layer,

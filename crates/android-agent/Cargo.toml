@@ -11,6 +11,7 @@ android-ebpf-types = { path = "../ebpf-types" }
 android-ebpf-protocol = { path = "../protocol" }
 anyhow.workspace = true
 aya = "0.14.0"
+aya-obj = "0.3.0"
 clap.workspace = true
 libc = "0.2"
 ctrlc = "3.5"

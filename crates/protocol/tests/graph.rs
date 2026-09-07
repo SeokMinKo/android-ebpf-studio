@@ -123,7 +123,7 @@ fn identity(inode: u64) -> FileIdentity {
 }
 
 #[test]
-fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
+fn direct_identity_edges_stay_exact_while_enriched_paths_are_probable() {
     let mut engine = AnalysisEngine::new();
     engine.ingest(StorageEvent::FileIo(FileIo {
         start_ts_ns: 90,
@@ -246,10 +246,35 @@ fn direct_request_origins_are_exact_multi_origin_and_suppress_heuristic_file() {
     let origins = graph.file_origins_for(request.node_id);
 
     assert_eq!(origins.len(), 2);
-    assert!(
+    assert_eq!(
         origins
             .iter()
-            .all(|origin| origin.confidence == EdgeConfidence::Exact)
+            .find(|origin| origin.file.inode == 101)
+            .unwrap()
+            .confidence,
+        EdgeConfidence::Probable
+    );
+    assert_eq!(
+        origins
+            .iter()
+            .find(|origin| origin.file.inode == 102)
+            .unwrap()
+            .confidence,
+        EdgeConfidence::Exact
+    );
+    assert!(
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge
+                .evidence
+                .iter()
+                .any(|evidence| evidence.match_type == "direct_bio_request"))
+            .all(|edge| edge.confidence == EdgeConfidence::Exact)
+    );
+    assert_eq!(
+        android_ebpf_protocol::FilePathConfidence::from_origins(&origins),
+        android_ebpf_protocol::FilePathConfidence::Unresolved
     );
     assert!(origins.iter().all(|origin| origin.file.inode != 999));
     assert_eq!(
@@ -315,4 +340,42 @@ fn extent_origin_keeps_exact_file_evidence_but_probable_request_lifetime() {
     assert_eq!(origins.len(), 1);
     assert_eq!(origins[0].file.inode, 303);
     assert_eq!(origins[0].confidence, EdgeConfidence::Probable);
+}
+
+#[test]
+fn critical_path_does_not_count_overlapping_grandchild_twice() {
+    let mut graph = IoTransactionGraph::new(99);
+    for n in [
+        node(1, IoNodeKind::Syscall, 0, 100),
+        node(2, IoNodeKind::BlockQueue, 40, 50),
+        node(3, IoNodeKind::BlockRequest, 50, 80),
+    ] {
+        graph.add_node(n).unwrap();
+    }
+    graph
+        .add_edge(IoEdge::exact(1, 1, 2, IoRelation::Calls))
+        .unwrap();
+    graph
+        .add_edge(IoEdge::exact(2, 2, 3, IoRelation::Submits))
+        .unwrap();
+    let metrics = graph.metrics();
+    assert_eq!(metrics.critical_path_ns, 100);
+    assert_eq!(metrics.exclusive_ns.get(&1), Some(&60));
+}
+
+#[test]
+fn context_only_edge_does_not_subtract_causal_execution_time() {
+    let mut graph = IoTransactionGraph::new(100);
+    graph
+        .add_node(node(1, IoNodeKind::Syscall, 0, 100))
+        .unwrap();
+    graph
+        .add_node(node(2, IoNodeKind::BlockRequest, 20, 80))
+        .unwrap();
+    let mut edge = IoEdge::exact(1, 1, 2, IoRelation::Calls);
+    edge.confidence = EdgeConfidence::ContextOnly;
+    graph.add_edge(edge).unwrap();
+    let metrics = graph.metrics();
+    assert_eq!(metrics.critical_path_ns, 100);
+    assert_eq!(metrics.exclusive_ns.get(&1), Some(&100));
 }

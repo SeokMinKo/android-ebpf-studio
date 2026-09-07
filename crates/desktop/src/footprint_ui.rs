@@ -163,9 +163,9 @@ fn build_footprint(engine:&AnalysisEngine,generation:u64,mode:FootprintMode,orig
 }
 
 impl StudioApp {
-    fn connected_footprint(&self)->bool {(self.footprint.connected||self.explorer_preset==ExplorerPreset::ConnectedFootprint) && self.x_axis==AxisMetric::TimeMs && matches!(self.y_axis,AxisMetric::Sector|AxisMetric::AddressKiB)}
+    fn connected_footprint(&self)->bool {(self.footprint.connected||self.explorer_preset==ExplorerPreset::ConnectedFootprint) && self.x_axis==AxisMetric::TimeMs && matches!(self.y_axis,AxisMetric::Sector|AxisMetric::AddressKiB|AxisMetric::AddressMB)}
     fn footprint_controls(&mut self,ui:&mut egui::Ui) {
-        if self.x_axis!=AxisMetric::TimeMs || !matches!(self.y_axis,AxisMetric::Sector|AxisMetric::AddressKiB) {return;}
+        if self.x_axis!=AxisMetric::TimeMs || !matches!(self.y_axis,AxisMetric::Sector|AxisMetric::AddressKiB|AxisMetric::AddressMB) {return;}
         let before=self.footprint.mode;
         ui.horizontal_wrapped(|ui| {
             let mut connected=self.connected_footprint();
@@ -214,7 +214,7 @@ impl StudioApp {
         self.render_qa.lane_page=page;self.render_qa.lane_pages=pages;
         self.render_qa.lane_visible=view.lanes.keys().skip(page*4).take(4).cloned().collect();
         ui.data_mut(|d|d.insert_temp(page_id,page));
-        let divisor=if self.y_axis==AxisMetric::AddressKiB {2.}else{1.};
+        let divisor=match self.y_axis { AxisMetric::AddressKiB=>2.0, AxisMetric::AddressMB=>1_000_000.0/512.0, _=>1.0 };
         let fit=self.footprint.fit;
         let mut select=None;
         let mut filter=None;

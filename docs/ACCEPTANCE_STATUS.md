@@ -174,3 +174,7 @@ layout was verified separately on saved actual data in all three themes.
 
 Physical traces, serial identifiers, screenshots containing process information,
 and detailed local run logs are kept outside the public source repository.
+
+## Current audit: BPF runtime misses
+
+See [BPF runtime health](BPF_RUNTIME_HEALTH.md). The full acceptance goal remains open. Known-file direct-read syscall evidence passed for 248 calls; only 242 were paired by the original collector in the first physical run. A native startup access violation also recurred once. Updated physical collector validation and the full graph matrix are still pending.

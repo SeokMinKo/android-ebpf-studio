@@ -537,7 +537,17 @@ impl IoTransactionGraph {
                 let candidate = FileOriginView {
                     file: file.clone(),
                     path: node.path.clone(),
-                    confidence,
+                    confidence: if self.edges.iter().any(|edge| {
+                        edge.from_node_id == node.node_id
+                            && edge
+                                .evidence
+                                .iter()
+                                .any(|evidence| evidence.match_type == "inferred_path_snapshot")
+                    }) {
+                        confidence.weakest(EdgeConfidence::Probable)
+                    } else {
+                        confidence
+                    },
                     incomplete: false,
                 };
                 origins
@@ -596,16 +606,25 @@ impl IoTransactionGraph {
                 continue;
             }
             let end = node.end_or_start();
+            // A descendant can overlap this interval without overlapping its
+            // immediate parent (for example syscall -> queue -> device).
+            // Subtract the union of all causal descendants, exactly once.
+            // Context-only links cannot contribute to or discount causal time.
+            let mut descendants = HashSet::new();
+            let mut pending = VecDeque::from([node.node_id]);
+            while let Some(parent) = pending.pop_front() {
+                for edge in self.edges.iter().filter(|edge| {
+                    edge.from_node_id == parent && edge.confidence != EdgeConfidence::ContextOnly
+                }) {
+                    if descendants.insert(edge.to_node_id) {
+                        pending.push_back(edge.to_node_id);
+                    }
+                }
+            }
             let children: Vec<_> = self
-                .edges
+                .nodes
                 .iter()
-                .filter(|edge| edge.from_node_id == node.node_id)
-                .filter_map(|edge| {
-                    self.nodes
-                        .iter()
-                        .find(|child| child.node_id == edge.to_node_id)
-                })
-                .filter(|child| child.additive())
+                .filter(|child| descendants.contains(&child.node_id) && child.additive())
                 .filter_map(|child| {
                     let start = child.start_ts_ns.max(node.start_ts_ns);
                     let child_end = child.end_or_start().min(end);
@@ -724,6 +743,9 @@ pub enum CorrelationConfidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineObservation {
     pub ts_ns: u64,
+    /// Direction observed by the producer; absent in older or context records.
+    #[serde(default)]
+    pub operation: Option<IoOperation>,
     #[serde(default)]
     pub end_ts_ns: Option<u64>,
     pub phase: PipelinePhase,
@@ -753,6 +775,14 @@ pub struct PipelineObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipelineSpan {
     pub layer: PipelineLayer,
+    #[serde(default)]
+    pub operation: Option<IoOperation>,
+    #[serde(default)]
+    pub bytes: Option<u32>,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub tid: u32,
     pub start_ts_ns: u64,
     pub end_ts_ns: u64,
     /// False for an unpaired boundary or context marker; its plot position is not a latency.
@@ -868,6 +898,10 @@ pub enum CapabilityState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProbeHealth {
+    /// Cumulative observed kernel BPF recursion misses; absent means unmeasured.
+    /// Separate from ring reservation loss and not a count of unique lost I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursion_misses: Option<u64>,
     pub emitted: u64,
     pub reserve_failures: u64,
     pub paired: u64,
@@ -2582,6 +2616,7 @@ impl AnalysisEngine {
                 if file.end_ts_ns >= file.start_ts_ns {
                     self.pipeline_observations.push(PipelineObservation {
                         ts_ns: file.start_ts_ns,
+                        operation: Some(file.operation),
                         end_ts_ns: Some(file.end_ts_ns),
                         phase: PipelinePhase::Span,
                         layer: PipelineLayer::Syscall,
@@ -2631,6 +2666,7 @@ impl AnalysisEngine {
                                 &mut self.pipeline_observations,
                                 PipelineObservation {
                                     ts_ns: begin.ts_ns,
+                                    operation: begin.operation.or(observation.operation),
                                     end_ts_ns: Some(observation.ts_ns),
                                     phase: PipelinePhase::Span,
                                     layer: begin.layer,
@@ -3098,14 +3134,17 @@ impl AnalysisEngine {
             }
         }
         if let Some(node_positions) = index.nodes_by_transaction.get(&io.issue.request_id) {
+            // Reused request IDs and multi-bio requests can repeat an identity
+            // thousands of times. Each identity contributes the same positions;
+            // expand it once before the final position sort/dedup.
+            let mut seen_identities = HashSet::new();
             for identity in node_positions
                 .iter()
                 .filter_map(|position| self.graph_nodes[*position].file.as_ref())
+                .map(file_identity_base_key)
+                .filter(|identity| seen_identities.insert(*identity))
             {
-                if let Some(positions) = index
-                    .files_by_identity
-                    .get(&file_identity_base_key(identity))
-                {
+                if let Some(positions) = index.files_by_identity.get(&identity) {
                     file_positions.extend_from_slice(positions);
                 }
             }
@@ -3114,7 +3153,7 @@ impl AnalysisEngine {
         file_positions.dedup();
         let files: Vec<_> = file_positions
             .into_iter()
-            .map(|position| self.file_ios[position].clone())
+            .map(|position| &self.file_ios[position])
             .collect();
 
         let mut observation_positions = index.long_observations.clone();
@@ -3161,7 +3200,7 @@ impl AnalysisEngine {
             .map(|&position| self.graph_edges[position].clone())
             .collect();
         drop(index_guard);
-        let graph = build_transaction_graph(io, &files, &observations, &nodes, &edges);
+        let graph = build_transaction_graph_refs(io, &files, &observations, &nodes, &edges);
         let mut cache = self.transaction_cache.borrow_mut();
         if cache.len() >= MAX_DERIVED_CACHE_ENTRIES {
             cache.clear();
@@ -3356,6 +3395,17 @@ pub fn build_transaction_graph(
     raw_nodes: &[IoNode],
     raw_edges: &[IoEdge],
 ) -> IoTransactionGraph {
+    let files: Vec<_> = files.iter().collect();
+    build_transaction_graph_refs(io, &files, observations, raw_nodes, raw_edges)
+}
+
+fn build_transaction_graph_refs(
+    io: &CompletedIo,
+    files: &[&FileIo],
+    observations: &[PipelineObservation],
+    raw_nodes: &[IoNode],
+    raw_edges: &[IoEdge],
+) -> IoTransactionGraph {
     let request_id = io.issue.request_id;
     let block_start = io.insert.as_ref().map_or(io.issue.ts_ns, |item| item.ts_ns);
     let block_end = io.completion.ts_ns;
@@ -3539,10 +3589,10 @@ pub fn build_transaction_graph(
                 origin: IoOrigin::Unknown,
                 file: None,
                 path: None,
-                operation: Some(io.issue.operation),
-                bytes: Some(io.issue.bytes as u64),
-                pid: io.issue.pid,
-                tid: io.issue.tid,
+                operation: span.operation,
+                bytes: span.bytes.map(u64::from),
+                pid: span.pid,
+                tid: span.tid,
                 name: span.name.clone(),
             })
             .is_ok()
@@ -3600,32 +3650,15 @@ pub fn build_transaction_graph(
         });
     }
 
+    let mut inferred_path_nodes = HashSet::new();
     for node in raw_nodes {
         if node.transaction_id == Some(request_id) {
             let mut enriched = node.clone();
             if enriched.path.is_none()
-                && let Some(identity) = &enriched.file
-                && let Some(file) = files
-                    .iter()
-                    .filter(|file| {
-                        file.file_identity.as_ref().is_some_and(|candidate| {
-                            file_identities_compatible(candidate, identity)
-                        })
-                    })
-                    .filter(|file| {
-                        file.start_ts_ns <= block_end.saturating_add(30_000_000_000)
-                            && file.end_ts_ns.saturating_add(30_000_000_000) >= block_start
-                    })
-                    .max_by_key(|file| file.end_ts_ns)
+                && let Some(snapshot) = inferred_origin_path(node, files, block_start, block_end)
             {
-                enriched.path = file.path_snapshot.clone().or_else(|| {
-                    file.path.clone().map(|path| PathSnapshot {
-                        deleted: path.ends_with(" (deleted)"),
-                        path: Some(path),
-                        source: PathSource::ProcFd,
-                        captured_ts_ns: file.end_ts_ns,
-                    })
-                });
+                enriched.path = Some(snapshot);
+                inferred_path_nodes.insert(node.node_id);
             }
             let _ = graph.add_node(enriched);
         }
@@ -3641,10 +3674,94 @@ pub fn build_transaction_graph(
                 .iter()
                 .any(|node| node.node_id == edge.to_node_id)
         {
-            let _ = graph.add_edge(edge.clone());
+            let mut enriched = edge.clone();
+            if inferred_path_nodes.contains(&edge.from_node_id) {
+                // Preserve identity-edge confidence. A separately looked-up path
+                // is only a probable FilePath, even when the inode edge is exact.
+                enriched.evidence.push(CorrelationEvidence {
+                    match_type: "inferred_path_snapshot".into(),
+                    opaque_key: None,
+                    delta_ns: None,
+                    candidate_count: 1,
+                    sector_match: false,
+                    bytes_match: false,
+                    task_match: false,
+                });
+            }
+            let _ = graph.add_edge(enriched);
         }
     }
     graph
+}
+
+fn recorded_file_path(file: &FileIo) -> Option<&str> {
+    file.path_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.path.as_deref())
+        .filter(|path| !path.is_empty())
+        .or_else(|| file.path.as_deref().filter(|path| !path.is_empty()))
+}
+
+fn inferred_origin_path(
+    node: &IoNode,
+    files: &[&FileIo],
+    block_start: u64,
+    block_end: u64,
+) -> Option<PathSnapshot> {
+    let identity = node.file.as_ref()?;
+    let candidates: Vec<_> = files
+        .iter()
+        .copied()
+        .filter(|file| {
+            file.file_identity
+                .as_ref()
+                .is_some_and(|candidate| file_identities_compatible(candidate, identity))
+                && file.start_ts_ns <= block_end.saturating_add(30_000_000_000)
+                && file.end_ts_ns.saturating_add(30_000_000_000) >= block_start
+                && recorded_file_path(file).is_some()
+        })
+        .collect();
+    // Prefer the syscall that actually spans this origin over later opens,
+    // renames, or reads of another hard link to the same inode.
+    let contemporaneous: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|file| {
+            file.start_ts_ns <= node.start_ts_ns
+                && file.end_ts_ns >= node.start_ts_ns
+                && (node.pid == 0 || node.pid == file.pid)
+                && (node.tid == 0 || node.tid == file.tid)
+                && node
+                    .operation
+                    .is_none_or(|operation| operation == file.operation)
+        })
+        .collect();
+    let eligible = if contemporaneous.is_empty() {
+        &candidates
+    } else {
+        &contemporaneous
+    };
+    let file = eligible.iter().max_by_key(|file| file.end_ts_ns)?;
+    let path = recorded_file_path(file)?;
+    // Conflicting paths without a unique contemporaneous explanation are
+    // unresolved; picking the last record would invent historical attribution.
+    if eligible
+        .iter()
+        .any(|candidate| recorded_file_path(candidate) != Some(path))
+    {
+        return None;
+    }
+    Some(
+        file.path_snapshot
+            .clone()
+            .filter(|snapshot| snapshot.path.as_ref().is_some_and(|path| !path.is_empty()))
+            .unwrap_or_else(|| PathSnapshot {
+                deleted: path.ends_with(" (deleted)"),
+                path: Some(path.to_owned()),
+                source: PathSource::ProcFd,
+                captured_ts_ns: file.end_ts_ns,
+            }),
+    )
 }
 
 fn file_identity_base_key(identity: &FileIdentity) -> (u32, u32, u64) {
@@ -3687,11 +3804,23 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             if end < value.ts_ns {
                 return false;
             }
+            if value
+                .operation
+                .is_some_and(|operation| operation != io.issue.operation)
+                || value.correlation_id.is_some_and(|id| id != request_id)
+            {
+                return false;
+            }
             let exact = value.correlation_id == Some(request_id);
             if exact {
                 return true;
             }
-            let overlaps = value.ts_ns <= probable_window_end && end >= probable_window_start;
+            let overlaps = if value.confidence == CorrelationConfidence::ContextOnly {
+                value.ts_ns <= probable_window_end && end >= probable_window_start
+            } else {
+                // Nearby syscalls are not causal evidence for this request.
+                value.ts_ns <= block_end && end >= block_start
+            };
             let storage_match = value.sector.is_some_and(|sector| sector == io.issue.sector)
                 && value.bytes.is_some_and(|bytes| bytes == io.issue.bytes);
             let thread_match =
@@ -3720,6 +3849,10 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
             let end = value.end_ts_ns.unwrap_or(value.ts_ns);
             (end >= value.ts_ns).then(|| PipelineSpan {
                 layer: value.layer,
+                operation: value.operation,
+                bytes: value.bytes,
+                pid: value.pid,
+                tid: value.tid,
                 start_ts_ns: value.ts_ns,
                 end_ts_ns: end,
                 duration_observed: value.end_ts_ns.is_some()
@@ -3751,6 +3884,10 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
     if let Some(insert) = &io.insert {
         spans.push(PipelineSpan {
             layer: PipelineLayer::BlockQueue,
+            operation: Some(io.issue.operation),
+            bytes: Some(io.issue.bytes),
+            pid: io.issue.pid,
+            tid: io.issue.tid,
             start_ts_ns: insert.ts_ns,
             end_ts_ns: io.issue.ts_ns,
             duration_observed: true,
@@ -3763,6 +3900,10 @@ pub fn build_io_pipeline(io: &CompletedIo, observations: &[PipelineObservation])
     }
     spans.push(PipelineSpan {
         layer: PipelineLayer::BlockDevice,
+        operation: Some(io.issue.operation),
+        bytes: Some(io.issue.bytes),
+        pid: io.issue.pid,
+        tid: io.issue.tid,
         start_ts_ns: io.issue.ts_ns,
         end_ts_ns: io.completion.ts_ns,
         duration_observed: io.device_latency_ns.is_some(),

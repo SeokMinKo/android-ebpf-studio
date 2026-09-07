@@ -101,19 +101,21 @@ cargo binstall bpf-linker
 
 1. Phone에서 USB debugging을 켜고 연결합니다.
 2. `adb devices -l`, `adb root`, `adb wait-for-device`가 성공하는지 확인합니다.
-3. Windows GUI에서 `Refresh devices` → 장치 선택 → `Preflight`를 실행합니다.
-4. Release ZIP의 세 파일을 같은 폴더에 둔 채 `Start eBPF capture`를 누릅니다. agent/object는 자동 탐색되고 session은 `%LOCALAPPDATA%\AndroidEbpfStudio\sessions`, 구조화 로그는 `%LOCALAPPDATA%\AndroidEbpfStudio\logs\<session-id>`에 자동 저장됩니다.
-5. 먼저 `Simulator`로 UI와 저장/CSV 경로를 검증할 수도 있습니다.
+3. Windows GUI에서 `Refresh ADB devices`로 장치를 선택합니다. `Start analysis`를 누르면 지원 여부와 수집 준비를 확인합니다.
+4. Release ZIP의 세 파일을 같은 폴더에 둔 채 `Start analysis`를 누릅니다. agent/object는 자동 탐색되고 session은 `%LOCALAPPDATA%\AndroidEbpfStudio\sessions`, 구조화 로그는 `%LOCALAPPDATA%\AndroidEbpfStudio\logs\<session-id>`에 자동 저장됩니다.
+5. 폰 없이 저장된 데이터를 확인하려면 `Session → Open session`에서 NDJSON을 엽니다. Simulator는 테스트용이며 물리 기기 검증을 대신하지 않습니다.
 
 ## 화면 사용법
 
 - **Overview**: 관측 시간, latency/workload 집계, 가장 느린 최근 요청, file/probe/event 데이터 품질을 봅니다.
 - **Investigate**: 요청 목록에서 하나를 선택해 Pipeline waterfall, file origin, critical path, `Why slow?`, block/transaction/raw file evidence를 한곳에서 확인합니다.
-- **Explore**: Latency over time, Latency by file, Queue pressure, Layer contribution, LBA 프리셋을 사용하거나 FS/UFS/critical-path 축과 file/origin/confidence Group By를 직접 조합합니다.
+- **Explore**: 기본 그래프는 **LBA distribution**입니다. X축은 완료 시각 기준 Time (ms), Y축은 **Address (MB)**이며 `sector × 512 / 1,000,000`을 사용합니다. Latency, Queue, Overall, window activity, connected footprint, request/CPU timeline, scheduler wait 및 Custom 프리셋도 제공합니다.
+- **그래프 조작**: Select로 점 또는 영역을 선택하고 Pan으로 이동합니다. **Clear selection**은 진행 중인 선택 계산까지 취소하며 필터와 확대 범위는 유지합니다. 선택이 없으면 Summary는 전체 필터 적용 그래프를 보여 줍니다.
+- **Plot settings**: 색상 분류·점 크기·축·범위를 펼쳐 설정합니다. 해당 그래프에 맞는 조작만 표시합니다. 버튼·탭 최소 높이는 28px이며 Light/Dark/High Contrast를 지원합니다.
 - **Compare**: 별도 baseline NDJSON을 읽기 전용으로 열어 현재 세션의 I/O, bytes, p50/p95/p99, queue depth, file attribution 변화량을 비교합니다.
 - **Diagnostics**: component/code/correlation filter, INFO/DEBUG/TRACE capture level, UI update·Summary·Explorer·Pipeline rebuild latency, message backlog, capture suppression 효율과 redacted bundle export를 사용합니다. 표시되는 UI update 시간은 CPU가 화면을 구성한 시간이며 GPU presentation 시간은 포함하지 않습니다.
 
-좌측 `LIVE FILTER & MODE`에서 조건과 capture mode를 바꾼 뒤 `Apply live config`를 누르면 새 generation이 agent와 eBPF map에 원자적으로 적용됩니다. Summary의 kernel aggregate는 전체 관측 I/O이고, Block/File/Pipeline 표는 Balanced 정책으로 보존된 slow/sample detail입니다. 두 수치를 동일한 모집단으로 오해하지 마세요.
+`Advanced capture settings`에서 조건과 capture mode를 바꾼 뒤 `Apply live config`를 누르면 새 generation이 agent와 eBPF map에 원자적으로 적용됩니다. Summary의 kernel aggregate는 전체 관측 I/O이고, Block/File/Pipeline 표는 Balanced 정책으로 보존된 slow/sample detail입니다. 두 수치를 동일한 모집단으로 오해하지 마세요.
 
 ## 중요한 정확성 규칙
 
@@ -145,7 +147,15 @@ cargo check -p android-ebpf-studio --features gui
 
 ## 상태와 제한
 
-Rust core, Windows GUI, Android agent 및 eBPF object의 compile/test 경계는 CI에서 검사합니다. 실제 Android verifier/SELinux/tracepoint 호환성은 대상 Phone에서 `Preflight`와 첫 capture로 확인해야 합니다. 현재 작업 환경에는 Android Phone이 연결되어 있지 않아 실제 장비 수집은 아직 검증되지 않았습니다.
+Host 테스트, native renderer, 실제 설치 EXE, 물리 기기 결과는 별도 검증 범위입니다. 저장된 root 세션으로 Read FilePath와 렌더링 좌표를 대조했지만, 모든 기기에서 Exact 경로가 보장되거나 전체 그래프 매트릭스가 통과했다는 의미는 아닙니다. 현재 폰은 연결할 수 없어 추가 물리 검증은 미실행 상태입니다.
+
+- Exact FilePath는 실제 경로와 인과 증거가 함께 있어야 합니다. inode만 있거나 시간상 가까운 경로 후보만 있는 요청을 Exact 경로로 승격하지 않습니다. Perfetto만으로 FilePath 검증을 통과 처리하지 않습니다.
+- 이후 pathless 관측이 앞서 기록된 경로를 덮지 않으며, 시간 기반 경로 추정은 Probable로 제한합니다. 서로 다른 후보는 미해결로 남길 수 있습니다.
+- Pipeline은 관측된 Read/Write 방향을 유지하고, waterfall은 음수 시작 offset을 포함한 전체 구간을 그립니다. Critical path는 겹치는 후손 구간을 중복 합산하지 않습니다.
+- eBPF recursion misses는 ring loss와 별도인 probe 호출 손실 지표입니다. 기존 물리 수집에서 completion 누락과 일부 Unresolved가 남았으므로 전체 acceptance는 미완료입니다.
+- Explorer downsampling은 실제 측정값의 extrema·endpoint·sparse gap 보존을 검증합니다. queue_depth_at_issue와 queue_depth_after는 서로 다른 관측치이며 하드웨어 queue depth로 해석하지 않습니다.
+
+자세한 근거와 범위는 [Acceptance status](docs/ACCEPTANCE_STATUS.md), [FilePath coverage](docs/FILEPATH_COVERAGE.md), [UI refinement](docs/UI_REFINEMENT.md), [Critical path](docs/CRITICAL_PATH_INTERVALS.md), [LBA defaults](LBA_DEFAULT.md), [Sampling](SHAPE_SAMPLING.md)를 참고하세요. Git main, 공개 Release ZIP, 로컬 설치 EXE는 자동으로 동일 버전이 되지 않습니다. 설치본의 BUILD-MANIFEST.json에서 source_commit과 각 구성요소 해시를 확인하세요.
 
 ## License
 

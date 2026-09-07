@@ -112,6 +112,9 @@ impl AxisCategories {
         }
     }
     fn tick(&self, axis: AxisMetric, value: f64) -> String {
+        if axis == AxisMetric::AddressMB {
+            return format!("{value:.6}").trim_end_matches('0').trim_end_matches('.').to_owned();
+        }
         if matches!(axis, AxisMetric::Category(_)) {
             if (value - value.round()).abs() > 0.001 || value < 0. {
                 return String::new();
@@ -259,5 +262,17 @@ mod custom_axes_tests {
             0,
         );
         assert_eq!(same.categories["Axis: Command"]["Read"].0, 3);
+    }
+}
+
+#[cfg(test)]
+mod mb_tick_regression {
+    use super::*;
+    #[test]
+    fn adjacent_mb_ticks_do_not_collapse_to_one_abbreviation() {
+        let categories = AxisCategories::default();
+        assert_ne!(categories.tick(AxisMetric::AddressMB,45615.0), categories.tick(AxisMetric::AddressMB,45616.0));
+        assert_eq!(categories.tick(AxisMetric::AddressMB,45615.000512), "45615.000512");
+        assert_eq!(categories.tick(AxisMetric::AddressMB,45615.0), "45615");
     }
 }

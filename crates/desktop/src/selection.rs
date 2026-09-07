@@ -325,6 +325,7 @@ struct SelectionState {
     drag_start: Option<[f64; 2]>,
     summary: Option<SelectionSummary>,
     pending: Option<Receiver<SelectionSummary>>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     queued: Option<SelectionRequest>,
     discard_pending: bool,
     bounds_command: Option<egui_plot::PlotBounds>,
@@ -332,6 +333,25 @@ struct SelectionState {
     axis_range: AxisRangeEditor,
     current_bounds: Option<egui_plot::PlotBounds>,
     zoom_history: Vec<egui_plot::PlotBounds>,
+}
+
+impl SelectionState {
+    fn has_selection(&self) -> bool {
+        self.summary.is_some() || self.pending.is_some() || self.queued.is_some() || self.drag_start.is_some()
+    }
+
+    fn clear_selection(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.summary = None;
+        self.pending = None;
+        self.queued = None;
+        self.drag_start = None;
+        self.discard_pending = true;
+        self.requested_at = None;
+        self.wall_ms = None;
+    }
 }
 
 fn compute_selection(
@@ -385,7 +405,7 @@ fn compute_selection_cancellable(engine:&AnalysisEngine,request:SelectionRequest
         for axis in companion_axes {result.companion_distributions.entry(axis.label().into()).or_default().observe(io.issue.operation,axis.value(io,origin,graph.as_ref()));}
         for (i,axis) in [x,y].into_iter().enumerate() {if let AxisMetric::Category(c)=axis && (i==0 || x!=y) {result.observe_category(&format!("Axis: {}",c.label()),c.key(io,graph.as_ref()),io);}}
         if !matches!(metric_axis,AxisMetric::Category(_)) {result.metric.observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));}
-        if matches!(metric_axis, AxisMetric::Sector | AxisMetric::AddressKiB) {
+        if matches!(metric_axis, AxisMetric::Sector | AxisMetric::AddressKiB | AxisMetric::AddressMB) {
             result.address_distributions.entry((io.issue.device_major, io.issue.device_minor)).or_default()
                 .observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));
             addresses.observe(io);
@@ -425,10 +445,11 @@ impl StudioApp {
         let width=self.window_width_ms;
         let (tx, rx) = bounded(1);
         self.selection.pending = Some(rx);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.selection.cancel = Some(cancel.clone());
         let (x, y, origin) = (self.x_axis, self.y_axis, self.time_origin());
         std::thread::spawn(move || {
-            let s=compute_graph_selection(&engine,request,x,y,origin,bw,width);
-            let _ = tx.send(s);
+            if let Some(summary) = compute_graph_selection_cancellable(&engine, request, [x, y], origin, bw, width, Some(&cancel)) { let _ = tx.send(summary); }
         });
     }
 
@@ -442,6 +463,7 @@ impl StudioApp {
                 .requested_at
                 .map(|t| t.elapsed().as_secs_f64() * 1000.0);
             self.selection.pending = None;
+            self.selection.cancel = None;
             if let Some(request) = self.selection.queued.take() {
                 self.begin_selection(request);
             }
@@ -488,7 +510,7 @@ impl StudioApp {
                 qa_region(&mut self.render_qa,"back",back_response.rect,ui.clip_rect());
                 self.render_qa.back_button = Some(back_response.rect.center());
                 if back_response.clicked() { self.render_qa.back_actions += 1; self.selection.bounds_command = self.selection.zoom_history.pop(); }
-                if ui.button("Clear").clicked() { self.selection.summary=None; self.selection.queued=None; self.selection.discard_pending=true; }
+
             });
             ui.horizontal(|ui| {
                 for (tab,label) in [(InspectorTab::Summary,"Summary"),(InspectorTab::Files,"Files"),(InspectorTab::Processes,"Processes")] {
@@ -505,7 +527,7 @@ impl StudioApp {
             scroll.show(ui, |ui| {
                 let selected = self.selection.summary.is_some();
                 let Some(s) = self.selection.summary.as_ref().or_else(|| self.selection.all_summary.as_ref().map(|v| &v.3)) else { ui.spinner(); ui.label("Calculating current graph summary…"); return; };
-                ui.small(if selected { "Selected graph region · Clear restores full filtered graph" } else { "Full filtered graph · select an area to narrow the summary" });
+                ui.small(if selected { "Selected graph region · Clear selection restores full filtered graph" } else { "Full filtered graph · select an area to narrow the summary" });
                 if let Some(series)=&s.window_series {ui.small(format!("{} filtered source I/O · {} {}",s.source_rows,series.samples.len(),series.metric.population()));}
                 else {ui.small(format!("{} filtered source I/O · {} cannot be plotted on these axes",s.source_rows,s.unplottable_rows));}
                 if live && !selected {ui.small("Live snapshot · refreshed in background; incoming I/O may be newer");}
@@ -902,5 +924,42 @@ mod selection_tests {
         );
         assert_eq!(summary.keys.len(), 100_000);
         assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    }
+}
+
+#[cfg(test)]
+mod clear_selection_regression {
+    use super::*;
+    #[test]
+    fn clear_cancels_pending_work_and_preserves_view() {
+        let (tx, rx) = bounded(1);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let bounds = egui_plot::PlotBounds::from_min_max([1.0, 2.0], [3.0, 4.0]);
+        let mut state = SelectionState {
+            summary: Some(SelectionSummary::default()),
+            pending: Some(rx), cancel: Some(cancel.clone()),
+            queued: Some(SelectionRequest::Point((1, 2, 8, 0))),
+            drag_start: Some([2.0, 3.0]),
+            current_bounds: Some(bounds), bounds_command: Some(bounds), zoom_history: vec![bounds],
+            ..Default::default()
+        };
+        state.clear_selection();
+        assert!(!state.has_selection());
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(tx.try_send(SelectionSummary::default()).is_err(), "late worker must not restore selection");
+        assert_eq!(state.current_bounds, Some(bounds));
+        assert_eq!(state.bounds_command, Some(bounds));
+        assert_eq!(state.zoom_history, vec![bounds]);
+    }
+    #[test]
+    fn canceled_worker_stops_before_attribution() {
+        let mut engine = AnalysisEngine::new();
+        for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+            if let WireRecord::Event {event, ..} = serde_json::from_str(line).unwrap() { engine.ingest(event); }
+        }
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let summary = compute_selection_cancellable(&engine, SelectionRequest::Rectangle {min: [0.0, 0.0], max: [f64::MAX, f64::MAX]}, AxisMetric::TimeMs, AxisMetric::AddressMB, 0, Some(&cancel));
+        assert!(summary.is_none());
+
     }
 }

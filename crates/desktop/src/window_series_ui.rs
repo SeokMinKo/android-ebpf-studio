@@ -1,3 +1,4 @@
+#[cfg(test)]
 fn compute_graph_selection(engine:&AnalysisEngine,request:SelectionRequest,x:AxisMetric,y:AxisMetric,origin:u64,bw:BandwidthContext,width_ms:u64)->SelectionSummary {
     compute_graph_selection_cancellable(engine,request,[x,y],origin,bw,width_ms,None).expect("uncancelled graph selection")
 }

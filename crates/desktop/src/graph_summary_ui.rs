@@ -89,7 +89,7 @@ fn graph_distribution_ui(ui: &mut egui::Ui, summary: &SelectionSummary) {
         AxisMetric::RollingC2cBandwidth|AxisMetric::RollingD2dBandwidth=> {ui.small("64 consecutive same-device observed event gaps and their Read+Write payload, before analysis filters. Warm-up/missing gaps/unknown payload/zero duration are unavailable. Not unsampled kernel throughput. Points use completion time; Read/Write tabs group the terminal request operation, not separate payload rates. Filtered endpoints retain their original device-wide rolling context.");}
         _=>{}
     }
-    if matches!(axis, AxisMetric::Sector | AxisMetric::AddressKiB) {
+    if matches!(axis, AxisMetric::Sector | AxisMetric::AddressKiB | AxisMetric::AddressMB) {
         if summary.address_distributions.is_empty() {ui.label("No LBA samples in this cohort.");}
         let page=target_page(ui,"lba-distribution-device",summary.address_distributions.len());
         // Each device gets an independent distribution; numerical LBA equality

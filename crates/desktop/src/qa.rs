@@ -3,6 +3,7 @@
 // Other scenarios never start device capture; fixtures retain their source.
 #[derive(Default)]
 struct RenderQa {
+    waterfall: Vec<serde_json::Value>,
     filter_rebuild_ms: Vec<f64>,
     lane_page:usize,
     lane_pages:usize,
@@ -49,6 +50,9 @@ struct RenderQa {
     zoom_actions: u64,
     back_actions: u64,
     input_step: u32,
+    selection_before_clear: Option<usize>,
+    clear_was_pending: bool,
+    clear_before_bounds: Option<egui_plot::PlotBounds>,
     table_button_focused: bool,
     stop_at: Option<Instant>,
     stop_analysis_ms: Option<f64>,
@@ -278,7 +282,7 @@ impl StudioApp {
         if gesture == "table-keyboard" {
             raw.focused = true;
             raw.events.push(egui::Event::WindowFocused(true));
-            if self.render_qa.frames < 24 { return; }
+            if self.render_qa.frames < 32 { return; }
             if self.render_qa.input_step == 0 && !self.render_qa.table_button_focused {
                 return;
             }
@@ -473,7 +477,28 @@ impl StudioApp {
         if self.render_qa.frames < 12 {
             return;
         }
-        if self.render_qa.input_step == 3 && self.selection.summary.is_none() && !(self.y_axis==AxisMetric::SchedulerIoWait&&self.scheduler.selected.is_some()) {
+        if self.render_qa.input_step == 3 && self.selection.summary.is_none() && gesture != "selection-cancel-pending" && !(self.y_axis==AxisMetric::SchedulerIoWait&&self.scheduler.selected.is_some()) {
+            return;
+        }
+        if matches!(gesture.as_str(), "selection-clear" | "selection-cancel-pending") && self.render_qa.input_step >= 3 {
+            let step = self.render_qa.input_step;
+            if step >= 7 { return; }
+            if step == 3 {
+                if !self.selection.has_selection() { return; }
+                self.render_qa.selection_before_clear = self.selection.summary.as_ref().map(|s| s.keys.len());
+                self.render_qa.clear_was_pending = self.selection.pending.is_some();
+                self.render_qa.clear_before_bounds = self.selection.current_bounds;
+            }
+            if step == 6 {
+                if !self.selection.has_selection() { self.render_qa.input_step = 7; }
+                return;
+            }
+            if let Some((rect, _)) = self.render_qa.regions.get("clear-selection") {
+                let pos = rect.center();
+                raw.events.push(egui::Event::PointerMoved(pos));
+                if step > 3 { raw.events.push(egui::Event::PointerButton {pos, button: egui::PointerButton::Primary, pressed: step == 4, modifiers: Default::default()}); }
+                self.render_qa.input_step += 1;
+            }
             return;
         }
         if gesture.starts_with("inspector-") && self.render_qa.input_step >= 3 {
@@ -620,7 +645,8 @@ impl StudioApp {
             Ok("investigate") => Page::Investigate,
             Ok("diagnostics") => Page::Diagnostics,
             Ok("compare") => Page::Compare,
-            _ => Page::Overview,
+            Ok("overview") => Page::Overview,
+            _ => self.page,
         };
     }
 
@@ -797,7 +823,11 @@ impl StudioApp {
                     {
                         45
                     } else {
-                        8
+                        std::env::var("ANDROID_EBPF_QA_TIMEOUT_SECONDS")
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .unwrap_or(8)
+                            .clamp(8, 120)
                     },
                 )
         }) && self.render_qa.input_step < 7
@@ -816,6 +846,7 @@ impl StudioApp {
                 image::ColorType::Rgba8,
             );
             let mut report = serde_json::json!({ "capture": path, "result": result.as_ref().map(|_| "saved").map_err(|e| e.to_string()), "phase": self.phase.label(), "page": format!("{:?}", self.page), "theme": format!("{:?}",self.theme), "completed_requests": self.analysis().completed_ios().len(), "received_events": self.received_events, "rejected": self.rejected_records, "frames": self.render_qa.frames, "reanalysis_before_first":self.render_qa.reanalysis_before_first,"reanalysis_window_first":self.render_qa.reanalysis_window_first,"source_completed_ios":self.reanalysis.source_count,"reanalysis_window_ns":self.reanalysis.window,"reanalysis_ms":self.reanalysis.elapsed_ms,"reanalysis_error":self.reanalysis.error,"reanalysis_actions":self.reanalysis.completed_actions,"file_evidence_count":self.file_evidence_positions.as_ref().map(|v|v.len()),"file_evidence_total":self.analysis().file_ios().len(),"filtered_read_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Read).count(),"filtered_write_ios":self.analysis().completed_ios().iter().filter(|io|io.issue.operation==IoOperation::Write).count(),"explorer_available":self.explorer_view.as_ref().map(|v|v.available),"range_draft":self.selection.axis_range.values,"range_actions":self.render_qa.range_actions,"range_error":self.selection.axis_range.error,"range_initial":self.render_qa.range_initial.map(|b|[b.min(),b.max()]),"range_expected":self.render_qa.range_expected.map(|b|[b.min(),b.max()]),"range_applied":self.render_qa.range_applied.map(|b|[b.min(),b.max()]),"plot_bounds":self.selection.current_bounds.map(|b|[b.min(),b.max()]),"point_diameter":self.plot_style.point_diameter,"color_category":format!("{:?}",self.group_by),"rendered_colors":self.explorer_view.as_ref().map(|view|view.groups.iter().map(|(name,_)|(name,self.plot_style.color(self.group_by,name).to_array())).collect::<BTreeMap<_,_>>()), "stop_analysis_ms":self.render_qa.stop_analysis_ms,"session_path":self.session_path,"selected_files":self.selection.summary.as_ref().map(|s|s.files.len()),"selected_processes":self.selection.summary.as_ref().map(|s|s.processes.len()),"selection_count": self.selection.summary.as_ref().map(|s|s.keys.len()), "selection_ms": self.selection.summary.as_ref().map(|s|s.elapsed.as_secs_f64()*1000.0), "zoom_history_depth": self.selection.zoom_history.len(), "zoom_actions": self.render_qa.zoom_actions, "back_actions": self.render_qa.back_actions, "ui_performance": self.performance.snapshot() });
+            report["rendered_waterfall"] = serde_json::json!(self.render_qa.waterfall);
             if let Some(text)=&self.raw_log.text {let raw=path.with_extension("raw-log.txt");let _=std::fs::write(&raw,text);report["raw_log"]=serde_json::json!({"path":raw,"loaded":true,"characters":text.len()});}
             report["overall"]=self.explorer_view.as_ref().map_or(serde_json::Value::Null,|v|serde_json::json!({"points":v.overall.rows.len(),"qd_measured":v.overall.rows.iter().filter(|r|r.2.is_some()).count()}));
             report["custom_axes"]=self.explorer_view.as_ref().map_or(serde_json::Value::Null,|v|serde_json::json!({"x":v.x_categories.labels,"y":v.y_categories.labels,"geometry":format!("{:?}",self.custom_geometry)}));
@@ -893,6 +924,11 @@ impl StudioApp {
             report["loss_status"] = serde_json::json!(self.loss_status);
             report["status"] = serde_json::json!(self.status);
             report["qa_timed_out"] = serde_json::json!(timed_out);
+            report["selection_before_clear"] = serde_json::json!(self.render_qa.selection_before_clear);
+            report["clear_was_pending"] = serde_json::json!(self.render_qa.clear_was_pending);
+            report["selection_pending"] = serde_json::json!(self.selection.pending.is_some());
+            report["clear_before_bounds"] = serde_json::json!(self.render_qa.clear_before_bounds.map(|b| [b.min(), b.max()]));
+            report["qa_timeout_override_seconds"] = serde_json::json!(std::env::var("ANDROID_EBPF_QA_TIMEOUT_SECONDS").ok());
             report["active_filter"] = serde_json::json!(self.query);
             report["baseline_count"] =
                 serde_json::json!(self.comparison.as_ref().map(|b| b.summary.completed_ios));
