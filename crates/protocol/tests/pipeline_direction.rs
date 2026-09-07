@@ -84,3 +84,15 @@ fn a_later_read_on_the_same_thread_is_not_a_stage_of_the_previous_request() {
         1
     );
 }
+
+#[test]
+fn physical_read_critical_path_uses_full_syscall_interval_once() {
+    let engine = replay(false);
+    let graph = engine.transaction_for(&engine.completed_ios()[0]);
+    let metrics = graph.metrics();
+    // Independently recorded Read start/end, enclosing queue and device spans.
+    let expected = 54_695_479_613_664 - 54_695_478_805_435;
+    assert_eq!(metrics.critical_path_ns, expected);
+    assert_eq!(metrics.accounted_ns, expected);
+    assert_eq!(metrics.total_ns, expected);
+}

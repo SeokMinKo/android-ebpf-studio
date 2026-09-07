@@ -586,16 +586,25 @@ impl IoTransactionGraph {
                 continue;
             }
             let end = node.end_or_start();
+            // A descendant can overlap this interval without overlapping its
+            // immediate parent (for example syscall -> queue -> device).
+            // Subtract the union of all causal descendants, exactly once.
+            // Context-only links cannot contribute to or discount causal time.
+            let mut descendants = HashSet::new();
+            let mut pending = VecDeque::from([node.node_id]);
+            while let Some(parent) = pending.pop_front() {
+                for edge in self.edges.iter().filter(|edge| {
+                    edge.from_node_id == parent && edge.confidence != EdgeConfidence::ContextOnly
+                }) {
+                    if descendants.insert(edge.to_node_id) {
+                        pending.push_back(edge.to_node_id);
+                    }
+                }
+            }
             let children: Vec<_> = self
-                .edges
+                .nodes
                 .iter()
-                .filter(|edge| edge.from_node_id == node.node_id)
-                .filter_map(|edge| {
-                    self.nodes
-                        .iter()
-                        .find(|child| child.node_id == edge.to_node_id)
-                })
-                .filter(|child| child.additive())
+                .filter(|child| descendants.contains(&child.node_id) && child.additive())
                 .filter_map(|child| {
                     let start = child.start_ts_ns.max(node.start_ts_ns);
                     let child_end = child.end_or_start().min(end);

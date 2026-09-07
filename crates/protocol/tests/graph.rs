@@ -338,3 +338,41 @@ fn extent_origin_keeps_exact_file_evidence_but_probable_request_lifetime() {
     assert_eq!(origins[0].file.inode, 303);
     assert_eq!(origins[0].confidence, EdgeConfidence::Probable);
 }
+
+#[test]
+fn critical_path_does_not_count_overlapping_grandchild_twice() {
+    let mut graph = IoTransactionGraph::new(99);
+    for n in [
+        node(1, IoNodeKind::Syscall, 0, 100),
+        node(2, IoNodeKind::BlockQueue, 40, 50),
+        node(3, IoNodeKind::BlockRequest, 50, 80),
+    ] {
+        graph.add_node(n).unwrap();
+    }
+    graph
+        .add_edge(IoEdge::exact(1, 1, 2, IoRelation::Calls))
+        .unwrap();
+    graph
+        .add_edge(IoEdge::exact(2, 2, 3, IoRelation::Submits))
+        .unwrap();
+    let metrics = graph.metrics();
+    assert_eq!(metrics.critical_path_ns, 100);
+    assert_eq!(metrics.exclusive_ns.get(&1), Some(&60));
+}
+
+#[test]
+fn context_only_edge_does_not_subtract_causal_execution_time() {
+    let mut graph = IoTransactionGraph::new(100);
+    graph
+        .add_node(node(1, IoNodeKind::Syscall, 0, 100))
+        .unwrap();
+    graph
+        .add_node(node(2, IoNodeKind::BlockRequest, 20, 80))
+        .unwrap();
+    let mut edge = IoEdge::exact(1, 1, 2, IoRelation::Calls);
+    edge.confidence = EdgeConfidence::ContextOnly;
+    graph.add_edge(edge).unwrap();
+    let metrics = graph.metrics();
+    assert_eq!(metrics.critical_path_ns, 100);
+    assert_eq!(metrics.exclusive_ns.get(&1), Some(&100));
+}
