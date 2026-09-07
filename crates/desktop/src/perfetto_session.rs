@@ -92,7 +92,42 @@ pub fn project_records(
             .kernel_lost_events()
             .map_or("unavailable".into(), |n| n.to_string())
     );
-    let metadata = serde_json::json!({"stage":"complete","raw_trace":raw_trace,"quality":decoded.quality,"block_records":decoded.events.len(),"completion_observations":analysis.completions.len(),"unresolved_timing":unresolved,"unmatched_issues":analysis.unmatched_issue_records.len(),"orphan_inserts":analysis.orphan_insert_records.len(),"unpaired_requeues":analysis.unpaired_requeue_records.len(),"correlation_limit_hits":analysis.correlation_limit_hits,"file_path":"Unresolved: Perfetto block tracepoints expose no file/inode mapping"});
+    let mut devices = std::collections::BTreeMap::<_, crate::host_bw::DeviceCoverage>::new();
+    for o in &analysis.completions {
+        let device = crate::perfetto_projection::device_numbers(o.device_encoded);
+        let row = devices
+            .entry(device)
+            .or_insert_with(|| crate::host_bw::DeviceCoverage {
+                device,
+                ..Default::default()
+            });
+        row.completions += 1;
+        row.unresolved += u64::from(o.issue_timestamp_ns.is_none());
+    }
+    let records: std::collections::HashMap<_, _> =
+        decoded.events.iter().map(|e| (e.record_id, e)).collect();
+    for (ids, requeue) in [
+        (&analysis.unmatched_issue_records, false),
+        (&analysis.unpaired_requeue_records, true),
+    ] {
+        for id in ids {
+            if let Some(e) = records.get(id) {
+                let device = crate::perfetto_projection::device_numbers(e.device_encoded);
+                let row = devices
+                    .entry(device)
+                    .or_insert_with(|| crate::host_bw::DeviceCoverage {
+                        device,
+                        ..Default::default()
+                    });
+                if requeue {
+                    row.requeues += 1;
+                } else {
+                    row.unmatched += 1;
+                }
+            }
+        }
+    }
+    let metadata = serde_json::json!({"stage":"complete","raw_trace":raw_trace,"quality":decoded.quality,"block_activity_devices":devices.values().collect::<Vec<_>>(),"block_records":decoded.events.len(),"completion_observations":analysis.completions.len(),"scheduler_iowait_events":decoded.scheduler_waits.len(),"scheduler_iowait_scope":"independent task delay events; absence is not measured zero; kernel schedstats/event support required","unresolved_timing":unresolved,"unmatched_issues":analysis.unmatched_issue_records.len(),"orphan_inserts":analysis.orphan_insert_records.len(),"unpaired_requeues":analysis.unpaired_requeue_records.len(),"correlation_limit_hits":analysis.correlation_limit_hits,"file_path":"Unresolved: Perfetto block tracepoints expose no file/inode mapping"});
     emit(WireRecord::SourceInfo {
         schema_version: SCHEMA_VERSION,
         source: "perfetto".into(),
@@ -106,7 +141,7 @@ pub fn project_records(
         schema_version: SCHEMA_VERSION,
         capabilities,
     })?;
-    let projection = Projection::new(decoded);
+    let projection = Projection::new(decoded).with_analysis(&analysis);
     for (idx, observation) in analysis.completions.iter().enumerate() {
         let io = projection.completion(observation)?;
         emit(WireRecord::Event {
@@ -115,7 +150,14 @@ pub fn project_records(
             event: StorageEvent::ObservedBlockCompletion(io),
         })?;
     }
-    let count = analysis.completions.len() as u64;
+    for (idx, wait) in decoded.scheduler_waits.iter().enumerate() {
+        emit(WireRecord::Event {
+            schema_version: SCHEMA_VERSION,
+            sequence: (analysis.completions.len() + idx + 1) as u64,
+            event: StorageEvent::SchedulerIoWait(wait.clone()),
+        })?;
+    }
+    let count = (analysis.completions.len() + decoded.scheduler_waits.len()) as u64;
     emit(WireRecord::Footer {
         schema_version: SCHEMA_VERSION,
         events_seen: count,
@@ -192,6 +234,29 @@ fn write_recovered_session(
         .create_new(true)
         .open(&output)?;
     let mut writer = std::io::BufWriter::new(file);
+    // Preserve acquisition scope from the original header. Reanalysis cannot
+    // infer an unfiltered capture recipe from zero loss in raw data alone.
+    // Only scan a bounded header, never duplicate the full event decode here.
+    if let Ok(original_file) = std::fs::File::open(original) {
+        let mut scope = None;
+        android_ebpf_protocol::SessionReader::default().visit(
+            std::io::Read::take(std::io::BufReader::new(original_file), 256 * 1024),
+            |record| {
+                if let WireRecord::SourceInfo {
+                    source, metadata, ..
+                } = &record
+                    && source == "perfetto"
+                    && metadata["stage"] == "recording"
+                {
+                    scope = Some(record);
+                }
+                Ok(())
+            },
+        )?;
+        if let Some(record) = scope {
+            write_record(&mut writer, &record)?;
+        }
+    }
     let result = project_records(decoded, "perfetto/capture.pftrace", |mut record| {
         if let WireRecord::SourceInfo {
             status, metadata, ..

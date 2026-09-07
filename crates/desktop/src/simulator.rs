@@ -206,6 +206,7 @@ pub fn start(tx: Sender<HostMessage>, stop: Arc<AtomicBool>) {
             .ok();
             record_sequence += 1;
             let completion = StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
                 ts_ns: completion_ts,
                 request_id: sequence,
                 device_major: 259,

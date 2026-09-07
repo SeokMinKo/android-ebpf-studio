@@ -1,5 +1,7 @@
 //! Platform-independent event protocol and storage analysis core.
 
+pub mod rolling;
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -13,7 +15,7 @@ pub use filepath_coverage::{
     CoverageVolume, FilePathConfidence, FilePathCoverage, FilePathCoverageEngine,
 };
 
-pub const SCHEMA_VERSION: u16 = 6;
+pub const SCHEMA_VERSION: u16 = 8;
 pub const LARGE_IO_BYTES: u32 = 32 * 1024;
 const MAX_ANALYSIS_SAMPLES: usize = 100_000;
 const MAX_DERIVED_CACHE_ENTRIES: usize = 4_096;
@@ -57,8 +59,26 @@ pub struct BlockIssue {
     pub comm: String,
 }
 
+/// One scheduler-accounted I/O wait delay for a task, not a block request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerIoWait {
+    pub ts_ns: u64,
+    pub delay_ns: u64,
+    /// Kernel task ID from the event payload, not the emitting/waking task.
+    pub tid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    pub comm: String,
+    /// CPU where delay accounting was observed, not a duration's CPU affinity.
+    pub cpu: Option<u32>,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockComplete {
+    /// CPU executing the completion probe; None in older/unmeasured sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<u32>,
     pub ts_ns: u64,
     pub request_id: u64,
     pub device_major: u32,
@@ -806,6 +826,7 @@ impl IoPipeline {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum StorageEvent {
+    SchedulerIoWait(SchedulerIoWait),
     BlockInsert(BlockInsert),
     BlockIssue(BlockIssue),
     BlockComplete(BlockComplete),
@@ -1482,6 +1503,9 @@ pub struct StackFingerprintRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "record", rename_all = "snake_case")]
+// Keep the high-frequency event inline; boxing would add an allocation per
+// capture record and alter the public construction API for all collectors.
+#[allow(clippy::large_enum_variant)]
 pub enum WireRecord {
     SourceInfo {
         schema_version: u16,
@@ -1778,6 +1802,19 @@ pub struct CompletionEvidence {
     pub clock: u32,
 }
 
+/// Detail-stream timing, computed before retention or analysis filters.
+/// Observed software requests, never an unsampled hardware queue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetailTiming {
+    pub issue_depth: Option<usize>,
+    pub issue_gap_ns: Option<u64>,
+    pub completion_gap_ns: Option<u64>,
+    #[serde(default)]
+    pub issue_bandwidth: Option<rolling::RollingRate>,
+    #[serde(default)]
+    pub completion_bandwidth: Option<rolling::RollingRate>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedIo {
     pub insert: Option<BlockInsert>,
@@ -1795,6 +1832,8 @@ pub struct CompletedIo {
     pub queue_depth_at_issue: Option<usize>,
     /// Observed correlated requests remaining after this completion, all devices.
     pub queue_depth_after: Option<usize>,
+    #[serde(default)]
+    pub detail_timing: DetailTiming,
     pub access_pattern: AccessPattern,
     pub size_class: IoSizeClass,
     /// For observed completions, `issue` holds volume/address context. Its
@@ -1887,6 +1926,7 @@ struct PendingRequest {
     issue: BlockIssue,
     insert: Option<BlockInsert>,
     access_pattern: AccessPattern,
+    detail_timing: DetailTiming,
     queue_depth_at_issue: usize,
 }
 
@@ -1896,6 +1936,11 @@ pub struct RequestCorrelator {
     ttl_ns: u64,
     inserted: HashMap<RequestKey, BlockInsert>,
     pending: HashMap<RequestKey, PendingRequest>,
+    device_pending: HashMap<(u32, u32), usize>,
+    last_issue: HashMap<(u32, u32), u64>,
+    last_completion: HashMap<(u32, u32), u64>,
+    issue_bandwidth: HashMap<(u32, u32), rolling::RollingRateAccumulator>,
+    completion_bandwidth: HashMap<(u32, u32), rolling::RollingRateAccumulator>,
     ambiguous: HashMap<RequestKey, u64>,
     expired: u64,
     replaced: u64,
@@ -1908,6 +1953,11 @@ impl RequestCorrelator {
             ttl_ns,
             inserted: HashMap::new(),
             pending: HashMap::new(),
+            device_pending: HashMap::new(),
+            last_issue: HashMap::new(),
+            last_completion: HashMap::new(),
+            issue_bandwidth: HashMap::new(),
+            completion_bandwidth: HashMap::new(),
             ambiguous: HashMap::new(),
             expired: 0,
             replaced: 0,
@@ -1935,18 +1985,47 @@ impl RequestCorrelator {
     ) -> usize {
         self.expire_before(issue.ts_ns);
         let key = RequestKey::issue(&issue);
+        let device = (issue.device_major, issue.device_minor);
+        let issue_gap_ns = self
+            .last_issue
+            .insert(device, issue.ts_ns)
+            .and_then(|t| issue.ts_ns.checked_sub(t));
         let insert = self.inserted.remove(&key);
-        let collision = self.ambiguous.contains_key(&key) || self.pending.remove(&key).is_some();
+        let payload = if matches!(issue.operation, IoOperation::Read | IoOperation::Write) {
+            issue.bytes as u64
+        } else {
+            0
+        };
+        let issue_bandwidth = self
+            .issue_bandwidth
+            .entry(device)
+            .or_default()
+            .observe(issue_gap_ns, Some(payload));
+        let removed = self.pending.remove(&key).is_some();
+        let depth = self.device_pending.entry(device).or_default();
+        if removed {
+            *depth = depth.saturating_sub(1);
+        }
+        let collision = self.ambiguous.contains_key(&key) || removed;
         if collision {
             self.replaced += 1;
             self.ambiguous.insert(key, issue.ts_ns);
         } else {
+            *depth += 1;
+            let detail_timing = DetailTiming {
+                issue_depth: Some(*depth),
+                issue_gap_ns,
+                completion_gap_ns: None,
+                issue_bandwidth,
+                completion_bandwidth: None,
+            };
             self.pending.insert(
                 key,
                 PendingRequest {
                     issue,
                     insert,
                     access_pattern,
+                    detail_timing,
                     queue_depth_at_issue: self.pending.len() + 1,
                 },
             );
@@ -1957,10 +2036,34 @@ impl RequestCorrelator {
     pub fn on_complete(&mut self, completion: BlockComplete) -> Option<CompletedIo> {
         self.expire_before(completion.ts_ns);
         let key = RequestKey::complete(&completion);
+        let device = (completion.device_major, completion.device_minor);
+        let completion_gap_ns = self
+            .last_completion
+            .insert(device, completion.ts_ns)
+            .and_then(|t| completion.ts_ns.checked_sub(t));
+        let payload = self
+            .pending
+            .get(&key)
+            .filter(|p| p.issue.ts_ns <= completion.ts_ns)
+            .map(|p| {
+                if matches!(p.issue.operation, IoOperation::Read | IoOperation::Write) {
+                    p.issue.bytes as u64
+                } else {
+                    0
+                }
+            });
+        let completion_bandwidth = self
+            .completion_bandwidth
+            .entry(device)
+            .or_default()
+            .observe(completion_gap_ns, payload);
         if self.ambiguous.remove(&key).is_some() {
             return None;
         }
         let pending = self.pending.remove(&key)?;
+        if let Some(depth) = self.device_pending.get_mut(&device) {
+            *depth = depth.saturating_sub(1);
+        }
         let device_latency_ns = completion.ts_ns.checked_sub(pending.issue.ts_ns)?;
         let queue_latency_ns = pending
             .insert
@@ -1982,6 +2085,11 @@ impl RequestCorrelator {
             total_latency_ns: Some(total_latency_ns),
             queue_depth_at_issue: Some(pending.queue_depth_at_issue),
             queue_depth_after: Some(self.pending.len()),
+            detail_timing: DetailTiming {
+                completion_gap_ns,
+                completion_bandwidth,
+                ..pending.detail_timing
+            },
             access_pattern: pending.access_pattern,
             size_class,
             evidence: None,
@@ -2009,6 +2117,13 @@ impl RequestCorrelator {
         self.pending.retain(|_, value| {
             let keep = now_ns.saturating_sub(value.issue.ts_ns) <= ttl;
             expired += u64::from(!keep);
+            if !keep
+                && let Some(depth) = self
+                    .device_pending
+                    .get_mut(&(value.issue.device_major, value.issue.device_minor))
+            {
+                *depth = depth.saturating_sub(1);
+            }
             keep
         });
         self.ambiguous.retain(|_, ts_ns| {
@@ -2299,6 +2414,9 @@ pub struct AnalysisEngine {
     first_ts_ns: Option<u64>,
     last_ts_ns: Option<u64>,
     completed: Vec<CompletedIo>,
+    scheduler_waits: Vec<SchedulerIoWait>,
+    scheduler_waits_dropped: usize,
+    scheduler_start_ns: Option<u64>,
     file_ios: Vec<FileIo>,
     pipeline_observations: Vec<PipelineObservation>,
     pending_pipeline: HashMap<(PipelineLayer, u64, String), PipelineObservation>,
@@ -2336,6 +2454,9 @@ impl AnalysisEngine {
             first_ts_ns: None,
             last_ts_ns: None,
             completed: Vec::new(),
+            scheduler_waits: Vec::new(),
+            scheduler_waits_dropped: 0,
+            scheduler_start_ns: None,
             file_ios: Vec::new(),
             pipeline_observations: Vec::new(),
             pending_pipeline: HashMap::new(),
@@ -2376,6 +2497,23 @@ impl AnalysisEngine {
             self.slow_reason_cache.get_mut().clear();
         }
         match event {
+            StorageEvent::SchedulerIoWait(wait) => {
+                self.scheduler_start_ns = Some(
+                    self.scheduler_start_ns
+                        .map_or(wait.ts_ns, |ts| ts.min(wait.ts_ns)),
+                );
+                if self
+                    .completion_window
+                    .is_none_or(|(a, b)| wait.ts_ns >= a && wait.ts_ns <= b)
+                {
+                    if self.scheduler_waits.len() >= MAX_ANALYSIS_SAMPLES {
+                        self.scheduler_waits.drain(..MAX_ANALYSIS_SAMPLES / 10);
+                        self.scheduler_waits_dropped += MAX_ANALYSIS_SAMPLES / 10;
+                    }
+                    self.scheduler_waits.push(wait);
+                }
+                None
+            }
             StorageEvent::BlockInsert(insert) => {
                 self.observe_ts(insert.ts_ns);
                 self.correlator.on_insert(insert);
@@ -2881,6 +3019,9 @@ impl AnalysisEngine {
     pub fn select_completed(&self, mut predicate: impl FnMut(&CompletedIo) -> bool) -> Self {
         let mut result = Self::new();
         result.file_ios = self.file_ios.clone();
+        result.scheduler_waits = self.scheduler_waits.clone();
+        result.scheduler_waits_dropped = self.scheduler_waits_dropped;
+        result.scheduler_start_ns = self.scheduler_start_ns;
         result.pipeline_observations = self.pipeline_observations.clone();
         result.graph_nodes = self.graph_nodes.clone();
         result.graph_edges = self.graph_edges.clone();
@@ -2895,6 +3036,16 @@ impl AnalysisEngine {
             result.completed.push(io.clone());
         }
         result
+    }
+
+    pub fn scheduler_waits(&self) -> &[SchedulerIoWait] {
+        &self.scheduler_waits
+    }
+    pub fn scheduler_waits_dropped(&self) -> usize {
+        self.scheduler_waits_dropped
+    }
+    pub fn scheduler_start_ns(&self) -> Option<u64> {
+        self.scheduler_start_ns
     }
 
     pub fn completed_ios(&self) -> &[CompletedIo] {

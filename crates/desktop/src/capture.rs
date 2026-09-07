@@ -664,7 +664,7 @@ fn capture_perfetto(
         kernel_release: report.kernel_release.clone(),
     }))
     .ok();
-    tx.send(HostMessage::Record(WireRecord::SourceInfo{schema_version:SCHEMA_VERSION,source:"perfetto".into(),status:"Perfetto recording · individual I/O and loss statistics available after Stop".into(),metadata:serde_json::json!({"stage":"recording","raw_trace":"perfetto/capture.pftrace","recovery_manifest":"perfetto/perfetto-owner.json","duration_limit_ms":3_600_000,"file_limit_bytes":268_435_456,"file_path":"Unresolved: block tracepoints do not provide file/inode mapping"})})).ok();
+    tx.send(HostMessage::Record(WireRecord::SourceInfo{schema_version:SCHEMA_VERSION,source:"perfetto".into(),status:"Perfetto recording · individual I/O and loss statistics available after Stop".into(),metadata:serde_json::json!({"stage":"recording","block_activity_scope":"unfiltered_issue_complete_v1","raw_trace":"perfetto/capture.pftrace","recovery_manifest":"perfetto/perfetto-owner.json","duration_limit_ms":3_600_000,"file_limit_bytes":268_435_456,"file_path":"Unresolved: block tracepoints do not provide file/inode mapping"})})).ok();
     let started = std::time::Instant::now();
     let mut counters_failed = false;
     while !stop.load(Ordering::Acquire) {

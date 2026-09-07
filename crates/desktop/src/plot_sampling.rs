@@ -1,3 +1,36 @@
+fn operation_sample_indices(samples: &[CompletedIo], limit: usize) -> Vec<usize> {
+    if samples.len() <= limit {
+        return (0..samples.len()).collect();
+    }
+    let mut groups = BTreeMap::<IoOperation, Vec<usize>>::new();
+    for (index, io) in samples.iter().enumerate() {
+        groups.entry(io.issue.operation).or_default().push(index);
+    }
+    if limit < groups.len() {
+        return evenly_sample_indices(samples.len(), limit);
+    }
+    let groups: Vec<_> = groups.into_values().collect();
+    let mut quota: Vec<_> = groups
+        .iter()
+        .map(|g| (limit * g.len() / samples.len()).max(1))
+        .collect();
+    while quota.iter().sum::<usize>() > limit {
+        let index = quota.iter().enumerate().max_by_key(|(_, v)| *v).unwrap().0;
+        quota[index] -= 1;
+    }
+    let mut indices = Vec::with_capacity(limit);
+    for (group, count) in groups.iter().zip(quota) {
+        indices.extend(
+            evenly_sample_indices(group.len(), count)
+                .into_iter()
+                .map(|i| group[i]),
+        );
+    }
+    indices.sort_unstable();
+    indices
+}
+
+
 // Coordinates are measured before sampling. Selection still uses the complete cohort.
 fn shape_sample_indices(points: &[ExplorerPoint], limit: usize) -> Vec<usize> {
     if points.len() <= limit { return (0..points.len()).collect(); }
@@ -116,7 +149,7 @@ mod sampling_regression {
                 comm: "alternating".into(),
             }));
             app.analyzer
-                .ingest(StorageEvent::BlockComplete(BlockComplete {
+                .ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                     ts_ns: id * 1000 + 10,
                     request_id: id,
                     device_major: 8,
@@ -157,7 +190,7 @@ mod plotted_extrema_regression {
             app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue {
                 ts_ns: ts, request_id:index+1,device_major:8,device_minor:0,sector,sectors:8,bytes:4096,operation:IoOperation::Read,pid:1,tid:1,cpu:0,comm:"peak-gap".into(),
             }));
-            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete {ts_ns:ts+500,request_id:index+1,device_major:8,device_minor:0,status:0}));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,ts_ns:ts+500,request_id:index+1,device_major:8,device_minor:0,status:0}));
         }
         app.rebuild_explorer_view();
         let view = app.explorer_view.as_ref().unwrap();

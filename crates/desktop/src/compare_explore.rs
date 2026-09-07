@@ -72,6 +72,11 @@ fn compare_filter(shared: &AnalysisFilter, local: &AnalysisFilter) -> AnalysisFi
         end_ms: shared.end_ms,
         operation: shared.operation,
         confidence: shared.confidence,
+        min_bytes:shared.min_bytes,
+        max_bytes:shared.max_bytes,
+        access:shared.access,
+        layer:shared.layer,
+        cpu:local.cpu,
         process: shared.process.clone(),
         file: local.file.clone(),
         device: local.device.clone(),
@@ -265,6 +270,7 @@ impl StudioApp {
 
     fn comparison_viewer(&self) -> StudioApp {
         let mut view = StudioApp {
+            activity:Arc::clone(&self.activity),
             analyzer: self.analyzer.select_completed(|_| true),
             session_path: self.session_path.clone(),
             capabilities: self.capabilities.clone(),
@@ -683,7 +689,7 @@ fn compare_controls(
     ui.horizontal_wrapped(|ui| {
         let old=state.preset;
         egui::ComboBox::from_id_salt("compare-preset").selected_text(state.preset.label()).show_ui(ui,|ui| {
-            for preset in ExplorerPreset::ALL { ui.selectable_value(&mut state.preset,preset,preset.label()); }
+            for preset in ExplorerPreset::ALL.into_iter().filter(|p|*p!=ExplorerPreset::ConnectedFootprint&&!p.query().is_some_and(|(_,y,_)|matches!(y,AxisMetric::Window(_)|AxisMetric::Timeline(_)|AxisMetric::SchedulerIoWait))) { ui.selectable_value(&mut state.preset,preset,preset.label()); }
         });
         if old!=state.preset && let Some((x,y,group))=state.preset.query() {state.axes=[x,y];state.category=group;}
         ui.checkbox(&mut state.linked_bounds,"Link X/Y view");
@@ -1340,7 +1346,7 @@ mod compare_explore_tests {
                 comm: name.into(),
             }));
             app.analyzer
-                .ingest(StorageEvent::BlockComplete(BlockComplete {
+                .ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                     ts_ns: origin + id * 1_000_000 + 500_000,
                     request_id: id,
                     device_major: 8,

@@ -9,3 +9,5 @@ Host regressions cover the default preset, independent decimal-MB conversion, ca
 Acceptance evidence is recorded separately from source tests; this change does not resolve physical capture loss or complete the all-graph acceptance matrix.
 
 A dense native cancellation regression exposed the drag rectangle contributing to automatic plot bounds. The rectangle is now painted as a clipped screen overlay after the plot, so it adds neither bounds nor a data legend series. Run node scripts/check-native-selection-cancel.mjs <native-output-directory> against the selection-cancel-pending gesture; it requires pending-before, cleared-after and identical view bounds. The original failing result remains in installed-dx12-dense/cancel-pending acceptance evidence.
+
+After integration with linked graph summaries, clearing the selection restores the full filtered graph Summary (rather than an empty inspector). Plot coordinates and filters remain unchanged.

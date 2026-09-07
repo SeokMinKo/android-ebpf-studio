@@ -37,10 +37,20 @@ const MAX_EXPLORER_GROUPS: usize = 32;
 const MAX_MESSAGES_PER_FRAME: usize = 1_000;
 const LIVE_ANALYSIS_REFRESH: Duration = Duration::from_millis(250);
 const PERFORMANCE_WARNING_INTERVAL: Duration = Duration::from_secs(10);
+include!("custom_axes.rs");
+include!("overall_ui.rs");
+include!("raw_log_ui.rs");
+include!("full_graph_tests.rs");
 include!("analysis_ui.rs");
 include!("latency_distribution.rs");
 include!("qa.rs");
 include!("selection.rs");
+include!("graph_summary_ui.rs");
+include!("footprint_ui.rs");
+include!("window_series_ui.rs");
+include!("timeline_ui.rs");
+include!("scheduler_ui.rs");
+include!("host_bw_ui.rs");
 include!("plot_style.rs");
 include!("axis_range.rs");
 include!("reanalysis.rs");
@@ -93,36 +103,106 @@ enum Page {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExplorerPreset {
+    Overall,
     LatencyTimeline,
     LatencyByFile,
     QueuePressure,
     LayerContribution,
     LbaDistribution,
     Custom,
+    ChunkTimeline,
+    QueueTimeline,
+    IssueGapTimeline,
+    CompletionGapTimeline,
+    NormalizedLatencyTimeline,
+    CpuTimeline,
+    WindowBandwidth,
+    WindowIops,
+    CumulativePayload,
+    WindowBusyPercent,
+    WindowBusyMs,
+    WindowIdleMs,
+    RollingC2cBandwidth,
+    RollingD2dBandwidth,
+    BusyIntervals,
+    IdleIntervals,
+    BurstPayload,
+    ConnectedFootprint,
+    CommandTimeline,
+    RequestGantt,
+    CpuEvents,
+    SchedulerIoWait,
 }
 
 impl ExplorerPreset {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 29] = [
         Self::LatencyTimeline,
         Self::LatencyByFile,
         Self::QueuePressure,
         Self::LayerContribution,
         Self::LbaDistribution,
         Self::Custom,
+        Self::ChunkTimeline,
+        Self::QueueTimeline,
+        Self::IssueGapTimeline,
+        Self::CompletionGapTimeline,
+        Self::NormalizedLatencyTimeline,
+        Self::CpuTimeline,
+        Self::WindowBandwidth,
+        Self::WindowIops,
+        Self::CumulativePayload,
+        Self::WindowBusyPercent,
+        Self::WindowBusyMs,
+        Self::WindowIdleMs,
+        Self::RollingC2cBandwidth,
+        Self::RollingD2dBandwidth,
+        Self::BusyIntervals,
+        Self::IdleIntervals,
+        Self::BurstPayload,
+        Self::ConnectedFootprint,
+        Self::CommandTimeline,
+        Self::RequestGantt,
+        Self::CpuEvents,
+        Self::SchedulerIoWait,
+        Self::Overall,
     ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::Overall => "Overall · LBA / QD / Chunk",
             Self::LatencyTimeline => "Latency over time",
             Self::LatencyByFile => "Latency by file",
             Self::QueuePressure => "Queue depth vs latency",
             Self::LayerContribution => "Filesystem vs UFS",
             Self::LbaDistribution => "LBA distribution",
             Self::Custom => "Custom",
+            Self::ChunkTimeline => "Chunk size over time",
+            Self::QueueTimeline => "Queue depth over time",
+            Self::IssueGapTimeline => "D2D issue gap over time",
+            Self::CompletionGapTimeline => "C2C completion gap over time",
+            Self::NormalizedLatencyTimeline => "Latency per KiB over time",
+            Self::CpuTimeline => "Issue CPU over time",
+            Self::WindowBandwidth => "Bandwidth by time window",
+            Self::WindowIops => "IOPS by time window",
+            Self::CumulativePayload => "Cumulative transferred data",
+            Self::WindowBusyPercent => "Device busy % over time",
+            Self::WindowBusyMs => "Active time by window",
+            Self::WindowIdleMs => "Idle time by window",
+            Self::RollingC2cBandwidth => "Rolling C2C bandwidth",
+            Self::RollingD2dBandwidth => "Rolling D2D bandwidth",
+            Self::BusyIntervals => "Continuous busy intervals",
+            Self::IdleIntervals => "Continuous idle intervals",
+            Self::BurstPayload => "Cumulative data within bursts",
+            Self::ConnectedFootprint => "Connected LBA footprint",
+            Self::CommandTimeline => "Block command timeline",
+            Self::RequestGantt => "Request Gantt",
+            Self::CpuEvents => "Issue / completion CPU timeline",
+            Self::SchedulerIoWait => "Scheduler I/O wait over time",
         }
     }
 
     fn query(self) -> Option<(AxisMetric, AxisMetric, GroupBy)> {
+        use crate::window_series::WindowMetric;
         match self {
             Self::LatencyTimeline => Some((
                 AxisMetric::TimeMs,
@@ -149,7 +229,109 @@ impl ExplorerPreset {
                 AxisMetric::AddressMB,
                 GroupBy::Direction,
             )),
+            Self::Overall | Self::ConnectedFootprint => {
+                Some((AxisMetric::TimeMs, AxisMetric::Sector, GroupBy::Direction))
+            }
             Self::Custom => None,
+            Self::SchedulerIoWait => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::SchedulerIoWait,
+                GroupBy::None,
+            )),
+            Self::CommandTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Timeline(TimelineMode::Commands),
+                GroupBy::Direction,
+            )),
+            Self::CpuEvents => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Timeline(TimelineMode::Cpus),
+                GroupBy::Direction,
+            )),
+            Self::RequestGantt => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Timeline(TimelineMode::Requests),
+                GroupBy::Direction,
+            )),
+            Self::ChunkTimeline => {
+                Some((AxisMetric::TimeMs, AxisMetric::ChunkKiB, GroupBy::Direction))
+            }
+            Self::QueueTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::IssueQueueDepth,
+                GroupBy::Direction,
+            )),
+            Self::IssueGapTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::IssueGapMs,
+                GroupBy::Direction,
+            )),
+            Self::CompletionGapTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::CompletionGapMs,
+                GroupBy::Direction,
+            )),
+            Self::NormalizedLatencyTimeline => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::LatencyPerKiB,
+                GroupBy::Direction,
+            )),
+            Self::CpuTimeline => Some((AxisMetric::TimeMs, AxisMetric::IssueCpu, GroupBy::Process)),
+            Self::RollingC2cBandwidth => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::RollingC2cBandwidth,
+                GroupBy::Direction,
+            )),
+            Self::RollingD2dBandwidth => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::RollingD2dBandwidth,
+                GroupBy::Direction,
+            )),
+            Self::BurstPayload => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::BurstPayload),
+                GroupBy::Direction,
+            )),
+            Self::BusyIntervals => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::BusyRunMs),
+                GroupBy::None,
+            )),
+            Self::IdleIntervals => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::IdleGapMs),
+                GroupBy::None,
+            )),
+            Self::WindowBandwidth => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::Bandwidth),
+                GroupBy::Direction,
+            )),
+            Self::WindowIops => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::Iops),
+                GroupBy::Direction,
+            )),
+            Self::CumulativePayload => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::CumulativePayload),
+                GroupBy::Direction,
+            )),
+            Self::WindowBusyPercent => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::BusyPercent),
+                GroupBy::None,
+            )),
+            Self::WindowBusyMs => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::BusyMs),
+                GroupBy::None,
+            )),
+            Self::WindowIdleMs => Some((
+                AxisMetric::TimeMs,
+                AxisMetric::Window(WindowMetric::IdleMs),
+                GroupBy::None,
+            )),
         }
     }
 }
@@ -164,6 +346,7 @@ enum SetupStep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AxisMetric {
+    Category(CategoryAxis),
     TimeMs,
     Sector,
     AddressKiB,
@@ -178,10 +361,20 @@ enum AxisMetric {
     FilesystemLatencyMs,
     UfsLatencyMs,
     CriticalPathMs,
+    IssueQueueDepth,
+    IssueGapMs,
+    CompletionGapMs,
+    LatencyPerKiB,
+    IssueCpu,
+    RollingC2cBandwidth,
+    RollingD2dBandwidth,
+    Window(crate::window_series::WindowMetric),
+    Timeline(TimelineMode),
+    SchedulerIoWait,
 }
 
 impl AxisMetric {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 28] = [
         Self::TimeMs,
         Self::Sector,
         Self::AddressKiB,
@@ -192,14 +385,29 @@ impl AxisMetric {
         Self::DeviceLatencyMs,
         Self::Pid,
         Self::QueueDepth,
-        Self::QueueDepthAtIssue,
         Self::FilesystemLatencyMs,
         Self::UfsLatencyMs,
         Self::CriticalPathMs,
+        Self::IssueQueueDepth,
+        Self::IssueGapMs,
+        Self::CompletionGapMs,
+        Self::LatencyPerKiB,
+        Self::IssueCpu,
+        Self::RollingC2cBandwidth,
+        Self::RollingD2dBandwidth,
+        Self::QueueDepthAtIssue,
+        Self::Category(CategoryAxis::Command),
+        Self::Category(CategoryAxis::Access),
+        Self::Category(CategoryAxis::Size),
+        Self::Category(CategoryAxis::Device),
+        Self::Category(CategoryAxis::Process),
+        Self::Category(CategoryAxis::File),
+        Self::Category(CategoryAxis::Confidence),
     ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::Category(c) => c.label(),
             Self::TimeMs => "Time (ms)",
             Self::Sector => "Sector",
             Self::AddressKiB => "Address (KiB)",
@@ -209,11 +417,21 @@ impl AxisMetric {
             Self::QueueLatencyMs => "Queue latency (ms)",
             Self::DeviceLatencyMs => "Device latency (ms)",
             Self::Pid => "PID",
-            Self::QueueDepth => "In-flight after completion",
-            Self::QueueDepthAtIssue => "In-flight at issue",
+            Self::QueueDepth => "QD after completion (all devices)",
+            Self::QueueDepthAtIssue => "Observed QD at issue (all devices)",
             Self::FilesystemLatencyMs => "Filesystem latency (ms)",
             Self::UfsLatencyMs => "UFS latency (ms)",
             Self::CriticalPathMs => "Critical path (ms)",
+            Self::IssueQueueDepth => "Observed QD at issue (device)",
+            Self::IssueGapMs => "D2D issue gap (ms)",
+            Self::CompletionGapMs => "C2C completion gap (ms)",
+            Self::LatencyPerKiB => "Device latency (ms/KiB)",
+            Self::IssueCpu => "Issue CPU",
+            Self::RollingC2cBandwidth => "Rolling C2C BW (MiB/s)",
+            Self::RollingD2dBandwidth => "Rolling D2D BW (MiB/s)",
+            Self::Window(metric) => metric.label(),
+            Self::Timeline(mode) => mode.label(),
+            Self::SchedulerIoWait => "Scheduler I/O wait (us)",
         }
     }
 
@@ -221,7 +439,7 @@ impl AxisMetric {
         matches!(
             self,
             Self::FilesystemLatencyMs | Self::UfsLatencyMs | Self::CriticalPathMs
-        )
+        ) || matches!(self,Self::Category(c) if c.needs_graph())
     }
 
     fn value(
@@ -231,6 +449,7 @@ impl AxisMetric {
         graph: Option<&IoTransactionGraph>,
     ) -> Option<f64> {
         match self {
+            Self::Category(_) => None,
             Self::TimeMs => io
                 .completion_timestamp()
                 .map(|ts| ts.saturating_sub(origin_ns) as f64 / 1e6),
@@ -243,6 +462,31 @@ impl AxisMetric {
             Self::DeviceLatencyMs => io.device_latency_ns.map(|n| n as f64 / 1e6),
             Self::Pid => io.issuer_pid().map(|pid| pid as f64),
             Self::QueueDepth => io.queue_depth_after.map(|n| n as f64),
+            Self::IssueQueueDepth => io.detail_timing.issue_depth.map(|n| n as f64),
+            Self::IssueGapMs => io.detail_timing.issue_gap_ns.map(|n| n as f64 / 1e6),
+            Self::CompletionGapMs => io.detail_timing.completion_gap_ns.map(|n| n as f64 / 1e6),
+            Self::LatencyPerKiB => {
+                if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write)
+                    && io.issue.bytes > 0
+                {
+                    io.device_latency_ns
+                        .map(|n| n as f64 / 1e6 / (io.issue.bytes as f64 / 1024.))
+                } else {
+                    None
+                }
+            }
+            Self::IssueCpu => io.issuer_cpu().map(|n| n as f64),
+            Self::RollingC2cBandwidth => io
+                .detail_timing
+                .completion_bandwidth
+                .as_ref()
+                .and_then(|r| r.mib_s()),
+            Self::RollingD2dBandwidth => io
+                .detail_timing
+                .issue_bandwidth
+                .as_ref()
+                .and_then(|r| r.mib_s()),
+            Self::Window(_) | Self::Timeline(_) | Self::SchedulerIoWait => None,
             Self::QueueDepthAtIssue => io.queue_depth_at_issue.map(|n| n as f64),
             Self::FilesystemLatencyMs => {
                 graph.and_then(|graph| graph_kind_duration_ms(graph, IoNodeKind::Filesystem))
@@ -266,9 +510,13 @@ impl AxisMetric {
 
     fn format_value(self, value: f64) -> String {
         match self {
-            Self::Sector | Self::Pid | Self::QueueDepth | Self::QueueDepthAtIssue => {
-                format!("{value:.0}")
-            }
+            Self::Category(_)
+            | Self::Sector
+            | Self::Pid
+            | Self::QueueDepth
+            | Self::QueueDepthAtIssue
+            | Self::IssueQueueDepth
+            | Self::IssueCpu => format!("{value:.0}"),
             Self::AddressKiB | Self::ChunkKiB => format!("{value:.1}"),
             Self::AddressMB => format!("{value:.6}"),
             Self::TimeMs
@@ -277,7 +525,15 @@ impl AxisMetric {
             | Self::DeviceLatencyMs
             | Self::FilesystemLatencyMs
             | Self::UfsLatencyMs
-            | Self::CriticalPathMs => format!("{value:.3}"),
+            | Self::CriticalPathMs
+            | Self::IssueGapMs
+            | Self::CompletionGapMs
+            | Self::LatencyPerKiB
+            | Self::RollingC2cBandwidth
+            | Self::RollingD2dBandwidth
+            | Self::Window(_)
+            | Self::Timeline(_)
+            | Self::SchedulerIoWait => format!("{value:.3}"),
         }
     }
 }
@@ -373,6 +629,9 @@ struct ExplorerPoint {
 
 #[derive(Debug, Clone)]
 struct ExplorerView {
+    overall: OverallPoints,
+    x_categories: AxisCategories,
+    y_categories: AxisCategories,
     generation: u64,
     x_axis: AxisMetric,
     y_axis: AxisMetric,
@@ -458,9 +717,13 @@ impl CapturePhase {
 }
 
 pub struct StudioApp {
+    activity: Arc<crate::host_bw::ActivityTimeline>,
+    footprint: FootprintState,
+    window_width_ms: u64,
     reanalysis: ReanalysisState,
     file_evidence_positions: Option<Vec<usize>>,
     selection: SelectionState,
+    scheduler: SchedulerState,
     plot_style: PlotStyle,
     render_qa: RenderQa,
     render_qa_scale: Option<f32>,
@@ -471,6 +734,7 @@ pub struct StudioApp {
     loss_status: String,
     source_info: Vec<WireRecord>,
     raw_export_pending: bool,
+    raw_log: RawLogState,
     discovery_pending: bool,
     last_discovery: Option<Instant>,
     theme: ThemeChoice,
@@ -489,7 +753,10 @@ pub struct StudioApp {
     disk_stats_view: DiskStatsView,
     filtered: Option<AnalysisEngine>,
     filtered_generation: u64,
+    filter_edit_epoch: u64,
     trend_view: Option<(u64, Arc<TrendData>)>,
+    trend_pending: Option<(u64, crossbeam_channel::Receiver<TrendData>)>,
+    trend_refreshed: Option<Instant>,
     recent: VecDeque<CompletedIo>,
     capture: Option<CaptureHandle>,
     simulator_stop: Option<Arc<AtomicBool>>,
@@ -512,6 +779,7 @@ pub struct StudioApp {
     y_axis: AxisMetric,
     group_by: GroupBy,
     explorer_preset: ExplorerPreset,
+    custom_geometry: CustomGeometry,
     selected_pipeline_request: Option<IoSelectionKey>,
     analysis_generation: u64,
     explorer_view: Option<ExplorerView>,
@@ -539,8 +807,12 @@ impl Default for StudioApp {
     fn default() -> Self {
         let (tx, rx) = bounded(20_000);
         Self {
+            activity: Arc::default(),
+            footprint: FootprintState::default(),
+            window_width_ms: 1000,
             reanalysis: ReanalysisState::default(),
             file_evidence_positions: None,
+            scheduler: SchedulerState::default(),
             selection: SelectionState {
                 enabled: true,
                 auto_bounds: true,
@@ -556,6 +828,7 @@ impl Default for StudioApp {
             loss_status: "Loss counters not reported".into(),
             source_info: Vec::new(),
             raw_export_pending: false,
+            raw_log: RawLogState::default(),
             discovery_pending: false,
             last_discovery: None,
             theme: ThemeChoice::System,
@@ -574,7 +847,10 @@ impl Default for StudioApp {
             query: AnalysisFilter::default(),
             filtered: None,
             filtered_generation: u64::MAX,
+            filter_edit_epoch: 0,
             trend_view: None,
+            trend_pending: None,
+            trend_refreshed: None,
             recent: VecDeque::new(),
             capture: None,
             simulator_stop: None,
@@ -597,6 +873,7 @@ impl Default for StudioApp {
             y_axis: AxisMetric::AddressMB,
             group_by: GroupBy::Direction,
             explorer_preset: ExplorerPreset::LbaDistribution,
+            custom_geometry: CustomGeometry::default(),
             selected_pipeline_request: None,
             analysis_generation: 0,
             explorer_view: None,
@@ -896,6 +1173,10 @@ impl StudioApp {
     }
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
+        self.activity = loaded.activity;
+        self.footprint.view = None;
+        self.footprint.pending = None;
+        self.footprint.fit = true;
         self.file_path_coverage = Some(loaded.file_path_coverage);
         self.reanalysis.source_start_ns = loaded.source_start_ns;
         self.reanalysis.source_end_ns = loaded.source_end_ns;
@@ -933,6 +1214,8 @@ impl StudioApp {
         self.filtered_generation = u64::MAX;
         self.file_evidence_positions = None;
         self.trend_view = None;
+        self.trend_pending = None;
+        self.trend_refreshed = None;
         self.phase = CapturePhase::Complete;
         self.selected_pipeline_request = None;
         self.loss_status = loaded.loss_status;
@@ -1167,6 +1450,12 @@ impl StudioApp {
     }
 
     fn ingest_record(&mut self, record: WireRecord) {
+        if matches!(
+            &record,
+            WireRecord::SourceInfo { .. } | WireRecord::Footer { .. }
+        ) {
+            Arc::make_mut(&mut self.activity).observe_record(&record);
+        }
         if let WireRecord::Footer { graceful, .. } = &record {
             self.agent_footer_seen = true;
             self.agent_graceful = *graceful;
@@ -1191,14 +1480,17 @@ impl StudioApp {
                 else {
                     unreachable!()
                 };
-                self.loss_status = crate::perfetto_session::source_status(source, status, metadata);
+                if source != "scheduler_iowait" {
+                    self.loss_status =
+                        crate::perfetto_session::source_status(source, status, metadata);
+                }
                 if metadata.get("stage").and_then(|s| s.as_str()) == Some("recording")
                     && self.phase == CapturePhase::Preparing
                 {
                     self.phase = CapturePhase::Recording;
                 }
                 if metadata.get("stage").and_then(|s| s.as_str()) == Some("complete") {
-                    self.push_diagnostic(format!("Perfetto source quality: {metadata}"));
+                    self.push_diagnostic(format!("{source} source quality: {metadata}"));
                 }
                 self.source_info.push(value);
             }
@@ -1214,6 +1506,8 @@ impl StudioApp {
                 if let Some(previous) = self.last_sequence
                     && sequence != previous.saturating_add(1)
                 {
+                    Arc::make_mut(&mut self.activity).limitation =
+                        Some("Event sequence gap in the received stream".into());
                     self.push_diagnostic_record(host_record(
                         self.session_id.as_deref().unwrap_or("session"),
                         DiagnosticLevel::Warn,
@@ -1228,7 +1522,11 @@ impl StudioApp {
                 }
                 self.last_sequence = Some(sequence);
                 self.received_events += 1;
+                if let Some((a, b)) = session::event_interval(&event) {
+                    Arc::make_mut(&mut self.activity).observe_range(a, b);
+                }
                 if let Some(completed) = self.analyzer.ingest(event) {
+                    Arc::make_mut(&mut self.activity).observe(&completed);
                     if self.recent.len() == MAX_RECENT {
                         self.recent.pop_front();
                     }
@@ -1324,6 +1622,9 @@ impl StudioApp {
     }
 
     fn reset_analysis(&mut self) {
+        self.scheduler = SchedulerState::default();
+        self.activity = Arc::default();
+        self.footprint = FootprintState::default();
         self.reanalysis = ReanalysisState::default();
         self.file_evidence_positions = None;
         self.selection = SelectionState {
@@ -1332,6 +1633,8 @@ impl StudioApp {
             ..Default::default()
         };
         self.trend_view = None;
+        self.trend_pending = None;
+        self.trend_refreshed = None;
         self.query = AnalysisFilter::default();
         self.filtered = None;
         self.capture_error = None;
@@ -1520,7 +1823,19 @@ impl StudioApp {
     }
 
     fn metrics_ui(&mut self, ui: &mut egui::Ui) {
-        let summary = self.analysis_summary();
+        let summary = if self.is_running() {
+            let Some(summary) = self
+                .trend_view
+                .as_ref()
+                .and_then(|(_, data)| data.live_summary.clone())
+            else {
+                ui.label("Retained I/O statistics are updating in the background.");
+                return;
+            };
+            summary
+        } else {
+            self.analysis_summary()
+        };
         if summary.completed_ios == 0 {
             ui.label("No retained completed I/O detail. Per-request volume and latency are unavailable; check the separate kernel snapshot or device counters.");
             return;
@@ -1597,6 +1912,8 @@ impl StudioApp {
         let samples = self.analysis().completed_ios();
         let available = samples.len();
         let origin_ns = self.time_origin();
+        let x_categories = AxisCategories::build(self.analysis(), self.x_axis);
+        let y_categories = AxisCategories::build(self.analysis(), self.y_axis);
         let shows_storage_address =
             self.x_axis.is_storage_address() || self.y_axis.is_storage_address();
         let needs_measurement_graph =
@@ -1613,8 +1930,8 @@ impl StudioApp {
             let graph = needs_measurement_graph.then(|| self.analysis().transaction_for(io));
             let graph = graph.as_ref();
             let (Some(x), Some(y)) = (
-                self.x_axis.value(io, origin_ns, graph),
-                self.y_axis.value(io, origin_ns, graph),
+                x_categories.value(self.x_axis, io, origin_ns, graph),
+                y_categories.value(self.y_axis, io, origin_ns, graph),
             ) else {
                 continue;
             };
@@ -1662,6 +1979,13 @@ impl StudioApp {
         }
         groups.sort_by(|left, right| left.0.cmp(&right.0));
         self.explorer_view = Some(ExplorerView {
+            overall: if self.explorer_preset == ExplorerPreset::Overall {
+                OverallPoints::build(self.analysis(), origin_ns)
+            } else {
+                OverallPoints::default()
+            },
+            x_categories,
+            y_categories,
             generation: self.analysis_generation,
             x_axis: self.x_axis,
             y_axis: self.y_axis,
@@ -1715,9 +2039,12 @@ impl StudioApp {
                             ui.selectable_value(&mut self.explorer_preset, preset, preset.label());
                         }
                     });
+                if previous != self.explorer_preset {self.explorer_view=None;}
                 if previous != self.explorer_preset
                     && let Some((x, y, group)) = self.explorer_preset.query()
                 {
+                    self.footprint.connected=self.explorer_preset==ExplorerPreset::ConnectedFootprint;
+                    if self.explorer_preset==ExplorerPreset::Overall {self.footprint.mode=FootprintMode::Combined;}
                     self.x_axis = x;
                     self.y_axis = y;
                     self.group_by = group;
@@ -1734,6 +2061,8 @@ impl StudioApp {
             egui::CollapsingHeader::new("Plot settings")
                 .open((self.render_qa.output.is_some() && (std::env::var_os("ANDROID_EBPF_QA_RANGE").is_some() || std::env::var_os("ANDROID_EBPF_QA_PLOT_STYLE").is_some() || std::env::var_os("ANDROID_EBPF_QA_SETTINGS").is_some())).then_some(true))
                 .show(ui, |ui| {
+            if !matches!(self.y_axis,AxisMetric::Window(_)|AxisMetric::Timeline(_)|AxisMetric::SchedulerIoWait) {
+            if !self.connected_footprint() {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color Category");
                 let previous_category = self.group_by;
@@ -1754,6 +2083,7 @@ impl StudioApp {
                         .step_by(0.5),
                 );
             });
+            }
             ui.collapsing("Advanced axes", |ui| {
                 let before = (self.x_axis, self.y_axis, self.group_by);
                 ui.horizontal_wrapped(|ui| {
@@ -1766,6 +2096,7 @@ impl StudioApp {
                     self.explorer_preset = ExplorerPreset::Custom;
                 }
             });
+            }
                     self.axis_ranges_ui(ui);
                     let cache_valid = self.explorer_view.as_ref().is_some_and(|view| view.generation == self.analysis_generation && view.x_axis == self.x_axis && view.y_axis == self.y_axis && view.group_by == self.group_by);
                     if !cache_valid { self.rebuild_explorer_view(); }
@@ -1782,7 +2113,30 @@ impl StudioApp {
                 ..Default::default()
             };
         }
-        self.explorer_plot_ui(ui, false);
+        if self.explorer_preset == ExplorerPreset::Custom {
+            self.custom_geometry_ui(ui);
+        }
+        self.footprint_controls(ui);
+        if (self.footprint.mode != FootprintMode::Combined || self.connected_footprint())
+            && self.x_axis == AxisMetric::TimeMs
+            && matches!(
+                self.y_axis,
+                AxisMetric::Sector | AxisMetric::AddressKiB | AxisMetric::AddressMB
+            )
+        {
+            self.footprint_lanes_ui(ui);
+            self.table_ui(ui);
+        } else if self.y_axis == AxisMetric::SchedulerIoWait {
+            self.scheduler_trend_ui(ui);
+        } else if matches!(self.y_axis, AxisMetric::Timeline(_)) {
+            self.timeline_ui(ui);
+            self.table_ui(ui);
+        } else if matches!(self.y_axis, AxisMetric::Window(_)) {
+            self.window_series_ui(ui);
+            self.table_ui(ui);
+        } else {
+            self.explorer_plot_ui(ui, false);
+        }
     }
 
     fn explorer_plot_ui(&mut self, ui: &mut egui::Ui, compact: bool) -> Option<SelectionRequest> {
@@ -1843,6 +2197,12 @@ impl StudioApp {
             ui.label("Observed in-flight requests across all captured devices: at issue includes this request; after completion excludes it. Filters preserve the original context. Loss, ID ambiguity and expiry can reduce the count; this is not hardware queue depth.");
         }
         let plot = studio_plot("interactive-storage-explorer");
+        let plot = if self.explorer_preset == ExplorerPreset::Overall {
+            plot.link_axis("overall-time", [true, false])
+                .link_cursor("overall-cursor", [true, false])
+        } else {
+            plot
+        };
         let plot = if show_legend {
             plot.legend(Legend::default())
         } else {
@@ -1860,6 +2220,8 @@ impl StudioApp {
             })
             .x_axis_label(self.x_axis.label())
             .y_axis_label(self.y_axis.label())
+            .x_axis_formatter(|m, _| view.x_categories.tick(x_axis, m.value))
+            .y_axis_formatter(|m, _| view.y_categories.tick(y_axis, m.value))
             .label_formatter(|hover| match hover {
                 HoverPosition::NearDataPoint {
                     plot_name,
@@ -1953,6 +2315,31 @@ impl StudioApp {
                     }
                 }
                 for (name, values) in &view.groups {
+                    if self.explorer_preset == ExplorerPreset::Custom
+                        && self.custom_geometry != CustomGeometry::Scatter
+                    {
+                        let mut rows: Vec<_> = values.iter().map(|p| p.coordinates).collect();
+                        rows.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                        let color = self.plot_style.color(self.group_by, name);
+                        if self.custom_geometry == CustomGeometry::Line {
+                            plot.line(
+                                Line::new(format!("{name} line"), rows)
+                                    .color(color)
+                                    .allow_hover(false),
+                            );
+                        } else {
+                            plot.bar_chart(
+                                egui_plot::BarChart::new(
+                                    format!("{name} bars"),
+                                    rows.iter()
+                                        .map(|p| egui_plot::Bar::new(p[0], p[1]).width(0.6))
+                                        .collect(),
+                                )
+                                .color(color)
+                                .allow_hover(false),
+                            );
+                        }
+                    }
                     let points: PlotPoints = values.iter().map(|point| point.coordinates).collect();
                     if let Some(summary) = &self.selection.summary {
                         let selected: PlotPoints = values
@@ -1994,6 +2381,25 @@ impl StudioApp {
                     egui::StrokeKind::Inside,
                 );
         }
+        for (axis, categories) in [(x_axis, &view.x_categories), (y_axis, &view.y_categories)] {
+            if !categories.labels.is_empty() {
+                ui.collapsing(
+                    format!("{} axis labels ({})", axis.label(), categories.labels.len()),
+                    |ui| {
+                        let page = target_page(ui, axis.label(), categories.labels.len());
+                        for (i, label) in categories
+                            .labels
+                            .iter()
+                            .enumerate()
+                            .skip(page * 20)
+                            .take(20)
+                        {
+                            ui.label(format!("{i}: {label}"));
+                        }
+                    },
+                );
+            }
+        }
         self.selection.drag_start = drag_start;
         self.selection.current_bounds = Some(*plot_response.transform.bounds());
         // Comparison plots are peers: data-dependent status belongs after the
@@ -2029,6 +2435,9 @@ impl StudioApp {
                 .scroll_to_me(Some(egui::Align::Center));
         }
         if !compact {
+            if self.explorer_preset == ExplorerPreset::Overall {
+                self.overall_companions_ui(ui);
+            }
             self.table_ui(ui);
             ui.label(RichText::new("Queue latency requires block_rq_insert. Missing values are excluded instead of displayed as zero.").small().color(muted()));
         }
@@ -2459,6 +2868,7 @@ impl StudioApp {
             });
             return;
         };
+        self.raw_log_ui(ui, &io);
         ui.label(format!(
             "Focused I/O: {} · PID {} / TID {} · device {}:{}",
             io.issue.comm,
@@ -2899,6 +3309,9 @@ impl StudioApp {
             "Completed block I/O",
             "Current filters · all loaded detail rows · focus an Open button and press Enter for full I/O and FilePath evidence",
         );
+        if ui.button("Export table I/O CSV").clicked() {
+            self.export_io_cohort_csv(None);
+        }
         let mut open = None;
         let mut table_focused = false;
         card_frame().show(ui, |ui| {
@@ -3723,6 +4136,7 @@ impl eframe::App for StudioApp {
         if self.page == Page::Explore
             && !matches!(self.phase, CapturePhase::Stopping | CapturePhase::Analyzing)
         {
+            self.rebuild_filtered();
             self.selection_panel(ui);
         }
         egui::CentralPanel::default()
@@ -4304,7 +4718,9 @@ fn axis_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut AxisMetric) 
             .selected_text(value.label())
             .width(180.0)
             .show_ui(ui, |ui| {
-                for metric in AxisMetric::ALL {
+                for metric in AxisMetric::ALL.into_iter().filter(|m| {
+                    !id.starts_with("compare-") || !matches!(m, AxisMetric::Category(_))
+                }) {
                     ui.selectable_value(value, metric, metric.label());
                 }
             });

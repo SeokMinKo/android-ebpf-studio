@@ -117,13 +117,15 @@ impl StudioApp {
         if !self.is_running() && self.reanalysis.source_start_ns.is_none() {
             let summary = self.analyzer.live_summary();
             self.reanalysis.source_count = summary.completed_ios;
-            let Some(origin) = self.analyzer.session_start_ns() else {
+            let Some(origin) = self.known_time_origin() else {
                 ui.label("Time range unavailable: these I/O have no supported session clock. Counts, volume, address details and original data remain available.");
                 return;
             };
             self.reanalysis.source_start_ns = Some(origin);
             let span = self.analyzer.known_time_span_ns().unwrap_or(0);
-            self.reanalysis.source_end_ns = Some(origin.saturating_add(span));
+            let end=self.analyzer.scheduler_waits().iter().map(|w|w.ts_ns).max().unwrap_or(origin).max(self.analyzer.session_start_ns().unwrap_or(origin).saturating_add(span));
+            let span=end.saturating_sub(origin);
+            self.reanalysis.source_end_ns = Some(end);
             self.reanalysis.draft = ["0".into(), (span as f64 / 1e6).to_string()];
         }
         let Some(origin) = self.reanalysis.source_start_ns else {
@@ -147,7 +149,7 @@ impl StudioApp {
         egui::CollapsingHeader::new("Reanalyze time range · recover older detail from original session")
 .open((self.render_qa.output.is_some()&&std::env::var_os("ANDROID_EBPF_QA_REANALYSIS").is_some()).then_some(true))
             .show(ui,|ui| {
-                ui.label(format!("Known-clock source span: 0–{} ms · maximum 100,000 I/O per detail window",self.reanalysis.source_end_ns.map_or("unavailable".into(), |end| format!("{:.3}",end.saturating_sub(origin)as f64/1e6))));
+                ui.label(format!("Known-clock source span: 0–{} ms · maximum 100,000 I/O or scheduler wait events per detail window",self.reanalysis.source_end_ns.map_or("unavailable".into(), |end| format!("{:.3}",end.saturating_sub(origin)as f64/1e6))));
                 ui.small("Time-range reanalysis includes only I/O with a supported session clock. Other I/O remain in the original and full-session view.");
                 ui.horizontal_wrapped(|ui| {
                     for (i,label) in ["Start (ms)","End (ms)"].iter().enumerate() {
@@ -165,7 +167,7 @@ impl StudioApp {
                         if ui.button("Cancel reanalysis").clicked() && let Some(cancel)=&self.reanalysis.cancel {cancel.store(true,Ordering::Relaxed);}
                     }
                 });
-                ui.label("Inclusive completion-time interval. Original block ordering preserves access pattern and queue depth. File evidence is replayed from the same source. A larger/dense interval asks you to narrow it; previous analysis stays available on failure.");
+                ui.label("Inclusive completion-time interval (accounting timestamp for scheduler waits). Original block ordering preserves access pattern and queue depth. File evidence is replayed from the same source. A larger/dense interval asks you to narrow it; previous analysis stays available on failure.");
                 if let Some(error)=&self.reanalysis.error {ui.colored_label(red(),error);}
             });
     }

@@ -32,7 +32,7 @@ mod latency_drilldown_tests {
                 comm: "worker".into(),
             }));
             app.analyzer
-                .ingest(StorageEvent::BlockComplete(BlockComplete {
+                .ingest(StorageEvent::BlockComplete(BlockComplete { cpu: None,
                     ts_ns: id * 1_000_000 + latency,
                     request_id: id,
                     device_major: 8,

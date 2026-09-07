@@ -1,6 +1,47 @@
 // Shared query for all request-oriented analysis surfaces. Capture filters are
 // intentionally separate: these controls never discard incoming measurements.
 #[cfg(test)]
+mod filter_input_tests {
+    use super::*;
+    use android_ebpf_protocol::{BlockIssue,BlockComplete,StorageEvent};
+    fn frame(app:&mut StudioApp,ctx:&egui::Context,time:&mut f64,events:Vec<egui::Event>) {
+        *time+=0.1;
+        let mut output=ctx.run_ui(egui::RawInput{time:Some(*time),screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1600.,1000.))),events,..Default::default()},|root| {
+            egui::CentralPanel::default().show(root,|ui|app.filter_ui(ui));
+        });
+        output.textures_delta.clear();
+        app.rebuild_filtered();
+    }
+    fn click(app:&mut StudioApp,ctx:&egui::Context,time:&mut f64,region:&str) {
+        let pos=app.render_qa.regions[region].0.center();
+        for pressed in [true,false] {frame(app,ctx,time,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
+        for _ in 0..6 {frame(app,ctx,time,vec![]);}
+    }
+    #[test]
+    fn clear_filters_does_not_restore_pid_from_numeric_editor_on_lost_focus() {
+        let mut app=StudioApp::default();
+        for pid in [10,20] {
+            app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue{ts_ns:pid as u64*1000,request_id:pid as u64,device_major:8,device_minor:0,sector:0,sectors:8,bytes:4096,operation:IoOperation::Read,pid,tid:pid,cpu:0,comm:"same".into()}));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete{cpu:None,ts_ns:pid as u64*1000+100,request_id:pid as u64,device_major:8,device_minor:0,status:0}));
+        }
+        app.render_qa.output=Some(PathBuf::from("unused-test-region-marker"));
+        let ctx=egui::Context::default();let mut time=0.;
+        frame(&mut app,&ctx,&mut time,vec![]);
+        click(&mut app,&ctx,&mut time,"analysis-filters");
+        click(&mut app,&ctx,&mut time,"pid-filter");
+        for value in ["10","2147483647"] {
+            frame(&mut app,&ctx,&mut time,vec![egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}},egui::Event::Text(value.into())]);
+            for _ in 0..6 {frame(&mut app,&ctx,&mut time,vec![]);}
+            assert_eq!(app.query.pid,value.parse::<u32>().unwrap());
+            assert_eq!(app.analysis().completed_ios().len(),if value=="10"{1}else{0});
+        }
+        click(&mut app,&ctx,&mut time,"clear-filters");
+        assert_eq!(app.query,AnalysisFilter::default());
+        assert_eq!(app.analysis().completed_ios().len(),2);
+    }
+}
+
+#[cfg(test)]
 mod diskstats_performance_tests {
     use super::*;
 
@@ -155,6 +196,11 @@ struct AnalysisFilter {
     device: String,
     operation: Option<IoOperation>,
     confidence: Option<PathConfidence>,
+    min_bytes:u32,
+    max_bytes:u32,
+    access:Option<AccessPattern>,
+    cpu:Option<u32>,
+    layer:Option<IoNodeKind>,
 }
 
 type PathConfidence = android_ebpf_protocol::FilePathConfidence;
@@ -192,6 +238,10 @@ impl AnalysisFilter {
         if (self.pid != 0 && Some(self.pid) != io.issuer_pid())
             || (self.tid != 0 && Some(self.tid) != io.issuer_tid())
             || self.operation.is_some_and(|v| v != io.issue.operation)
+            || io.issue.bytes<self.min_bytes
+            || (self.max_bytes>0 && io.issue.bytes>self.max_bytes)
+            || self.access.is_some_and(|v|v!=io.access_pattern)
+            || self.cpu.is_some_and(|v|Some(v)!=io.issuer_cpu())
             || !io
                 .issue
                 .comm
@@ -202,10 +252,12 @@ impl AnalysisFilter {
         {
             return false;
         }
-        if self.file.is_empty() && self.confidence.is_none() {
+        if self.file.is_empty() && self.confidence.is_none() && self.layer.is_none() {
             return true;
         }
-        let origins = block_file_origins(&engine.transaction_for(io));
+        let graph=engine.transaction_for(io);
+        if self.layer.is_some_and(|kind|!graph.nodes.iter().any(|n|n.kind==kind)) {return false;}
+        let origins = block_file_origins(&graph);
         self.confidence
             .is_none_or(|v| path_confidence(&origins) == v)
             && (self.file.is_empty()
@@ -347,14 +399,19 @@ impl StudioApp {
     fn known_time_origin(&self) -> Option<u64> {
         self.reanalysis
             .source_start_ns
-            .or(self.analyzer.session_start_ns())
+            .or_else(||self.analyzer.session_start_ns().into_iter().chain(self.analyzer.scheduler_start_ns()).min())
     }
     fn time_origin(&self) -> u64 {
         self.known_time_origin().unwrap_or(0)
     }
 
     fn invalidate_query(&mut self) {
+        self.footprint.view = None;
+        self.footprint.pending = None;
+        self.footprint.fit = true;
         self.trend_view = None;
+        self.trend_pending = None;
+        self.trend_refreshed = None;
         self.selection = SelectionState {
             enabled: true,
             auto_bounds: true,
@@ -379,6 +436,7 @@ impl StudioApp {
         if self.filtered_generation == self.analysis_generation {
             return;
         }
+        let started=Instant::now();
         let origin = self.time_origin();
         self.filtered = Some(
             self.analyzer
@@ -386,10 +444,11 @@ impl StudioApp {
         );
         self.update_file_evidence_scope();
         self.filtered_generation = self.analysis_generation;
+        if self.render_qa.output.is_some(){self.render_qa.filter_rebuild_ms.push(started.elapsed().as_secs_f64()*1000.);}
     }
 
     fn filter_ui(&mut self, ui: &mut egui::Ui) {
-        if self.analyzer.completed_ios().is_empty() {
+        if self.analyzer.completed_ios().is_empty() && self.analyzer.scheduler_waits().is_empty() {
             return;
         }
         let previous = self.query.clone();
@@ -401,18 +460,23 @@ impl StudioApp {
                 }
             });
         }
-        ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
+        let header=ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
+            // A numeric editor commits its buffered text when it loses focus.
+            // Replace input identities after Clear so a delayed commit cannot
+            // restore a previous PID, time or size into the reset query.
+            ui.push_id(self.filter_edit_epoch,|ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Completion time (ms)");
+                ui.label(if self.y_axis==AxisMetric::SchedulerIoWait {"Scheduler event time (ms)"}else{"Completion time (ms)"});
                 ui.add(egui::DragValue::new(&mut self.query.start_ms).prefix("From ").range(0.0..=f64::MAX));
                 ui.add(egui::DragValue::new(&mut self.query.end_ms).prefix("To ").range(0.0..=f64::MAX));
                 ui.label("To 0 = session end");
-                ui.add(egui::DragValue::new(&mut self.query.pid).prefix("PID "));
+                let pid=ui.add(egui::DragValue::new(&mut self.query.pid).prefix("PID "));
+                qa_region(&mut self.render_qa,"pid-filter",pid.rect,ui.clip_rect());
                 ui.add(egui::DragValue::new(&mut self.query.tid).prefix("TID "));
                 ui.label("0 = all");
                 egui::ComboBox::from_id_salt("analysis-op").selected_text(self.query.operation.map_or("All operations", operation_label)).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.query.operation, None, "All operations");
-                    for op in [IoOperation::Read, IoOperation::Write] { ui.selectable_value(&mut self.query.operation, Some(op), operation_label(op)); }
+                    for op in [IoOperation::Read, IoOperation::Write,IoOperation::Flush,IoOperation::Discard,IoOperation::Other] { ui.selectable_value(&mut self.query.operation, Some(op), operation_label(op)); }
                 });
                 egui::ComboBox::from_id_salt("analysis-confidence").selected_text(self.query.confidence.map_or("All FilePath confidence".into(), |v| format!("{v:?}"))).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.query.confidence, None, "All FilePath confidence");
@@ -420,13 +484,39 @@ impl StudioApp {
                 });
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label("Process"); ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
+                ui.label(if self.y_axis==AxisMetric::SchedulerIoWait {"Process (waiting task comm)"}else{"Process (issuer comm)"}); let process=ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
+                qa_region(&mut self.render_qa,"process-filter",process.rect,ui.clip_rect());
                 ui.label("FilePath / inode"); ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
                 ui.label("Device major:minor"); ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
-                if ui.button("Clear filters").clicked() { self.query = AnalysisFilter::default(); }
+                let clear=ui.button("Clear filters");qa_region(&mut self.render_qa,"clear-filters",clear.rect,ui.clip_rect());
+                if clear.clicked() { self.query = AnalysisFilter::default();self.filter_edit_epoch=self.filter_edit_epoch.wrapping_add(1); }
             });
-            ui.label("Selection uses the loaded completed-request window; file-operation evidence follows that cohort. Capture diagnostics and Compare baseline remain session-wide. File candidates are preserved together. Sequential/random classification remains from the original device/direction stream.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Size (bytes)");
+                ui.add(egui::DragValue::new(&mut self.query.min_bytes).prefix("Min "));
+                ui.add(egui::DragValue::new(&mut self.query.max_bytes).prefix("Max "));
+                ui.label("Max 0 = unlimited");
+                egui::ComboBox::from_id_salt("access-filter").selected_text(self.query.access.map_or("All access patterns".into(),|a|format!("{a:?}"))).show_ui(ui,|ui| {
+                    ui.selectable_value(&mut self.query.access,None,"All access patterns");
+                    for a in [AccessPattern::Random,AccessPattern::Sequential,AccessPattern::Unknown] {ui.selectable_value(&mut self.query.access,Some(a),format!("{a:?}"));}
+                });
+                let mut cpu=self.query.cpu.is_some();
+                if ui.checkbox(&mut cpu,if self.y_axis==AxisMetric::SchedulerIoWait {"Observer CPU"}else{"Issue CPU"}).changed(){self.query.cpu=cpu.then_some(0);}
+                if let Some(cpu)=&mut self.query.cpu {ui.add(egui::DragValue::new(cpu));}
+                egui::ComboBox::from_id_salt("layer-filter").selected_text(self.query.layer.map_or("All observed layers".into(),|a|format!("{a:?}"))).show_ui(ui,|ui| {
+                    ui.selectable_value(&mut self.query.layer,None,"All observed layers");
+                    for layer in [IoNodeKind::FileOperation,IoNodeKind::Syscall,IoNodeKind::Vfs,IoNodeKind::Filesystem,IoNodeKind::PageCache,IoNodeKind::Writeback,IoNodeKind::Bio,IoNodeKind::BlockQueue,IoNodeKind::BlockRequest,IoNodeKind::ScsiCommand,IoNodeKind::UfsCommand,IoNodeKind::SchedulerContext,IoNodeKind::UicContext] {ui.selectable_value(&mut self.query.layer,Some(layer),format!("{layer:?}"));}
+                });
+            });
+            if self.y_axis==AxisMetric::SchedulerIoWait {
+                ui.small("Process searches waiting-task comm, case-insensitive substring. TID is the payload task; unknown PID never matches a specific PID. CPU is the observer and CPU 0 is valid. Device, operation, size, path, access, layer and block-request selection cannot identify scheduler events; clear those filters to view samples.");
+            } else {
+                ui.small("Process searches the observed block issuer's comm, case-insensitive substring; it is not an Android package or proven original file process. Issue CPU 0 is a valid CPU. Layer requires related graph evidence; absent observations never match. Capture PID filtering is separate.");
+                ui.label("Selection uses the loaded completed-request window; file-operation evidence follows that cohort. Capture diagnostics and Compare baseline remain session-wide. File candidates are preserved together. Sequential/random classification remains from the original device/direction stream.");
+            }
+            });
         });
+        qa_region(&mut self.render_qa,"analysis-filters",header.header_response.rect,ui.clip_rect());
         if previous != self.query {
             self.invalidate_query();
         }
@@ -454,6 +544,7 @@ impl StudioApp {
     }
 
     fn trends_ui(&mut self, ui: &mut egui::Ui) {
+        let origin = self.time_origin();
         if self.analysis().completed_ios().is_empty() {
             return;
         }
@@ -462,16 +553,12 @@ impl StudioApp {
             "I/O activity",
             "Retained completed requests · fixed 1 s bins by completion time · click a time bin to inspect that interval",
         );
-        let origin = self.time_origin();
-        if self
-            .trend_view
-            .as_ref()
-            .is_none_or(|(generation, _)| *generation != self.analysis_generation)
-        {
-            self.trend_view = Some((
-                self.analysis_generation,
-                Arc::new(TrendData::build(self.analysis(), origin)),
-            ));
+        self.refresh_trend_view();
+        if self.trend_view.is_none() {
+            ui.spinner();
+            ui.label("Updating activity and FilePath observations…");
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+            return;
         }
         let data = Arc::clone(&self.trend_view.as_ref().unwrap().1);
         let TrendData {
@@ -683,7 +770,7 @@ mod query_regressions {
                 cpu: 0,
                 comm: format!("worker{id}"),
             }));
-            engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                 ts_ns: id * 1_000_000 + 100_000,
                 request_id: id,
                 device_major: 8,
@@ -804,6 +891,18 @@ mod query_regressions {
     }
 
     #[test]
+    fn size_access_cpu_and_layer_filters_preserve_measurement_meaning() {
+        let engine=engine();
+        let io=&engine.completed_ios()[1];
+        let mut q=AnalysisFilter{min_bytes:4096,max_bytes:4096,cpu:io.issuer_cpu(),access:Some(io.access_pattern),layer:Some(IoNodeKind::BlockRequest),..Default::default()};
+        assert!(q.matches(&engine,io,0));
+        q.max_bytes=4095;assert!(!q.matches(&engine,io,0));q.max_bytes=4096;
+        q.layer=Some(IoNodeKind::UfsCommand);assert!(!q.matches(&engine,io,0));q.layer=None;
+        q.cpu=Some(u32::MAX);assert!(!q.matches(&engine,io,0));q.cpu=io.issuer_cpu();
+        q.access=Some(AccessPattern::Unknown);assert_ne!(io.access_pattern,AccessPattern::Unknown);assert!(!q.matches(&engine,io,0));
+    }
+
+    #[test]
     fn exact_identity_without_path_is_unresolved_and_mixed_candidates_stay_uncertain() {
         let identity = FileIdentity {
             fs_device_major: 8,
@@ -902,6 +1001,7 @@ impl StudioApp {
 }
 
 struct TrendData {
+    live_summary: Option<AnalysisSummary>,
     slowest: Option<CompletedIo>,
     top_issuer: Option<(u32, String, u64, u64)>,
     bins: BTreeMap<u64, [f64; 4]>,
@@ -983,6 +1083,7 @@ impl TrendData {
             .max_by(|a, b| (a.1[2] + a.1[3]).total_cmp(&(b.1[2] + b.1[3])))
             .map(|(&second, &values)| (second, values));
         Self {
+            live_summary: None,
             activity_points,
             busiest_second,
             slowest,
@@ -1108,6 +1209,44 @@ impl StudioApp {
         {
             ui.add_space(14.0);
             capability_panel(ui, report);
+        }
+    }
+}
+
+impl StudioApp {
+    fn refresh_trend_view(&mut self) {
+        let live=self.is_running();
+        if let Some((generation,rx))=&self.trend_pending {
+            match rx.try_recv() {
+                Ok(data) => {
+                    if live || *generation==self.analysis_generation {
+                        self.trend_view=Some((*generation,Arc::new(data)));
+                        self.trend_refreshed=Some(Instant::now());
+                    }
+                    self.trend_pending=None;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected)=>self.trend_pending=None,
+                Err(crossbeam_channel::TryRecvError::Empty)=>{}
+            }
+        }
+        if self.trend_pending.is_some() || self.trend_view.as_ref().is_some_and(|(generation,_)|
+            *generation==self.analysis_generation || (live && self.trend_refreshed.is_some_and(|t|t.elapsed()<LIVE_ANALYSIS_REFRESH))) {return;}
+        let generation=self.analysis_generation;
+        let origin=self.time_origin();
+        if live {
+            // Transaction attribution can take hundreds of milliseconds on dense
+            // root traces. Work on a bounded retained snapshot off the UI thread.
+            let engine=self.analysis().select_completed(|_|true);
+            let (tx,rx)=bounded(1);
+            self.trend_pending=Some((generation,rx));
+            std::thread::spawn(move || {
+                let mut data=TrendData::build(&engine,origin);
+                data.live_summary=Some(engine.retained_summary());
+                let _=tx.send(data);
+            });
+        } else {
+            self.trend_view=Some((generation,Arc::new(TrendData::build(self.analysis(),origin))));
+            self.trend_refreshed=Some(Instant::now());
         }
     }
 }

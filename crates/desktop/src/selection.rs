@@ -217,6 +217,18 @@ impl DirectionSummary {
 
 #[derive(Debug, Default)]
 struct SelectionSummary {
+    companion_distributions:BTreeMap<String,crate::graph_summary::MetricDistribution>,
+    timeline:Option<TimelineView>,
+    window_series:Option<crate::window_series::WindowSeries>,
+    categories:BTreeMap<String,BTreeMap<String,(u64,u64)>>,
+    host_bw:Option<crate::host_bw::HostBandwidth>,
+    source_rows: usize,
+    unplottable_rows: usize,
+    metric_axis: Option<AxisMetric>,
+    metric: crate::graph_summary::MetricDistribution,
+    address_distributions: BTreeMap<(u32,u32), crate::graph_summary::MetricDistribution>,
+    address_counts: Vec<crate::graph_summary::AddressCount>,
+    locality:BTreeMap<(u32,u32),crate::graph_summary::AddressLocality>,
     files: BTreeMap<(String, String, String), SelectedTarget>,
     processes: BTreeMap<IssuerIdentity, SelectedTarget>,
     multiple_candidates: u64,
@@ -235,6 +247,17 @@ struct SelectionSummary {
 impl SelectionSummary {
     fn observe(&mut self, io: &CompletedIo, point: [f64; 2]) {
         self.keys.insert(selection_key(io));
+        for (dimension,label) in [
+            ("Command",format!("{:?}",io.issue.operation)),
+            ("Access pattern",format!("{:?}",io.access_pattern)),
+            ("Size class",format!("{:?}",io.size_class)),
+            ("Chunk size",format!("{} B",io.issue.bytes)),
+            ("Command / access / size",format!("{:?} / {:?} / {:?}",io.issue.operation,io.access_pattern,io.size_class)),
+            ("Device",format!("{}:{}",io.issue.device_major,io.issue.device_minor)),
+            ("Issue CPU",identity_number(io.issuer_cpu())),
+            ("Completion CPU",identity_number(io.completion.cpu)),
+            ("Process",format!("{}:{} / {} · PID {}",io.issue.device_major,io.issue.device_minor,io.issue.comm,identity_number(io.issuer_pid()))),
+        ] {self.observe_category(dimension,label,io);}
         if let Some((start, end)) = io.start_timestamp().zip(io.completion_timestamp()) {
             self.start_ns = Some(self.start_ns.map_or(start, |v| v.min(start)));
             self.end_ns = Some(self.end_ns.map_or(end, |v| v.max(end)));
@@ -272,10 +295,29 @@ impl SelectionSummary {
             .filter(|v| *v > 0)
             .map(|ns| bytes as f64 * 1e9 / ns as f64 / 1_048_576.0)
     }
+    fn observe_category(&mut self,dimension:&str,label:String,io:&CompletedIo) {
+        let row=self.categories.entry(dimension.into()).or_default().entry(label).or_default();
+        row.0+=1;
+        if matches!(io.issue.operation,IoOperation::Read|IoOperation::Write) {row.1+=io.issue.bytes as u64;}
+    }
+}
+
+struct SummaryWork {
+    receiver: Receiver<SelectionSummary>,
+    cancelled: Arc<AtomicBool>,
+}
+impl Drop for SummaryWork {
+    fn drop(&mut self) {self.cancelled.store(true,Ordering::Relaxed);}
+}
+impl SummaryWork {
+    fn try_recv(&self)->Result<SelectionSummary,crossbeam_channel::TryRecvError> {self.receiver.try_recv()}
 }
 
 #[derive(Default)]
 struct SelectionState {
+    all_refresh: Option<Instant>,
+    all_summary: Option<(u64, AxisMetric, AxisMetric, SelectionSummary)>,
+    all_pending: Option<(u64, AxisMetric, AxisMetric, SummaryWork)>,
     requested_at: Option<Instant>,
     wall_ms: Option<f64>,
     inspector_tab: InspectorTab,
@@ -312,7 +354,6 @@ impl SelectionState {
     }
 }
 
-#[cfg(test)]
 fn compute_selection(
     engine: &AnalysisEngine,
     request: SelectionRequest,
@@ -320,23 +361,22 @@ fn compute_selection(
     y: AxisMetric,
     origin: u64,
 ) -> SelectionSummary {
-    compute_selection_cancellable(engine, request, x, y, origin, None)
+    compute_selection_cancellable(engine,request,x,y,origin,None).expect("uncancelled selection")
 }
-
-fn compute_selection_cancellable(
-    engine: &AnalysisEngine,
-    request: SelectionRequest,
-    x: AxisMetric,
-    y: AxisMetric,
-    origin: u64,
-    cancel: Option<&std::sync::atomic::AtomicBool>,
-) -> SelectionSummary {
+fn compute_selection_cancellable(engine:&AnalysisEngine,request:SelectionRequest,x:AxisMetric,y:AxisMetric,origin:u64,cancelled:Option<&AtomicBool>)->Option<SelectionSummary> {
+    if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
     let started = Instant::now();
-    let mut result = SelectionSummary::default();
+    let metric_axis = if y == AxisMetric::TimeMs { x } else { y };
+    let mut result = SelectionSummary {
+        source_rows: engine.completed_ios().len(),
+        metric_axis: Some(metric_axis),
+        ..Default::default()
+    };
+    let x_categories=AxisCategories::build(engine,x);let y_categories=AxisCategories::build(engine,y);
+    let mut addresses = crate::graph_summary::AddressAccumulator::default();
+    let mut locality = crate::graph_summary::LocalityAccumulator::default();
     for io in engine.completed_ios() {
-        if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
-            break;
-        }
+        if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
         if let SelectionRequest::Point(key) = request
             && selection_key(io) != key
         {
@@ -344,12 +384,14 @@ fn compute_selection_cancellable(
         }
         let graph = (x.needs_graph() || y.needs_graph()).then(|| engine.transaction_for(io));
         let (Some(px), Some(py)) = (
-            x.value(io, origin, graph.as_ref()),
-            y.value(io, origin, graph.as_ref()),
+            x_categories.value(x,io, origin, graph.as_ref()),
+            y_categories.value(y,io, origin, graph.as_ref()),
         ) else {
+            result.unplottable_rows += 1;
             continue;
         };
         if !px.is_finite() || !py.is_finite() {
+            result.unplottable_rows += 1;
             continue;
         }
         if let SelectionRequest::Rectangle { min, max } = request
@@ -358,13 +400,33 @@ fn compute_selection_cancellable(
             continue;
         }
         result.observe(io, [px, py]);
+        let mut companion_axes=vec![AxisMetric::ChunkKiB,AxisMetric::IssueQueueDepth];
+        for axis in [x,y] {if axis!=AxisMetric::TimeMs && !matches!(axis,AxisMetric::Category(_)) && !companion_axes.contains(&axis) {companion_axes.push(axis);}}
+        for axis in companion_axes {result.companion_distributions.entry(axis.label().into()).or_default().observe(io.issue.operation,axis.value(io,origin,graph.as_ref()));}
+        for (i,axis) in [x,y].into_iter().enumerate() {if let AxisMetric::Category(c)=axis && (i==0 || x!=y) {result.observe_category(&format!("Axis: {}",c.label()),c.key(io,graph.as_ref()),io);}}
+        if !matches!(metric_axis,AxisMetric::Category(_)) {result.metric.observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));}
+        if matches!(metric_axis, AxisMetric::Sector | AxisMetric::AddressKiB | AxisMetric::AddressMB) {
+            result.address_distributions.entry((io.issue.device_major, io.issue.device_minor)).or_default()
+                .observe(io.issue.operation, metric_axis.value(io, origin, graph.as_ref()));
+            addresses.observe(io);
+            locality.observe(io);
+        }
         let graph = graph.unwrap_or_else(|| engine.transaction_for(io));
         result.observe_targets(io, &block_file_origins(&graph));
+        let layers:std::collections::BTreeSet<_>=graph.nodes.iter().map(|n|format!("{:?}",n.kind)).collect();
+        for layer in layers {result.observe_category("Observed layer membership",layer,io);}
     }
+    if cancelled.is_some_and(|c|c.load(Ordering::Relaxed)) {return None;}
     result.read.latency.sort_unstable();
     result.write.latency.sort_unstable();
+    result.metric.finish();
+    for d in result.companion_distributions.values_mut() {d.finish();}
+    for dist in result.address_distributions.values_mut() { dist.finish(); }
+    result.address_counts = addresses.finish();
+    result.locality=locality.finish();
+    result.categories.insert("File candidate membership".into(),result.files.iter().map(|((path,identity,confidence),r)|(format!("{path} / {identity} [{confidence}]"),(r.count,r.read_bytes.saturating_add(r.write_bytes)))).collect());
     result.elapsed = started.elapsed();
-    result
+    Some(result)
 }
 
 impl StudioApp {
@@ -379,13 +441,15 @@ impl StudioApp {
         self.selection.discard_pending = false;
         self.selection.requested_at = Some(Instant::now());
         let engine = self.analysis().select_completed(|_| true);
+        let bw=self.bandwidth_context(if matches!(self.y_axis,AxisMetric::Window(_)){None}else{Some(request)});
+        let width=self.window_width_ms;
         let (tx, rx) = bounded(1);
         self.selection.pending = Some(rx);
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.selection.cancel = Some(cancel.clone());
         let (x, y, origin) = (self.x_axis, self.y_axis, self.time_origin());
         std::thread::spawn(move || {
-            let _ = tx.send(compute_selection_cancellable(&engine, request, x, y, origin, Some(&cancel)));
+            if let Some(summary) = compute_graph_selection_cancellable(&engine, request, [x, y], origin, bw, width, Some(&cancel)) { let _ = tx.send(summary); }
         });
     }
 
@@ -407,8 +471,18 @@ impl StudioApp {
     }
 
     fn selection_panel(&mut self, ui: &mut egui::Ui) {
+        if self.y_axis == AxisMetric::SchedulerIoWait {
+            // This population has no request-summary consumer. Detach old work
+            // when changing views so neither stale statistics nor pending state survives.
+            self.selection.all_pending=None;self.selection.all_summary=None;
+            self.selection.pending=None;self.selection.summary=None;self.selection.queued=None;
+            self.scheduler_panel(ui); return;
+        }
         self.poll_selection();
+        self.poll_graph_summary();
+        let live=self.is_running();
         let mut target_query = None;
+        let mut export_keys = None;
         let mut panel = egui::Panel::right("selection-summary")
             .default_size(340.0)
             .size_range(260.0..=440.0)
@@ -417,9 +491,9 @@ impl StudioApp {
             panel = panel.exact_size(280.0);
         }
         panel.show(ui, |ui| {
-            ui.heading("Selection summary");
+            ui.heading("Graph summary");
             ui.horizontal_wrapped(|ui| {
-                let zoom_response = ui.add_enabled(self.selection.summary.as_ref().is_some_and(|s|!s.keys.is_empty()),egui::Button::new("Zoom selection"));
+                let zoom_response = ui.add_enabled(self.selection.summary.as_ref().is_some_and(|s|s.bounds.is_some()),egui::Button::new("Zoom selection"));
                 qa_region(&mut self.render_qa,"zoom",zoom_response.rect,ui.clip_rect());
                 self.render_qa.zoom_button = Some(zoom_response.rect.center());
                 if zoom_response.clicked() {
@@ -451,14 +525,28 @@ impl StudioApp {
             if self.render_qa.output.is_some() && let Ok(offset)=std::env::var("ANDROID_EBPF_QA_PANEL_SCROLL") && let Ok(offset)=offset.parse::<f32>() {scroll=scroll.vertical_scroll_offset(offset);}
             let origin=self.time_origin();
             scroll.show(ui, |ui| {
-                let Some(s) = &self.selection.summary else { ui.add_space(8.0); ui.strong("Select I/O to inspect"); ui.label("Click a point or drag an area on the graph."); ui.collapsing("How selection works", |ui| { ui.label("Use Select to inspect or Pan to move the view. Area selection includes all plottable requests in the current filters, even when the plot is sampled. Clear selection cancels the selection without changing filters or zoom."); }); return; };
+                let selected = self.selection.summary.is_some();
+                let Some(s) = self.selection.summary.as_ref().or_else(|| self.selection.all_summary.as_ref().map(|v| &v.3)) else { ui.spinner(); ui.label("Calculating current graph summary…"); return; };
+                ui.small(if selected { "Selected graph region · Clear selection restores full filtered graph" } else { "Full filtered graph · select an area to narrow the summary" });
+                if let Some(series)=&s.window_series {ui.small(format!("{} filtered source I/O · {} {}",s.source_rows,series.samples.len(),series.metric.population()));}
+                else {ui.small(format!("{} filtered source I/O · {} cannot be plotted on these axes",s.source_rows,s.unplottable_rows));}
+                if live && !selected {ui.small("Live snapshot · refreshed in background; incoming I/O may be newer");}
+                if selected && ui.button("Apply selection to analysis filters").clicked() {
+                    let mut query=self.query.clone();
+                    query.request_keys=Some(s.keys.clone());
+                    if let Some(b)=&s.host_bw {
+                        query.start_ms=b.start_ns.saturating_sub(origin) as f64/1e6;
+                        query.end_ms=b.end_ns.saturating_sub(origin) as f64/1e6;
+                    }
+                    target_query=Some(query);
+                }
                 if self.selection.inspector_tab != InspectorTab::Summary {
                     target_query=selected_targets_ui(ui,s,self.selection.inspector_tab,true);
                     return;
                 }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(s.keys.len().to_string()).size(24.0).strong().color(ink()));
-                    ui.label("selected I/O").on_hover_text("Data Count: completed block I/O requests in the selection");
+                    ui.label(if selected {"selected I/O"} else if s.window_series.is_some() {"contributing I/O"}else{"plottable I/O"}).on_hover_text("Full-resolution completed requests in this graph cohort; display sampling never changes this count");
                 });
                 ui.label(format!("End − Start: {}",format_latency(s.duration_ns())));
                 if s.unplaced_time_count == 0 && let Some((start,end))=s.start_ns.zip(s.end_ns) {
@@ -472,11 +560,17 @@ impl StudioApp {
                     if ui.link(format!("{} process / thread entries",s.processes.len())).clicked() {self.selection.inspector_tab=InspectorTab::Processes;}
                 });
                 ui.add_space(6.0);ui.separator();
-                ui.label(RichText::new("Volume & throughput").strong().color(ink()));
+                graph_distribution_ui(ui, s);
+                if ui.button("Export this graph's I/O CSV").clicked() {export_keys=Some(s.keys.clone());}
+                ui.small("One row per graph-cohort request. Empty timing fields mean unavailable; file candidates share one row.");
+                ui.separator();
+                host_bw_ui(ui,s);
+                if s.keys.is_empty() && s.unplottable_rows>0 {ui.small("Choose a measured axis or reanalyze available original events. Transfer and latency statistics for this graph cohort are unavailable.");return;}
+                ui.separator();
+                ui.label(RichText::new("Transfer volume").strong().color(ink()));
                 summary_metric_row(ui,"", "Read".into(), "Write".into(),true);
                 summary_metric_row(ui,"I/O count",s.read.count.to_string(),s.write.count.to_string(),false);
                 summary_metric_row(ui,"Size",format_bytes(s.read.bytes),format_bytes(s.write.bytes),false);
-                summary_metric_row(ui,"MiB/s",s.throughput(s.read.bytes).map_or("—".into(),|v|format!("{v:.3}")),s.throughput(s.write.bytes).map_or("—".into(),|v|format!("{v:.3}")),false);
                 ui.add_space(6.0);ui.separator();
                 ui.label(RichText::new("Total latency").strong().color(ink()));
                 ui.small("Insert (or issue) to completion · valid timing samples only");
@@ -489,7 +583,7 @@ impl StudioApp {
                 ui.collapsing("Definitions & timestamps",|ui| {
                     ui.label(format!("Known-clock subset start: {} ns",s.start_ns.map_or("—".into(),|v|v.to_string())));
                     ui.label(format!("Known-clock subset end: {} ns",s.end_ns.map_or("—".into(),|v|v.to_string())));
-                    ui.label("Span: earliest known insert/issue (completion when start is unknown) to latest completion. Throughput uses this observed span; it may omit unknown pre-completion time. — means unavailable. Percentiles use exact nearest rank over valid timing samples.");
+                    ui.label("Span: earliest known insert/issue (completion when start is unknown) to latest completion. Host BW uses the explicit analysis interval and known-clock eligibility described above. — means unavailable. Percentiles use exact nearest rank over valid timing samples.");
                     ui.label(format!("Selection aggregation: {:.1} ms",s.elapsed.as_secs_f64()*1000.0));
                 });
                 ui.separator();
@@ -505,6 +599,7 @@ impl StudioApp {
                 if let Some(key) = s.keys.iter().next() && s.keys.len()==1 && ui.button("Investigate this I/O").clicked() {self.selected_pipeline_request=Some(*key);self.page=Page::Investigate;}
             });
         });
+        if let Some(keys)=export_keys {self.export_io_cohort_csv(Some(keys));}
         if let Some(query) = target_query {
             self.query = query;
             self.invalidate_query();
@@ -530,6 +625,9 @@ fn summary_metric_row(ui: &mut egui::Ui, label: &str, read: String, write: Strin
 }
 
 fn selection_pie(ui: &mut egui::Ui, values: &[u64], labels: &[&str]) {
+    selection_pie_values(ui,values,labels,|value|value.to_string());
+}
+fn selection_pie_values(ui:&mut egui::Ui,values:&[u64],labels:&[&str],format_value:impl Fn(u64)->String) {
     let total: u64 = values.iter().sum();
     if total == 0 {
         ui.label("No selected requests");
@@ -563,7 +661,7 @@ fn selection_pie(ui: &mut egui::Ui, values: &[u64], labels: &[&str]) {
             for (i, (value, label)) in values.iter().zip(labels).enumerate() {
                 ui.colored_label(
                     colors[i % colors.len()],
-                    format!("{label}: {value} ({:.1}%)", ratio(*value, total)),
+                    format!("{label}: {} ({:.1}%)", format_value(*value),ratio(*value, total)),
                 );
             }
         });
@@ -596,7 +694,7 @@ mod selection_tests {
                 cpu: 0,
                 comm: "selection-fixture".into(),
             }));
-            engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,
                 ts_ns: id * 1_000_000 + 500_000,
                 request_id: id,
                 device_major: 8,
@@ -605,6 +703,94 @@ mod selection_tests {
             }));
         }
         engine
+    }
+
+    #[test]
+    fn exact_chunk_categories_preserve_bytes_zero_non_payload_and_unique_cohort() {
+        let engine=fixture(1);
+        let mut io=engine.completed_ios()[0].clone();
+        let mut summary=SelectionSummary::default();
+        for (index,(bytes,op)) in [(1000,IoOperation::Read),(1001,IoOperation::Read),(1000,IoOperation::Write),(0,IoOperation::Flush),(1_073_741_824,IoOperation::Discard)].into_iter().enumerate() {
+            io.issue.bytes=bytes;io.issue.operation=op;io.issue.request_id=index as u64;
+            summary.observe(&io,[index as f64,bytes as f64/1024.]);
+        }
+        let sizes=&summary.categories["Chunk size"];
+        assert_eq!(sizes.len(),4);
+        assert_eq!(sizes["1000 B"],(2,2000));assert_eq!(sizes["1001 B"],(1,1001));
+        assert_eq!(sizes["0 B"],(1,0));assert_eq!(sizes["1073741824 B"],(1,0));
+        assert_eq!(sizes.values().map(|v|v.0).sum::<u64>(),5);
+        assert_eq!(sizes.values().map(|v|v.1).sum::<u64>(),3001);
+        let path=std::env::temp_dir().join(format!("chunk-categories-{}.csv",uuid::Uuid::new_v4()));
+        write_graph_summary_csv(&path,&summary).unwrap();
+        let records=csv::Reader::from_path(&path).unwrap().records().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(records.iter().any(|r|&r[0]=="category"&&&r[1]=="Chunk size"&&&r[2]=="1001 B"&&r[5]==*"1001"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn graph_summary_follows_chunk_latency_qd_and_lba_instead_of_fixed_latency() {
+        let engine=fixture(10);
+        let all=SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]};
+        for (axis,p50) in [(AxisMetric::ChunkKiB,4.),(AxisMetric::TotalLatencyMs,0.5),(AxisMetric::QueueDepth,0.),(AxisMetric::Sector,40.)] {
+            let summary=compute_selection(&engine,all,AxisMetric::TimeMs,axis,0);
+            assert_eq!(summary.metric_axis,Some(axis));
+            assert_eq!(summary.metric.total.values.len(),10);
+            assert_eq!(summary.metric.total.percentile(50),Some(p50),"{axis:?}");
+            assert_eq!(summary.metric.total.histogram(16).iter().map(|b|b.count).sum::<usize>(),10);
+            assert_eq!(summary.metric.read.values.len(),5);
+            assert_eq!(summary.metric.write.values.len(),5);
+        }
+    }
+
+    #[test]
+    fn graph_summary_selection_filter_and_csv_share_the_same_values() {
+        let engine=fixture(10);
+        let filtered=engine.select_completed(|io|io.issue.operation==IoOperation::Write);
+        let s=compute_selection(&filtered,SelectionRequest::Rectangle{min:[3.,0.],max:[7.,f64::INFINITY]},AxisMetric::TimeMs,AxisMetric::Sector,0);
+        assert_eq!(s.keys.len(),2);
+        assert_eq!(s.metric.total.values,[32.,48.]);
+        assert_eq!(s.metric.read.values.len(),0);
+        assert_eq!(s.address_counts.len(),2);
+        let path=std::env::temp_dir().join(format!("graph-summary-{}.csv",uuid::Uuid::new_v4()));
+        write_graph_summary_csv(&path,&s).unwrap();
+        let mut reader=csv::Reader::from_path(&path).unwrap();
+        let records=reader.records().collect::<Result<Vec<_>,_>>().unwrap();
+        assert!(records.iter().any(|r| &r[0]=="percentile" && &r[2]=="8:0/Write" && &r[3]=="50" && &r[5]=="32"));
+        assert_eq!(records.iter().filter(|r| &r[0]=="histogram" && &r[2]=="8:0/Total").map(|r|r[5].parse::<usize>().unwrap()).sum::<usize>(),2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn summary_cancellation_invalidating_a_filter_signals_the_running_worker() {
+        let mut app=StudioApp {analyzer:fixture(4),..Default::default()};
+        app.poll_graph_summary();
+        let cancelled=Arc::clone(&app.selection.all_pending.as_ref().unwrap().3.cancelled);
+        app.query.pid=999;
+        app.invalidate_query();
+        assert!(cancelled.load(Ordering::Relaxed),"discarded receiver must stop obsolete aggregation, not just hide its result");
+    }
+    #[test]
+    fn summary_cancellation_never_publishes_a_partial_or_empty_result() {
+        let cancelled=AtomicBool::new(true);
+        let result=compute_selection_cancellable(&fixture(4),SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]},AxisMetric::TimeMs,AxisMetric::ChunkKiB,0,Some(&cancelled));
+        assert!(result.is_none(),"cancelled work must not produce an apparent completed summary");
+    }
+    #[test]
+    fn graph_summary_invalidates_on_filter_reset_and_axis_change() {
+        let mut app=StudioApp {analyzer:fixture(4),..Default::default()};
+        let all=SelectionRequest::Rectangle{min:[f64::NEG_INFINITY;2],max:[f64::INFINITY;2]};
+        let s=compute_selection(&app.analyzer,all,app.x_axis,app.y_axis,0);
+        app.selection.all_summary=Some((app.analysis_generation,app.x_axis,app.y_axis,s));
+        app.query.process="no-such-process".into();
+        app.invalidate_query();app.rebuild_filtered();
+        assert!(app.selection.all_summary.is_none());
+        assert!(app.analysis().completed_ios().is_empty());
+        app.query=AnalysisFilter::default();app.invalidate_query();app.rebuild_filtered();
+        assert_eq!(app.analysis().completed_ios().len(),4);
+        app.y_axis=AxisMetric::ChunkKiB;
+        app.poll_graph_summary();
+        assert!(app.selection.all_summary.is_none());
+        assert!(app.selection.all_pending.is_some());
     }
 
     #[test]
@@ -773,7 +959,7 @@ mod clear_selection_regression {
         }
         let cancel = std::sync::atomic::AtomicBool::new(true);
         let summary = compute_selection_cancellable(&engine, SelectionRequest::Rectangle {min: [0.0, 0.0], max: [f64::MAX, f64::MAX]}, AxisMetric::TimeMs, AxisMetric::AddressMB, 0, Some(&cancel));
-        assert!(summary.keys.is_empty());
-        assert!(summary.files.is_empty());
+        assert!(summary.is_none());
+
     }
 }

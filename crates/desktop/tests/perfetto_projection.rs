@@ -20,6 +20,7 @@ fn event(id: u64, kind: BlockKind, timestamp_ns: u64, sector: u64) -> BlockEvent
 }
 fn fixture() -> DecodedTrace {
     DecodedTrace {
+        scheduler_waits: Vec::new(),
         events: vec![
             event(1, BlockKind::Issue, 100, 32),
             event(2, BlockKind::Complete, 200, 32),
@@ -189,6 +190,94 @@ fn unsupported_clock_replay_excludes_only_time_selection_and_csv_keeps_raw_evide
     }
 }
 #[test]
+fn completion_cpu_is_independent_of_issue_correlation_and_never_falls_back_to_issue_cpu() {
+    let mut trace = fixture();
+    let projected = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    assert_eq!(projected[0].issuer_cpu(), Some(2));
+    assert_eq!(projected[0].completion.cpu, Some(7));
+    assert_eq!(projected[1].issuer_cpu(), None);
+    assert_eq!(projected[1].completion.cpu, Some(7));
+    trace.events[1].cpu = None;
+    let missing = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    assert_eq!(missing[0].completion.cpu, None);
+    trace.events[1].cpu = Some(0);
+    let zero = Projection::new(&trace).events(&analyze(&trace)).unwrap();
+    assert_eq!(zero[0].completion.cpu, Some(0));
+}
+#[test]
+fn projected_issue_depth_uses_intervals_and_gaps_use_raw_device_event_order() {
+    let mut trace = fixture();
+    trace.events = vec![
+        event(1, BlockKind::Issue, 10, 0),
+        event(2, BlockKind::Issue, 20, 16),
+        event(3, BlockKind::Complete, 30, 16),
+        event(4, BlockKind::Complete, 40, 0),
+        event(5, BlockKind::Issue, 40, 32),
+        event(6, BlockKind::Complete, 50, 32),
+    ];
+    let a = analyze(&trace);
+    let p = Projection::new(&trace)
+        .with_analysis(&a)
+        .events(&a)
+        .unwrap();
+    assert_eq!(
+        p.iter()
+            .map(|io| io.detail_timing.issue_depth)
+            .collect::<Vec<_>>(),
+        [Some(2), Some(1), Some(1)]
+    );
+    assert_eq!(p[0].detail_timing.issue_gap_ns, Some(10));
+    assert_eq!(p[0].detail_timing.completion_gap_ns, None);
+    assert_eq!(p[2].detail_timing.completion_gap_ns, Some(10));
+    assert_eq!(p[1].detail_timing.issue_gap_ns, None);
+}
+
+#[test]
+fn rolling_projection_keeps_raw_completion_volume_and_does_not_mix_device_histories() {
+    let mut trace = fixture();
+    trace.events.clear();
+    for i in 0..66u64 {
+        for minor in [0, 1] {
+            for (offset, kind) in [(0, BlockKind::Issue), (100, BlockKind::Complete)] {
+                let mut e = event(
+                    i * 4 + minor * 2 + u64::from(offset > 0) + 1,
+                    kind,
+                    i * 1_000_000 + offset,
+                    i * 8,
+                );
+                e.device_encoded += minor;
+                e.bytes = if minor == 0 { 1024 } else { 2048 };
+                e.sectors = (e.bytes / 512) as u32;
+                trace.events.push(e);
+            }
+        }
+    }
+    let analysis = analyze(&trace);
+    let rows = Projection::new(&trace)
+        .with_analysis(&analysis)
+        .events(&analysis)
+        .unwrap();
+    for row in rows {
+        if row.issue.sector < 64 * 8 {
+            assert!(row.detail_timing.completion_bandwidth.is_none());
+        } else {
+            let expected = if row.issue.device_minor == 0 {
+                0.9765625
+            } else {
+                1.953125
+            };
+            assert_eq!(
+                row.detail_timing.issue_bandwidth.unwrap().mib_s(),
+                Some(expected)
+            );
+            assert_eq!(
+                row.detail_timing.completion_bandwidth.unwrap().mib_s(),
+                Some(expected)
+            );
+        }
+    }
+}
+#[test]
 fn projected_completions_preserve_unknown_identity_timing_and_all_volume() {
     let trace = fixture();
     let projected = Projection::new(&trace).events(&analyze(&trace)).unwrap();
@@ -323,5 +412,74 @@ fn session_window_and_csv_keep_unmeasured_completion_and_source_evidence() {
     let raw = std::fs::read_to_string(&csv).unwrap();
     assert!(raw.contains("observed_block_completion"));
     // Every path is created exclusively by this test under its unique directory.
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn scheduler_projection_roundtrip_window_and_csv_do_not_inflate_block_statistics() {
+    let dir = std::env::temp_dir().join(format!("scheduler-projection-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("capture.ndjson");
+    let mut trace = fixture();
+    trace.scheduler_waits = [150, 250, 350]
+        .into_iter()
+        .map(|ts_ns| SchedulerIoWait {
+            ts_ns,
+            delay_ns: ts_ns * 1000,
+            tid: 42,
+            pid: None,
+            comm: "waiting-task".into(),
+            cpu: Some(0),
+            source: "Perfetto sched_stat_iowait".into(),
+        })
+        .collect();
+    let mut file = std::fs::File::create(&path).unwrap();
+    let mut sequences = Vec::new();
+    android_ebpf_studio::perfetto_session::project_records(&trace, "fixture.pftrace", |r| {
+        if let WireRecord::Event { sequence, .. } = &r {
+            sequences.push(*sequence);
+        }
+        if let WireRecord::Footer {
+            events_persisted, ..
+        } = &r
+        {
+            assert_eq!(*events_persisted, 5);
+        }
+        write_record(&mut file, &r)?;
+        Ok(())
+    })
+    .unwrap();
+    drop(file);
+    assert_eq!(sequences, [1, 2, 3, 4, 5]);
+    let full = session::load_analysis(&path).unwrap();
+    assert_eq!(full.engine.scheduler_waits(), &trace.scheduler_waits);
+    assert_eq!(full.engine.summary().completed_ios, 2);
+    assert_eq!(full.engine.summary().read_bytes, 8192);
+    assert_eq!(full.engine.summary().p50_latency_ns, Some(100));
+    let window = session::load_analysis_window(&path, Some((250, 350)), None).unwrap();
+    assert_eq!(window.engine.scheduler_waits(), &trace.scheduler_waits[1..]);
+    assert_eq!(window.engine.summary().completed_ios, 1);
+    let empty_blocks = full.engine.select_completed(|_| false);
+    assert_eq!(empty_blocks.scheduler_waits(), &trace.scheduler_waits);
+    assert_eq!(empty_blocks.summary().completed_ios, 0);
+    let csv = dir.join("events.csv");
+    session::export_csv(&path, &csv).unwrap();
+    let records = csv::Reader::from_path(csv)
+        .unwrap()
+        .records()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let waits: Vec<_> = records
+        .iter()
+        .filter(|r| &r[0] == "scheduler_iowait")
+        .collect();
+    assert_eq!(waits.len(), 3);
+    assert!(
+        waits
+            .iter()
+            .all(|r| r[8].is_empty() && &r[9] == "42" && r[3].is_empty() && r[6].is_empty())
+    );
+    let decoded: SchedulerIoWait = serde_json::from_str(&waits[0][17]).unwrap();
+    assert_eq!(decoded, trace.scheduler_waits[0]);
     std::fs::remove_dir_all(dir).unwrap();
 }

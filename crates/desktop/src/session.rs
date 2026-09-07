@@ -8,8 +8,8 @@ use std::{
 
 use android_ebpf_protocol::{
     AggregateSnapshot, AnalysisEngine, AnalysisSummary, FilePathCoverage, FilePathCoverageEngine,
-    HeavyHitterSnapshot, ProbeCapabilities, SegmentRecord, SessionError, SessionReader,
-    StackFingerprintRecord, StorageEvent, TriggerRecord, WireRecord, write_record,
+    HeavyHitterSnapshot, IoOperation, ProbeCapabilities, SegmentRecord, SessionError,
+    SessionReader, StackFingerprintRecord, StorageEvent, TriggerRecord, WireRecord, write_record,
 };
 
 pub struct SessionWriter {
@@ -144,6 +144,7 @@ impl SessionWriter {
 
 #[derive(Debug)]
 pub struct LoadedAnalysis {
+    pub activity: std::sync::Arc<crate::host_bw::ActivityTimeline>,
     pub file_path_coverage: FilePathCoverage,
     pub source_start_ns: Option<u64>,
     pub source_end_ns: Option<u64>,
@@ -199,17 +200,24 @@ pub fn load_analysis_window(
     }
     let mut coverage = FilePathCoverageEngine::default();
     let mut engine = AnalysisEngine::new();
+    let mut activity = crate::host_bw::ActivityTimeline::default();
     if let Some((start, end)) = window {
         engine.set_completion_window(start, end);
     }
     let (mut source_start_ns, mut source_end_ns, mut source_completed_ios) = (u64::MAX, 0, 0);
     let mut selected_count = 0usize;
+    let mut selected_scheduler_count = 0usize;
     let loaded=SessionReader::default().read_events(BufReader::new(File::open(path)?),|event| {
         check_cancel()?;
         coverage.ingest(&event);
-        if let Some((start,end))=event_interval(&event) {source_start_ns=source_start_ns.min(start);source_end_ns=source_end_ns.max(end);}
-        if (window.is_none() || matches!(&event,StorageEvent::BlockInsert(_)|StorageEvent::BlockIssue(_)|StorageEvent::BlockComplete(_)|StorageEvent::ObservedBlockCompletion(_))) && let Some(io)=engine.ingest(event) {
+        if let StorageEvent::SchedulerIoWait(wait)=&event && window.is_some_and(|(start,end)|wait.ts_ns>=start&&wait.ts_ns<=end) {
+            selected_scheduler_count+=1;
+            if selected_scheduler_count>100_000 {return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"This interval contains more than 100,000 scheduler wait events. Narrow the time range; previous analysis preserved.").into());}
+        }
+        if let Some((start,end))=event_interval(&event) {source_start_ns=source_start_ns.min(start);source_end_ns=source_end_ns.max(end);activity.observe_range(start,end);}
+        if (window.is_none() || matches!(&event,StorageEvent::BlockInsert(_)|StorageEvent::BlockIssue(_)|StorageEvent::BlockComplete(_)|StorageEvent::ObservedBlockCompletion(_)|StorageEvent::SchedulerIoWait(_))) && let Some(io)=engine.ingest(event) {
                 source_completed_ios+=1;
+                activity.observe(&io);
                 if window.is_some_and(|(start,end)|io.completion_timestamp().is_some_and(|ts| ts>=start&&ts<=end)) {
                     selected_count+=1;
                     if selected_count>100_000 {return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,"This interval contains more than 100,000 I/O. Narrow the time range; previous analysis preserved.").into());}
@@ -316,7 +324,11 @@ pub fn load_analysis_window(
     );
     let loss_status = loaded
         .source_info
-        .last()
+        .iter()
+        .rev()
+        .find(
+            |r| !matches!(r, WireRecord::SourceInfo { source, .. } if source == "scheduler_iowait"),
+        )
         .and_then(|r| {
             if let WireRecord::SourceInfo {
                 source,
@@ -333,7 +345,17 @@ pub fn load_analysis_window(
             }
         })
         .unwrap_or(loss_status);
+    for record in &loaded.source_info {
+        activity.observe_record(record);
+    }
+    if let Some(footer) = &loaded.footer {
+        activity.observe_record(footer);
+    }
+    if loaded.integrity_ok != Some(true) || loaded.rejected_lines > 0 {
+        activity.limitation = Some("Incomplete or rejected saved event stream".into());
+    }
     Ok(LoadedAnalysis {
+        activity: std::sync::Arc::new(activity),
         file_path_coverage,
         source_info: loaded.source_info,
         source_start_ns: (source_start_ns != u64::MAX).then_some(source_start_ns),
@@ -357,8 +379,9 @@ pub fn load_analysis_window(
     })
 }
 
-fn event_interval(event: &StorageEvent) -> Option<(u64, u64)> {
+pub(crate) fn event_interval(event: &StorageEvent) -> Option<(u64, u64)> {
     Some(match event {
+        StorageEvent::SchedulerIoWait(v) => (v.ts_ns, v.ts_ns),
         StorageEvent::ObservedBlockCompletion(io) => {
             io.start_timestamp().zip(io.completion_timestamp())?
         }
@@ -478,6 +501,74 @@ pub(crate) fn ensure_distinct_export(source: &Path, destination: &Path) -> anyho
             "Choose a different export filename; the original session must be preserved"
         );
     }
+    Ok(())
+}
+
+/// One row per retained request in an already filtered snapshot. File candidates
+/// stay together on that row, so multi-origin membership never duplicates bytes.
+pub fn export_completed_io_csv(path: &Path, engine: &AnalysisEngine) -> anyhow::Result<()> {
+    let mut writer = csv::Writer::from_path(path)?;
+    writer.write_record([
+        "request_id",
+        "device",
+        "issue_ns",
+        "completion_ns",
+        "sector_512b",
+        "end_sector_exclusive",
+        "extent_bytes",
+        "rw_payload_bytes",
+        "operation",
+        "issuer_pid",
+        "issuer_tid",
+        "issuer_comm",
+        "queue_latency_ns",
+        "device_latency_ns",
+        "total_latency_ns",
+        "access_pattern",
+        "issue_depth_observed",
+        "d2d_ns",
+        "c2c_ns",
+        "file_candidates_json",
+        "completed_io_json",
+        "rolling_c2c_payload_bytes",
+        "rolling_c2c_duration_ns",
+        "rolling_c2c_mib_s",
+        "rolling_d2d_payload_bytes",
+        "rolling_d2d_duration_ns",
+        "rolling_d2d_mib_s",
+        "issue_cpu",
+        "completion_cpu",
+    ])?;
+    for io in engine.completed_ios() {
+        let graph = engine.transaction_for(io);
+        let origins = graph.file_origins_for(android_ebpf_protocol::block_request_node_id(
+            io.issue.request_id,
+        ));
+        let payload = if matches!(io.issue.operation, IoOperation::Read | IoOperation::Write) {
+            io.issue.bytes
+        } else {
+            0
+        };
+        writer.write_record([
+            io.issue.request_id.to_string(), format!("{}:{}",io.issue.device_major,io.issue.device_minor),
+            io.issue_timestamp().map(|v|v.to_string()).unwrap_or_default(), io.completion_timestamp().map(|v|v.to_string()).unwrap_or_default(),
+            io.issue.sector.to_string(), io.issue.sector.saturating_add(io.issue.sectors as u64).to_string(),
+            io.issue.bytes.to_string(), payload.to_string(), format!("{:?}",io.issue.operation),
+            io.issuer_pid().map(|v|v.to_string()).unwrap_or_default(), io.issuer_tid().map(|v|v.to_string()).unwrap_or_default(), io.issue.comm.clone(),
+            io.queue_latency_ns.map(|v|v.to_string()).unwrap_or_default(), io.device_latency_ns.map(|v|v.to_string()).unwrap_or_default(), io.total_latency_ns.map(|v|v.to_string()).unwrap_or_default(), format!("{:?}",io.access_pattern),
+            io.detail_timing.issue_depth.map(|v|v.to_string()).unwrap_or_default(), io.detail_timing.issue_gap_ns.map(|v|v.to_string()).unwrap_or_default(), io.detail_timing.completion_gap_ns.map(|v|v.to_string()).unwrap_or_default(),
+            serde_json::to_string(&origins.iter().map(|v|serde_json::json!({"file":v.file,"path":v.path,"edge_confidence":v.confidence})).collect::<Vec<_>>())?, serde_json::to_string(io)?,
+            io.detail_timing.completion_bandwidth.as_ref().map(|r|r.payload_bytes.to_string()).unwrap_or_default(),
+            io.detail_timing.completion_bandwidth.as_ref().map(|r|r.duration_ns.to_string()).unwrap_or_default(),
+            io.detail_timing.completion_bandwidth.as_ref().and_then(|r|r.mib_s()).map(|v|v.to_string()).unwrap_or_default(),
+            io.detail_timing.issue_bandwidth.as_ref().map(|r|r.payload_bytes.to_string()).unwrap_or_default(),
+            io.detail_timing.issue_bandwidth.as_ref().map(|r|r.duration_ns.to_string()).unwrap_or_default(),
+            io.detail_timing.issue_bandwidth.as_ref().and_then(|r|r.mib_s()).map(|v|v.to_string()).unwrap_or_default(),
+            io.issuer_cpu().map(|v|v.to_string()).unwrap_or_default(),
+            io.completion.cpu.map(|v|v.to_string()).unwrap_or_default(),
+        ])?;
+    }
+    writer.flush()?;
     Ok(())
 }
 
@@ -617,6 +708,16 @@ fn write_summary(
 
 fn write_event_csv(writer: &mut csv::Writer<File>, event: &StorageEvent) -> anyhow::Result<()> {
     match event {
+        StorageEvent::SchedulerIoWait(wait) => {
+            let mut row: [String; 18] = std::array::from_fn(|_| String::new());
+            row[0] = "scheduler_iowait".into();
+            row[1] = wait.ts_ns.to_string();
+            row[8] = wait.pid.map(|pid| pid.to_string()).unwrap_or_default();
+            row[9] = wait.tid.to_string();
+            row[10] = wait.comm.clone();
+            row[17] = serde_json::to_string(wait)?;
+            writer.write_record(row)?;
+        }
         StorageEvent::ObservedBlockCompletion(io) => writer.write_record([
             "observed_block_completion".into(),
             io.completion_timestamp()

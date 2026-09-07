@@ -9,6 +9,9 @@ pub const KIND_PIPELINE: u8 = 5;
 pub const KIND_REQUEST_ORIGIN: u8 = 6;
 pub const KIND_FILE_EXTENT: u8 = 7;
 pub const KIND_BIO_REMAP: u8 = 8;
+/// Independent task delay; KernelEvent.requested_bytes carries delay_ns for
+/// this kind only. No block request identity, payload or issuer TGID is implied.
+pub const KIND_SCHEDULER_IO_WAIT: u8 = 9;
 pub const ORIGIN_KIND_MASK: u32 = 0xff;
 pub const ORIGIN_FILE: u32 = 1;
 pub const ORIGIN_FILESYSTEM_METADATA: u32 = 2;
@@ -61,6 +64,28 @@ pub struct RawSyscallLayout {
     pub enter_args_offset: u16,
     pub exit_ret_offset: u16,
     pub reserved: u16,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SchedulerWaitLayout {
+    pub pid_offset: u16,
+    pub delay_offset: u16,
+    pub comm_offset: u16,
+    pub reserved: u16,
+}
+
+/// The tracepoint exposes the waiting TID, not its TGID, UID, device or payload.
+/// Reject filters that require those absent fields instead of matching the
+/// current/observer task. TID membership is checked separately by the probe.
+pub fn scheduler_filter_supported(config: &RawFilterConfig) -> bool {
+    config.mode >= MODE_BALANCED
+        && config.pid_count == 0
+        && config.uid_count == 0
+        && config.device_count == 0
+        && config.operation_count == 0
+        && config.min_bytes == 0
+        && config.max_bytes == 0
 }
 
 /// Byte offsets resolved from the target kernel's BTF at runtime. Keeping

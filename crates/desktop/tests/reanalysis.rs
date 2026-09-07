@@ -78,6 +78,7 @@ fn reused_request_pointer_cannot_inherit_an_old_exact_file() {
             comm: "reuse".into(),
         }));
         engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
             ts_ns: ts + 100,
             request_id: 1,
             device_major: 259,
@@ -159,6 +160,7 @@ impl Fixture {
                 comm: "known-reader".into(),
             }));
             emit(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
                 ts_ns: ts + 100,
                 request_id: i,
                 device_major: 259,
@@ -220,6 +222,11 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
     let fixture = Fixture::new(100_020);
     let full = load_analysis(&fixture.0).unwrap();
     assert_eq!(full.source_completed_ios, 100_020);
+    assert_eq!(full.activity.observed_requests, 100_020);
+    assert_eq!(
+        full.activity.devices[&(259, 0)].duration(0, u64::MAX),
+        100_020 * 100
+    );
     assert!(
         !full
             .engine
@@ -232,6 +239,18 @@ fn old_window_recovers_evicted_io_and_delayed_exact_file_without_reclassifying()
         load_analysis_window(&fixture.0, Some((1_010_000_100, 1_020_000_100)), None).unwrap();
     assert_eq!(view.source_start_ns, Some(1_000_000_000));
     assert_eq!(view.engine.completed_ios().len(), 2);
+    assert_eq!(
+        view.activity.observed_requests, 100_020,
+        "window eviction cannot erase other device activity"
+    );
+    assert_eq!(
+        view.activity.devices[&(259, 0)].duration(1_005_000_000, 1_025_000_000),
+        200
+    );
+    assert!(
+        !view.activity.exact(),
+        "zero recorded loss does not prove exhaustive acquisition"
+    );
     let io = &view.engine.completed_ios()[0];
     assert_eq!(io.issue.request_id, 1);
     assert_eq!(io.access_pattern, AccessPattern::Sequential);
@@ -329,6 +348,72 @@ fn view_export_contains_only_selected_io_and_preserves_path_provenance() {
         "/data/old-window.bin"
     );
     assert_eq!(rows[1]["file_candidates"][0]["edge_confidence"], "exact");
+    std::fs::remove_file(output).unwrap();
+}
+
+#[test]
+fn cohort_csv_keeps_one_row_per_request_with_all_file_candidates_and_missing_fields() {
+    let fixture = Fixture::new(3);
+    let mut loaded =
+        load_analysis_window(&fixture.0, Some((1_010_000_099, 1_010_000_101)), None).unwrap();
+    loaded
+        .engine
+        .ingest(StorageEvent::RequestOrigin(RequestOrigin {
+            ts_ns: 1_010_000_000,
+            request_id: 1,
+            origin_id: 501,
+            file: FileIdentity {
+                fs_device_major: 259,
+                fs_device_minor: 0,
+                inode: 124,
+                inode_generation: None,
+                mount_id: None,
+            },
+            path: Some(PathSnapshot {
+                path: Some("/data/한글,\"candidate\".bin".into()),
+                source: PathSource::ProcFd,
+                captured_ts_ns: 1_010_000_000,
+                deleted: false,
+            }),
+            origin: IoOrigin::File,
+            operation: IoOperation::Read,
+            bytes: Some(4096),
+            pid: 21,
+            tid: 22,
+            file_origin_confidence: EdgeConfidence::Exact,
+            request_lifetime_confidence: EdgeConfidence::Probable,
+            incomplete: false,
+        }));
+    let output = fixture.0.with_extension("cohort.csv");
+    android_ebpf_studio::session::export_completed_io_csv(&output, &loaded.engine).unwrap();
+    let rows: Vec<std::collections::BTreeMap<String, String>> = csv::Reader::from_path(&output)
+        .unwrap()
+        .deserialize()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(r["request_id"], "1");
+    assert_eq!(r["rw_payload_bytes"], "4096");
+    assert_eq!(r["queue_latency_ns"], "");
+    assert_eq!(r["sector_512b"], "8");
+    assert_eq!(r["end_sector_exclusive"], "16");
+    let origins: Vec<serde_json::Value> = serde_json::from_str(&r["file_candidates_json"]).unwrap();
+    assert_eq!(origins.len(), 2);
+    assert!(
+        origins
+            .iter()
+            .any(|o| o["path"]["path"] == "/data/한글,\"candidate\".bin"
+                && o["edge_confidence"] == "probable")
+    );
+    let exact: CompletedIo = serde_json::from_str(&r["completed_io_json"]).unwrap();
+    assert_eq!(exact.issue, loaded.engine.completed_ios()[0].issue);
+    let empty = loaded.engine.select_completed(|_| false);
+    android_ebpf_studio::session::export_completed_io_csv(&output, &empty).unwrap();
+    assert_eq!(
+        csv::Reader::from_path(&output).unwrap().records().count(),
+        0
+    );
     std::fs::remove_file(output).unwrap();
 }
 

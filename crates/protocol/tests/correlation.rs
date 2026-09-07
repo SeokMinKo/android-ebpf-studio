@@ -24,6 +24,7 @@ fn completion_computes_latency_and_removes_pending_request() {
 
     let completed = correlator
         .on_complete(BlockComplete {
+            cpu: None,
             ts_ns: 3_500_000,
             request_id: 0xabc,
             device_major: 8,
@@ -43,6 +44,7 @@ fn mismatched_device_does_not_create_false_latency() {
     correlator.on_issue(issue(1_000));
 
     let result = correlator.on_complete(BlockComplete {
+        cpu: None,
         ts_ns: 2_000,
         request_id: 0xabc,
         device_major: 8,
@@ -61,6 +63,7 @@ fn duplicate_pending_key_is_rejected_instead_of_false_matched() {
     correlator.on_issue(issue(1_100));
 
     let result = correlator.on_complete(BlockComplete {
+        cpu: None,
         ts_ns: 2_000,
         request_id: 0xabc,
         device_major: 8,
@@ -70,4 +73,148 @@ fn duplicate_pending_key_is_rejected_instead_of_false_matched() {
 
     assert!(result.is_none());
     assert_eq!(correlator.replaced_count(), 1);
+}
+
+#[test]
+fn issue_depth_and_event_gaps_are_device_scoped_and_survive_filtering() {
+    let mut engine = android_ebpf_protocol::AnalysisEngine::new();
+    use android_ebpf_protocol::StorageEvent;
+    for (id, device, ts) in [(1, 0, 10), (2, 0, 20), (3, 1, 25)] {
+        let mut row = issue(ts);
+        row.request_id = id;
+        row.device_minor = device;
+        row.pid = id as u32;
+        engine.ingest(StorageEvent::BlockIssue(row));
+    }
+    for (id, device, ts) in [(2, 0, 30), (1, 0, 40), (3, 1, 50)] {
+        engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+            cpu: None,
+            request_id: id,
+            device_major: 8,
+            device_minor: device,
+            ts_ns: ts,
+            status: 0,
+        }));
+    }
+    let rows = engine.completed_ios();
+    assert_eq!(rows[0].detail_timing.issue_depth, Some(2));
+    assert_eq!(rows[1].detail_timing.issue_depth, Some(1));
+    assert_eq!(rows[2].detail_timing.issue_depth, Some(1));
+    assert_eq!(rows[0].detail_timing.issue_gap_ns, Some(10));
+    assert_eq!(rows[1].detail_timing.completion_gap_ns, Some(10));
+    assert_eq!(rows[2].detail_timing.completion_gap_ns, None);
+    let filtered = engine.select_completed(|io| io.issue.pid == 2);
+    assert_eq!(
+        filtered.completed_ios()[0].detail_timing.issue_depth,
+        Some(2)
+    );
+    let mut legacy = serde_json::to_value(&rows[0]).unwrap();
+    legacy.as_object_mut().unwrap().remove("detail_timing");
+    let legacy: android_ebpf_protocol::CompletedIo = serde_json::from_value(legacy).unwrap();
+    assert_eq!(
+        legacy.detail_timing.issue_depth, None,
+        "old sessions must not invent issue QD"
+    );
+}
+
+#[test]
+fn expired_and_duplicate_requests_do_not_leak_into_later_device_depth() {
+    let mut c = RequestCorrelator::new(100);
+    c.on_issue(issue(0));
+    c.on_issue(issue(1)); // ambiguous ID removes its pending depth
+    let mut next = issue(2);
+    next.request_id = 2;
+    c.on_issue(next);
+    let io = c
+        .on_complete(BlockComplete {
+            cpu: None,
+            ts_ns: 3,
+            request_id: 2,
+            device_major: 8,
+            device_minor: 0,
+            status: 0,
+        })
+        .unwrap();
+    assert_eq!(io.detail_timing.issue_depth, Some(1));
+    c.on_issue(issue(200));
+    let mut next = issue(301);
+    next.request_id = 3;
+    c.on_issue(next); // TTL removes old pending
+    let io = c
+        .on_complete(BlockComplete {
+            cpu: None,
+            ts_ns: 302,
+            request_id: 3,
+            device_major: 8,
+            device_minor: 0,
+            status: 0,
+        })
+        .unwrap();
+    assert_eq!(io.detail_timing.issue_depth, Some(1));
+}
+
+#[test]
+fn rolling_rates_use_original_device_event_windows_and_survive_filtering_and_old_sessions() {
+    use android_ebpf_protocol::{AnalysisEngine, CompletedIo, StorageEvent};
+    let mut engine = AnalysisEngine::new();
+    for i in 0..66u64 {
+        for minor in [0, 1] {
+            let mut row = issue(i * 1_000_000);
+            row.request_id = i;
+            row.device_minor = minor;
+            row.bytes = if minor == 0 { 1024 } else { 2048 };
+            row.pid = if i % 2 == 0 { 42 } else { 43 };
+            engine.ingest(StorageEvent::BlockIssue(row));
+            engine.ingest(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None,
+                ts_ns: i * 1_000_000 + 100,
+                request_id: i,
+                device_major: 8,
+                device_minor: minor,
+                status: 0,
+            }));
+        }
+    }
+    let rows = engine.completed_ios();
+    assert!(
+        rows.iter()
+            .take(128)
+            .all(|r| r.detail_timing.issue_bandwidth.is_none()
+                && r.detail_timing.completion_bandwidth.is_none())
+    );
+    for row in rows.iter().skip(128) {
+        let expected = if row.issue.device_minor == 0 {
+            0.9765625
+        } else {
+            1.953125
+        };
+        assert_eq!(
+            row.detail_timing.issue_bandwidth.as_ref().unwrap().mib_s(),
+            Some(expected)
+        );
+        assert_eq!(
+            row.detail_timing
+                .completion_bandwidth
+                .as_ref()
+                .unwrap()
+                .mib_s(),
+            Some(expected)
+        );
+    }
+    let filtered = engine.select_completed(|io| io.issue.pid == 42 && io.issue.request_id == 64);
+    assert_eq!(
+        filtered.completed_ios()[0]
+            .detail_timing
+            .completion_bandwidth,
+        rows[128].detail_timing.completion_bandwidth
+    );
+    let mut json = serde_json::to_value(&rows[128]).unwrap();
+    let timing = json["detail_timing"].as_object_mut().unwrap();
+    timing.remove("issue_bandwidth");
+    timing.remove("completion_bandwidth");
+    let legacy: CompletedIo = serde_json::from_value(json).unwrap();
+    assert!(
+        legacy.detail_timing.issue_bandwidth.is_none()
+            && legacy.detail_timing.completion_bandwidth.is_none()
+    );
 }

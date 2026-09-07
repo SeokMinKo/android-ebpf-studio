@@ -18,6 +18,7 @@ fn issue(id: u64, ts_ns: u64) -> StorageEvent {
 }
 fn complete(id: u64, ts_ns: u64) -> StorageEvent {
     StorageEvent::BlockComplete(BlockComplete {
+        cpu: None,
         ts_ns,
         request_id: id,
         device_major: 8,
