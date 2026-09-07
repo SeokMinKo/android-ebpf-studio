@@ -1,0 +1,1531 @@
+{
+  "date": "2026-09-07",
+  "scope": "selected items2/3/4 and main merge; HW Queue and installation remain outside completed scope",
+  "integrated_main": "dbb002fcf68999305482a057b9ed867136a1848e",
+  "feature_integration_merge": "efad262576ac1b5b7d44a4b20761c4b3220057cd",
+  "host_tests": {
+    "passed": 227,
+    "failed": 0,
+    "ignored": 11,
+    "desktop_library_passed": 110,
+    "independent_engine_combinations": 336,
+    "unsupported_clock_presets": 28
+  },
+  "native_matrix": [
+    {
+      "case": "matrix-overall",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-custom",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Process"
+    },
+    {
+      "case": "matrix-custom_pie",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-timeline",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-timeline_core",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-footprint",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-process_footprint",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-all_time_footprint",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-spatial_locality",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-temporal_locality",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-overwrite",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-gantt",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-cmd_data_size",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-sequentiality_ratio",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-data_access_trend",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 323,
+      "metric": "Payload per burst (MiB)"
+    },
+    {
+      "case": "matrix-chunk_length_trend",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-chunklength_histo",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-chunklength_pie",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-latency_trend",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Total latency (ms)"
+    },
+    {
+      "case": "matrix-latency_sort",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Total latency (ms)"
+    },
+    {
+      "case": "matrix-latency_histo",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Total latency (ms)"
+    },
+    {
+      "case": "matrix-latency_anlaysis",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-1KB_latency_trend",
+      "status": "pass",
+      "cohort": 8063,
+      "samples": 8063,
+      "metric": "Device latency (ms/KiB)"
+    },
+    {
+      "case": "matrix-1_chunk_latency_anlaysis",
+      "status": "pass",
+      "cohort": 8063,
+      "samples": 8063,
+      "metric": "Device latency (ms/KiB)"
+    },
+    {
+      "case": "matrix-c2c_trend",
+      "status": "pass",
+      "cohort": 8246,
+      "samples": 8246,
+      "metric": "C2C completion gap (ms)"
+    },
+    {
+      "case": "matrix-c2c_sorting",
+      "status": "pass",
+      "cohort": 8246,
+      "samples": 8246,
+      "metric": "C2C completion gap (ms)"
+    },
+    {
+      "case": "matrix-d2d_trend",
+      "status": "pass",
+      "cohort": 8246,
+      "samples": 8246,
+      "metric": "D2D issue gap (ms)"
+    },
+    {
+      "case": "matrix-d2d_sorting",
+      "status": "pass",
+      "cohort": 8246,
+      "samples": 8246,
+      "metric": "D2D issue gap (ms)"
+    },
+    {
+      "case": "matrix-iowait_trend",
+      "status": "pass",
+      "cohort": null,
+      "samples": 0,
+      "metric": "Scheduler I/O wait (us)"
+    },
+    {
+      "case": "matrix-bw_trend_c2c",
+      "status": "pass",
+      "cohort": 0,
+      "samples": 0,
+      "metric": "Rolling C2C BW (MiB/s)"
+    },
+    {
+      "case": "matrix-bw_histo",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8,
+      "metric": "Window bandwidth (MiB/s)"
+    },
+    {
+      "case": "matrix-host_bw_trend",
+      "status": "pass",
+      "cohort": 0,
+      "samples": 0,
+      "metric": "Rolling D2D BW (MiB/s)"
+    },
+    {
+      "case": "matrix-bw_trend_timebase",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8,
+      "metric": "Window bandwidth (MiB/s)"
+    },
+    {
+      "case": "matrix-qd_trend",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Observed QD at issue (device)"
+    },
+    {
+      "case": "matrix-qd_sort",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Observed QD at issue (device)"
+    },
+    {
+      "case": "matrix-busytime_trend",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 2758,
+      "metric": "Continuous busy duration (ms)"
+    },
+    {
+      "case": "matrix-busytime_histo",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 2758,
+      "metric": "Continuous busy duration (ms)"
+    },
+    {
+      "case": "matrix-idletime_trend",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 2757,
+      "metric": "Continuous idle duration (ms)"
+    },
+    {
+      "case": "matrix-idle_analysis",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 2757,
+      "metric": "Continuous idle duration (ms)"
+    },
+    {
+      "case": "matrix-idletime_histo",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 2757,
+      "metric": "Continuous idle duration (ms)"
+    },
+    {
+      "case": "matrix-data_table",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-show_log",
+      "status": "pass",
+      "cohort": null,
+      "samples": null,
+      "metric": null
+    },
+    {
+      "case": "matrix-p0-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Total latency (ms)"
+    },
+    {
+      "case": "matrix-p0-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Total latency (ms)"
+    },
+    {
+      "case": "matrix-p4-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-p4-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-p6-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-p6-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-p7-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Observed QD at issue (device)"
+    },
+    {
+      "case": "matrix-p7-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Observed QD at issue (device)"
+    },
+    {
+      "case": "matrix-p8-read",
+      "status": "pass",
+      "cohort": 7414,
+      "samples": 7414,
+      "metric": "D2D issue gap (ms)"
+    },
+    {
+      "case": "matrix-p8-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "D2D issue gap (ms)"
+    },
+    {
+      "case": "matrix-p9-read",
+      "status": "pass",
+      "cohort": 7414,
+      "samples": 7414,
+      "metric": "C2C completion gap (ms)"
+    },
+    {
+      "case": "matrix-p9-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "C2C completion gap (ms)"
+    },
+    {
+      "case": "matrix-p10-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Device latency (ms/KiB)"
+    },
+    {
+      "case": "matrix-p10-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Device latency (ms/KiB)"
+    },
+    {
+      "case": "matrix-p12-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 8,
+      "metric": "Window bandwidth (MiB/s)"
+    },
+    {
+      "case": "matrix-p12-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 8,
+      "metric": "Window bandwidth (MiB/s)"
+    },
+    {
+      "case": "matrix-p13-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 8,
+      "metric": "Window IOPS (requests/s)"
+    },
+    {
+      "case": "matrix-p13-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 8,
+      "metric": "Window IOPS (requests/s)"
+    },
+    {
+      "case": "matrix-p14-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 8,
+      "metric": "Cumulative payload (MiB)"
+    },
+    {
+      "case": "matrix-p14-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 8,
+      "metric": "Cumulative payload (MiB)"
+    },
+    {
+      "case": "matrix-p15-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 8,
+      "metric": "Device busy (%)"
+    },
+    {
+      "case": "matrix-p15-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 8,
+      "metric": "Device busy (%)"
+    },
+    {
+      "case": "matrix-p16-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 8,
+      "metric": "Window active time (ms)"
+    },
+    {
+      "case": "matrix-p16-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 8,
+      "metric": "Window active time (ms)"
+    },
+    {
+      "case": "matrix-p17-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 8,
+      "metric": "Window idle time (ms)"
+    },
+    {
+      "case": "matrix-p17-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 8,
+      "metric": "Window idle time (ms)"
+    },
+    {
+      "case": "matrix-p18-read",
+      "status": "pass",
+      "cohort": 0,
+      "samples": 0,
+      "metric": "Rolling C2C BW (MiB/s)"
+    },
+    {
+      "case": "matrix-p18-write",
+      "status": "pass",
+      "cohort": 0,
+      "samples": 0,
+      "metric": "Rolling C2C BW (MiB/s)"
+    },
+    {
+      "case": "matrix-p19-read",
+      "status": "pass",
+      "cohort": 0,
+      "samples": 0,
+      "metric": "Rolling D2D BW (MiB/s)"
+    },
+    {
+      "case": "matrix-p19-write",
+      "status": "pass",
+      "cohort": 0,
+      "samples": 0,
+      "metric": "Rolling D2D BW (MiB/s)"
+    },
+    {
+      "case": "matrix-p20-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 2758,
+      "metric": "Continuous busy duration (ms)"
+    },
+    {
+      "case": "matrix-p20-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 2758,
+      "metric": "Continuous busy duration (ms)"
+    },
+    {
+      "case": "matrix-p21-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 2757,
+      "metric": "Continuous idle duration (ms)"
+    },
+    {
+      "case": "matrix-p21-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 2757,
+      "metric": "Continuous idle duration (ms)"
+    },
+    {
+      "case": "matrix-p22-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 323,
+      "metric": "Payload per burst (MiB)"
+    },
+    {
+      "case": "matrix-p22-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 323,
+      "metric": "Payload per burst (MiB)"
+    },
+    {
+      "case": "matrix-p23-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-p23-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-p24-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-p24-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-p25-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-p25-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-p26-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-p26-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-p28-read",
+      "status": "pass",
+      "cohort": 7415,
+      "samples": 7415,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-p28-write",
+      "status": "pass",
+      "cohort": 648,
+      "samples": 648,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-category-20",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Command"
+    },
+    {
+      "case": "matrix-category-21",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Access pattern"
+    },
+    {
+      "case": "matrix-category-22",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Size class"
+    },
+    {
+      "case": "matrix-category-23",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Device"
+    },
+    {
+      "case": "matrix-category-24",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Process"
+    },
+    {
+      "case": "matrix-category-25",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "File candidate set"
+    },
+    {
+      "case": "matrix-category-26",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Attribution confidence"
+    },
+    {
+      "case": "matrix-custom-line",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-custom-bar",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-scheduler-fixture",
+      "status": "pass",
+      "cohort": null,
+      "samples": 0,
+      "metric": "Scheduler I/O wait (us)"
+    },
+    {
+      "case": "matrix-scheduler-large",
+      "status": "pass",
+      "cohort": null,
+      "samples": 0,
+      "metric": "Scheduler I/O wait (us)"
+    },
+    {
+      "feature": "hw_q_trend",
+      "status": "deferred by requested scope; preserved HW queue WIP not implemented / not passed"
+    }
+  ],
+  "extra_matrix": [
+    {
+      "case": "scheduler-population",
+      "status": "pass",
+      "samples": 200
+    },
+    {
+      "case": "scheduler-large-population",
+      "status": "pass",
+      "samples": 90005
+    },
+    {
+      "case": "rolling-population-c2c",
+      "status": "pass",
+      "samples": 8183
+    },
+    {
+      "case": "rolling-population-d2d",
+      "status": "pass",
+      "samples": 8183
+    },
+    {
+      "case": "custom-point",
+      "status": "pass",
+      "samples": 0
+    },
+    {
+      "case": "overall-point",
+      "status": "pass",
+      "samples": 1
+    },
+    {
+      "case": "custom-process-filter",
+      "status": "pass",
+      "samples": 0
+    },
+    {
+      "case": "overall-pid-filter",
+      "status": "pass",
+      "samples": 8294
+    },
+    {
+      "case": "raw-table-navigation-v4",
+      "status": "pass",
+      "samples": 184
+    },
+    {
+      "case": "paired-histograms",
+      "status": "pass",
+      "samples": 8294
+    },
+    {
+      "case": "queue-depth['explore', 'light', 'read']",
+      "status": "pass"
+    },
+    {
+      "case": "queue-depth['compare', 'dark', 'all']",
+      "status": "pass"
+    },
+    {
+      "case": "activity-plots['activity-iops', 'light']",
+      "status": "pass"
+    },
+    {
+      "case": "activity-plots['activity-throughput', 'dark']",
+      "status": "pass"
+    }
+  ],
+  "main_gates": [
+    {
+      "case": "coverage-light",
+      "checks": {
+        "process": true,
+        "ready": true,
+        "whole_denominator": true,
+        "unresolved_partition": true,
+        "observation_volume": true,
+        "known_fixture": true,
+        "performance": true,
+        "source_preserved": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "latency-bar",
+      "checks": {
+        "process": true,
+        "transition": true,
+        "exact_requests": true,
+        "matching_scope": true,
+        "performance": true,
+        "source_preserved": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "latency-area",
+      "checks": {
+        "process": true,
+        "transition": true,
+        "exact_requests": true,
+        "matching_scope": true,
+        "performance": true,
+        "source_preserved": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "latency-keyboard",
+      "checks": {
+        "process": true,
+        "transition": true,
+        "exact_requests": true,
+        "matching_scope": true,
+        "performance": true,
+        "source_preserved": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "compare-point",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true,
+        "selection_isolated": true
+      }
+    },
+    {
+      "case": "compare-area",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "compare-distributions",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "compare-files",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "compare-processes",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "compare-details",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true
+      }
+    },
+    {
+      "case": "compare-zoom-back",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true,
+        "restored": true
+      }
+    },
+    {
+      "case": "compare-clear",
+      "checks": {
+        "exited": true,
+        "source_preserved": true,
+        "interaction_completed": true,
+        "cohorts_present": true,
+        "screenshot": true,
+        "clear_isolated": true
+      }
+    }
+  ],
+  "performance": {
+    "profile": "GNU Rust 1.98 debug, baseline dbb002f; 3 alternating repetitions; cancellation fix included",
+    "repeats": 3,
+    "memory_scope": "whole-process sampled peak, including QA screenshot/CSV export; not idle-only memory",
+    "executables": {
+      "baseline": "77fe98904d5111402e3dfb666ffc9517d5eff970e7ae13174c42ccd633852bbb",
+      "feature": "c43798a47ccd6e6dbf1b68177675a45baea6dcd82a3fa1a8e9fb8faedd82a430"
+    },
+    "input_sha256": "07af8cf35c97959445bb7844f4c41ca361c95b193ab4a5dc4626b221a194c83a",
+    "comparisons": [
+      {
+        "dataset": "real",
+        "preset": 0,
+        "read": false,
+        "baseline": {
+          "load_ms": 257.3843,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 9.967,
+          "ui_p50_ms": 6.459,
+          "ui_p95_ms": 8.565,
+          "peak_rss_mib": 226.00390625,
+          "peak_private_mib": 181.28125,
+          "wall_s": 4.600001399987377
+        },
+        "feature": {
+          "load_ms": 303.4429,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 11.361,
+          "ui_p50_ms": 8.088,
+          "ui_p95_ms": 75.274,
+          "peak_rss_mib": 242.72265625,
+          "peak_private_mib": 199.2890625,
+          "wall_s": 5.133198900002753
+        }
+      },
+      {
+        "dataset": "real",
+        "preset": 0,
+        "read": true,
+        "baseline": {
+          "load_ms": 258.3993,
+          "filter_ms": 11.342400000000001,
+          "plot_rebuild_ms": 9.525,
+          "ui_p50_ms": 6.714,
+          "ui_p95_ms": 7.993,
+          "peak_rss_mib": 231.015625,
+          "peak_private_mib": 185.78125,
+          "wall_s": 4.720428900007391
+        },
+        "feature": {
+          "load_ms": 287.18890000000005,
+          "filter_ms": 11.4217,
+          "plot_rebuild_ms": 11.071,
+          "ui_p50_ms": 7.756,
+          "ui_p95_ms": 69.662,
+          "peak_rss_mib": 247.52734375,
+          "peak_private_mib": 200.8046875,
+          "wall_s": 4.931841300014639
+        }
+      },
+      {
+        "dataset": "real",
+        "preset": 4,
+        "read": false,
+        "baseline": {
+          "load_ms": 263.08959999999996,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 9.107,
+          "ui_p50_ms": 4.821,
+          "ui_p95_ms": 7.074,
+          "peak_rss_mib": 223.390625,
+          "peak_private_mib": 178.33203125,
+          "wall_s": 4.673593300016364
+        },
+        "feature": {
+          "load_ms": 295.0501,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 9.786,
+          "ui_p50_ms": 7.567,
+          "ui_p95_ms": 30.88,
+          "peak_rss_mib": 244.6640625,
+          "peak_private_mib": 200.04296875,
+          "wall_s": 5.675492499984102
+        }
+      },
+      {
+        "dataset": "real",
+        "preset": 4,
+        "read": true,
+        "baseline": {
+          "load_ms": 256.4894,
+          "filter_ms": 11.91,
+          "plot_rebuild_ms": 8.888,
+          "ui_p50_ms": 4.167,
+          "ui_p95_ms": 4.79,
+          "peak_rss_mib": 229.4375,
+          "peak_private_mib": 184.04296875,
+          "wall_s": 4.668119599984493
+        },
+        "feature": {
+          "load_ms": 297.2167,
+          "filter_ms": 13.0562,
+          "plot_rebuild_ms": 11.377,
+          "ui_p50_ms": 7.169,
+          "ui_p95_ms": 72.035,
+          "peak_rss_mib": 251.38671875,
+          "peak_private_mib": 203.34765625,
+          "wall_s": 5.171231399988756
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 0,
+        "read": false,
+        "baseline": {
+          "load_ms": 4446.4068,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 14.988,
+          "ui_p50_ms": 7.443,
+          "ui_p95_ms": 15.119,
+          "peak_rss_mib": 297.9296875,
+          "peak_private_mib": 261.57421875,
+          "wall_s": 8.784721600008197
+        },
+        "feature": {
+          "load_ms": 5133.3304,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 18.134,
+          "ui_p50_ms": 8.506,
+          "ui_p95_ms": 11.273,
+          "peak_rss_mib": 423.359375,
+          "peak_private_mib": 402.2421875,
+          "wall_s": 16.75624690001132
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 0,
+        "read": true,
+        "baseline": {
+          "load_ms": 4289.2465,
+          "filter_ms": 144.3326,
+          "plot_rebuild_ms": 13.807,
+          "ui_p50_ms": 7.484,
+          "ui_p95_ms": 13.587,
+          "peak_rss_mib": 363.515625,
+          "peak_private_mib": 339.66015625,
+          "wall_s": 8.685621900018305
+        },
+        "feature": {
+          "load_ms": 5012.185299999999,
+          "filter_ms": 143.6874,
+          "plot_rebuild_ms": 13.956,
+          "ui_p50_ms": 7.773,
+          "ui_p95_ms": 10.841,
+          "peak_rss_mib": 488.40234375,
+          "peak_private_mib": 485.4921875,
+          "wall_s": 15.993250999978045
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 4,
+        "read": false,
+        "baseline": {
+          "load_ms": 4372.2009,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 13.869,
+          "ui_p50_ms": 4.041,
+          "ui_p95_ms": 10.486,
+          "peak_rss_mib": 290.640625,
+          "peak_private_mib": 253.375,
+          "wall_s": 8.55155659999582
+        },
+        "feature": {
+          "load_ms": 4986.4159,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 14.759,
+          "ui_p50_ms": 4.348,
+          "ui_p95_ms": 7.616,
+          "peak_rss_mib": 426.18359375,
+          "peak_private_mib": 406.546875,
+          "wall_s": 15.658820200012997
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 4,
+        "read": true,
+        "baseline": {
+          "load_ms": 4329.7275,
+          "filter_ms": 140.90730000000002,
+          "plot_rebuild_ms": 14.049,
+          "ui_p50_ms": 3.848,
+          "ui_p95_ms": 10.005,
+          "peak_rss_mib": 357.8046875,
+          "peak_private_mib": 333.55078125,
+          "wall_s": 8.622959500004072
+        },
+        "feature": {
+          "load_ms": 4906.9605,
+          "filter_ms": 141.5407,
+          "plot_rebuild_ms": 14.612,
+          "ui_p50_ms": 3.953,
+          "ui_p95_ms": 6.061,
+          "peak_rss_mib": 494.421875,
+          "peak_private_mib": 491.91015625,
+          "wall_s": 15.859034100023564
+        }
+      }
+    ],
+    "baseline_commit": "dbb002fcf68999305482a057b9ed867136a1848e",
+    "source_commit": "777c78dfbe15444a9d4264718926360ed9ad9b46",
+    "retry_note": "One baseline process exited before producing a report. The same case was retried successfully; failed-attempt log retained. All48 completed cases are reported."
+  },
+  "device": {
+    "model": "Vivo V2606A",
+    "android": "17",
+    "root": true,
+    "paired_requests": 63,
+    "completion_records": 64,
+    "unpaired_completions": 1,
+    "records": 544972,
+    "footer": {
+      "record": "footer",
+      "schema_version": 8,
+      "events_seen": 544972,
+      "events_persisted": 544972,
+      "events_dropped": 0,
+      "events_rejected": 0,
+      "graceful": true
+    },
+    "stop_to_analysis_ms": 1743.4674,
+    "phases": [
+      [
+        "Ready",
+        6.4183
+      ],
+      [
+        "Preparing",
+        1032.2617
+      ],
+      [
+        "Recording",
+        5034.4295
+      ],
+      [
+        "Stopping",
+        17048.3313
+      ],
+      [
+        "Analyzing",
+        17685.9624
+      ],
+      [
+        "Complete",
+        18761.6697
+      ]
+    ],
+    "ui_performance": {
+      "current_backlog": 0,
+      "explorer_rebuild": {
+        "max_ms": 0.0,
+        "over_budget": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "samples": 0
+      },
+      "message_drain": {
+        "max_ms": 11.687,
+        "over_budget": 16,
+        "p50_ms": 0.673,
+        "p95_ms": 1.063,
+        "samples": 600
+      },
+      "peak_backlog": 3335,
+      "pipeline_rebuild": {
+        "max_ms": 0.0,
+        "over_budget": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "samples": 0
+      },
+      "summary_rebuild": {
+        "max_ms": 1.747,
+        "over_budget": 0,
+        "p50_ms": 1.747,
+        "p95_ms": 1.747,
+        "samples": 1
+      },
+      "ui_update": {
+        "max_ms": 403.349,
+        "over_budget": 17,
+        "p50_ms": 1.488,
+        "p95_ms": 2.507,
+        "samples": 600
+      }
+    },
+    "cpu_reloaded": {
+      "2": 63
+    },
+    "scheduler_sources": [
+      {
+        "record": "source_info",
+        "schema_version": 8,
+        "source": "scheduler_iowait",
+        "status": "Task delay probe unavailable",
+        "metadata": {
+          "attached": false,
+          "capture_filter_scope": "Balanced/Deep/Raw modes; task TID supported; PID/UID/device/operation/size filters suppress scheduler delays because those identities are not exposed",
+          "population": "Independent waiting-task delay events; matching events emitted without block-detail sampling; absent events are not measured zero",
+          "sched_schedstats": "1",
+          "stage": "recording",
+          "stats_enabled_by_capture": false,
+          "stats_error": null
+        }
+      },
+      {
+        "record": "source_info",
+        "schema_version": 8,
+        "source": "scheduler_iowait",
+        "status": "Task delay capture finished",
+        "metadata": {
+          "sched_schedstats": "1",
+          "stage": "complete",
+          "stats_restore": null
+        }
+      }
+    ],
+    "raw_capture_sha256": "0135a2254830325177aa661964ae4e3ad8f2846248435fff5d2ff00e481933bf"
+  },
+  "limits": [
+    "HW Queue not implemented/passed",
+    "Scheduler task-delay native attachment unavailable for this kernel dynamic comm layout",
+    "Peak memory includes QA exports and newly added full-cohort summary; p95 includes initial frames",
+    "Installed application unchanged"
+  ],
+  "performance_before_cancellation": {
+    "profile": "GNU Rust 1.98 debug; medians of 3 interleaved runs; peak memory includes opt-in screenshot/CSV export",
+    "baseline_commit": "dbb002fcf68999305482a057b9ed867136a1848e",
+    "input_sha256": "07af8cf35c97959445bb7844f4c41ca361c95b193ab4a5dc4626b221a194c83a",
+    "comparisons": [
+      {
+        "dataset": "real",
+        "preset": 0,
+        "read": false,
+        "baseline": {
+          "load_ms": 255.2553,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 8.715,
+          "ui_p95_ms": 7.722,
+          "peak_rss_mib": 225.42578125,
+          "peak_private_mib": 180.84375,
+          "wall_s": 4.536325499997474,
+          "ui_p50_ms": 6.411
+        },
+        "feature": {
+          "load_ms": 276.7127,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 11.574,
+          "ui_p95_ms": 73.01,
+          "peak_rss_mib": 242.60546875,
+          "peak_private_mib": 199.04296875,
+          "wall_s": 4.90604090000852,
+          "ui_p50_ms": 7.876
+        }
+      },
+      {
+        "dataset": "real",
+        "preset": 0,
+        "read": true,
+        "baseline": {
+          "load_ms": 249.80079999999998,
+          "filter_ms": 11.324000000000002,
+          "plot_rebuild_ms": 9.789,
+          "ui_p95_ms": 8.467,
+          "peak_rss_mib": 230.73046875,
+          "peak_private_mib": 185.98828125,
+          "wall_s": 4.5725450000027195,
+          "ui_p50_ms": 6.235
+        },
+        "feature": {
+          "load_ms": 267.0297,
+          "filter_ms": 13.1777,
+          "plot_rebuild_ms": 9.052,
+          "ui_p95_ms": 68.048,
+          "peak_rss_mib": 247.9921875,
+          "peak_private_mib": 200.78515625,
+          "wall_s": 4.874945099989418,
+          "ui_p50_ms": 7.516
+        }
+      },
+      {
+        "dataset": "real",
+        "preset": 4,
+        "read": false,
+        "baseline": {
+          "load_ms": 257.16339999999997,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 8.591,
+          "ui_p95_ms": 5.646,
+          "peak_rss_mib": 222.8125,
+          "peak_private_mib": 177.2265625,
+          "wall_s": 4.46261659997981,
+          "ui_p50_ms": 4.315
+        },
+        "feature": {
+          "load_ms": 278.14480000000003,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 9.399,
+          "ui_p95_ms": 28.728,
+          "peak_rss_mib": 244.42578125,
+          "peak_private_mib": 199.46484375,
+          "wall_s": 5.207969599985518,
+          "ui_p50_ms": 7.48
+        }
+      },
+      {
+        "dataset": "real",
+        "preset": 4,
+        "read": true,
+        "baseline": {
+          "load_ms": 247.2983,
+          "filter_ms": 10.8227,
+          "plot_rebuild_ms": 8.586,
+          "ui_p95_ms": 5.234,
+          "peak_rss_mib": 229.21484375,
+          "peak_private_mib": 183.7265625,
+          "wall_s": 4.384763900015969,
+          "ui_p50_ms": 4.041
+        },
+        "feature": {
+          "load_ms": 274.9352,
+          "filter_ms": 12.082,
+          "plot_rebuild_ms": 9.353,
+          "ui_p95_ms": 74.991,
+          "peak_rss_mib": 250.83984375,
+          "peak_private_mib": 203.25,
+          "wall_s": 4.849028399999952,
+          "ui_p50_ms": 6.846
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 0,
+        "read": false,
+        "baseline": {
+          "load_ms": 4540.1847,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 14.603,
+          "ui_p95_ms": 8.269,
+          "peak_rss_mib": 297.46484375,
+          "peak_private_mib": 261.6015625,
+          "wall_s": 8.861053000000538,
+          "ui_p50_ms": 7.649
+        },
+        "feature": {
+          "load_ms": 4999.9767999999995,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 14.718,
+          "ui_p95_ms": 10.515,
+          "peak_rss_mib": 424.92578125,
+          "peak_private_mib": 400.484375,
+          "wall_s": 17.533133999997517,
+          "ui_p50_ms": 8.398
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 0,
+        "read": true,
+        "baseline": {
+          "load_ms": 4484.0566,
+          "filter_ms": 145.297,
+          "plot_rebuild_ms": 14.374,
+          "ui_p95_ms": 13.825,
+          "peak_rss_mib": 363.6953125,
+          "peak_private_mib": 339.94140625,
+          "wall_s": 8.953415699972538,
+          "ui_p50_ms": 7.215
+        },
+        "feature": {
+          "load_ms": 5009.1444,
+          "filter_ms": 167.38549999999998,
+          "plot_rebuild_ms": 14.523,
+          "ui_p95_ms": 13.283,
+          "peak_rss_mib": 567.1875,
+          "peak_private_mib": 566.3125,
+          "wall_s": 16.036729500017827,
+          "ui_p50_ms": 8.655
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 4,
+        "read": false,
+        "baseline": {
+          "load_ms": 4423.8526,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 13.823,
+          "ui_p95_ms": 5.66,
+          "peak_rss_mib": 291.875,
+          "peak_private_mib": 255.01171875,
+          "wall_s": 8.616449499997543,
+          "ui_p50_ms": 4.101
+        },
+        "feature": {
+          "load_ms": 5017.8345,
+          "filter_ms": 0,
+          "plot_rebuild_ms": 16.711,
+          "ui_p95_ms": 8.288,
+          "peak_rss_mib": 425.80859375,
+          "peak_private_mib": 405.8203125,
+          "wall_s": 15.929389199998695,
+          "ui_p50_ms": 4.718
+        }
+      },
+      {
+        "dataset": "large",
+        "preset": 4,
+        "read": true,
+        "baseline": {
+          "load_ms": 4415.9686,
+          "filter_ms": 149.22289999999998,
+          "plot_rebuild_ms": 14.45,
+          "ui_p95_ms": 7.426,
+          "peak_rss_mib": 357.515625,
+          "peak_private_mib": 332.7734375,
+          "wall_s": 8.80469359998824,
+          "ui_p50_ms": 3.811
+        },
+        "feature": {
+          "load_ms": 5062.5054,
+          "filter_ms": 177.6719,
+          "plot_rebuild_ms": 18.04,
+          "ui_p95_ms": 6.075,
+          "peak_rss_mib": 581.640625,
+          "peak_private_mib": 580.2109375,
+          "wall_s": 16.05014609999489,
+          "ui_p50_ms": 4.339
+        }
+      }
+    ],
+    "executables": {
+      "baseline": "77fe98904d5111402e3dfb666ffc9517d5eff970e7ae13174c42ccd633852bbb",
+      "feature": "500588845bb92123bea39d96d489c5ffe22063c3e6d86174794396a349926572"
+    }
+  },
+  "post_cancellation_native": [
+    {
+      "case": "matrix-overall",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-custom",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 0,
+      "metric": "Process"
+    },
+    {
+      "case": "matrix-timeline_core",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Device latency (ms)"
+    },
+    {
+      "case": "matrix-footprint",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Sector"
+    },
+    {
+      "case": "matrix-chunklength_histo",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "case": "matrix-busytime_trend",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 2758,
+      "metric": "Continuous busy duration (ms)"
+    },
+    {
+      "case": "matrix-data_table",
+      "status": "pass",
+      "cohort": 8247,
+      "samples": 8247,
+      "metric": "Chunk (KiB)"
+    },
+    {
+      "feature": "hw_q_trend",
+      "status": "deferred by requested scope; preserved HW queue WIP not implemented / not passed"
+    }
+  ],
+  "source_commit": "777c78dfbe15444a9d4264718926360ed9ad9b46",
+  "physical_capture_bundle": {
+    "android-ebpf-studio.exe": "835b17fc753288eba1978fdfda53d5a0a2e9abc38bb3e288473038e7cafe4afb",
+    "android-ebpf-agent": "a36bd2e37fa96acf98ee7cdb07ac8702bc684b2566c88213ca0eff2c0622cbdd",
+    "android-storage-ebpf.o": "35e7e48c79de5a87d0edb60b5af6a497ddb3ed4a888bdfe8869191f4bd024392"
+  },
+  "final_release": {
+    "desktop_sha256": "c2848c653b0120e9941e94eecb1bfca8383273f13e36fdafb7cca75afb8a738a",
+    "agent_sha256": "a36bd2e37fa96acf98ee7cdb07ac8702bc684b2566c88213ca0eff2c0622cbdd",
+    "ebpf_sha256": "35e7e48c79de5a87d0edb60b5af6a497ddb3ed4a888bdfe8869191f4bd024392",
+    "verified": "Post-cancellation Release build; native reopen of the saved root capture in Overall,63 requests. Physical capture bundle above preceded only the graph-summary cancellation change."
+  }
+}

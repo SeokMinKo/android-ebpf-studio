@@ -1,6 +1,8 @@
 # Active goal checkpoint — not overall completion
 
-User-requested cleanup (2026-09-07): see [UPAS_REMAINING.md](UPAS_REMAINING.md). Feature implementation stopped for the user's remaining-work/cleanup request. Completed implementation259e46e is preserved on the feature and backup branches. Unfinished HW Queue experiment is saved in stashbeafa50e plus a verified independent patch; working tree cleaned. Original main now has20 additional commits requiring integration before eventual deployment. Do not automatically reapply unfinished WIP based on earlier continuation notes. Full Goal is incomplete.
+Latest integration continuation (2026-09-07): the user selected remaining items2/3/4 and authorized merging this branch into main. See [UPAS_MERGE_CHECKPOINT.md](UPAS_MERGE_CHECKPOINT.md) for Overall/Custom/Raw Log implementation, integration of main20 commits, complete graph matrix, performance comparison and actual root-device validation. The HW Queue experiment remains preserved and unimplemented; installation is still a separate remaining step. See [UPAS_REMAINING.md](UPAS_REMAINING.md). The full original Goal remains incomplete.
+
+Historical checkpoints below describe their original verification state; the merge checkpoint supersedes their pending integration/validation statements.
 
 Latest linked Summary continuation (2026-09-07): [UPAS_CATEGORY_CHECKPOINT.md](UPAS_CATEGORY_CHECKPOINT.md). Exact Chunk-byte categories and joint Command/access/size counts/payload are connected to the existing Summary. Native8247-I/O categories, Read/Write/point/empty/scroll, full CSV and actual four-function uPAS AST comparison passed. Full Goal remains active; next hardware queue and remaining feature/full-matrix/performance/install work.
 
