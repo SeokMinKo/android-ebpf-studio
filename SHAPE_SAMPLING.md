@@ -7,3 +7,5 @@ Explore and Compare now measure each eligible request before sampling, including
 Missing axis measurements are counted across the full cohort, separately from sampling. Selection, KPI and exports continue to use their full filtered cohorts. Source records are not changed.
 
 Regressions include the penultimate maximum, physical endpoints, sparse gap boundaries, and alternating Read/Write categories. The 2,001-request synthetic NDJSON is a regression fixture, not physical FilePath evidence. Full-coordinate measurement increases preprocessing work; native dense timing must be reported rather than assuming the earlier sampled-only performance still applies.
+
+Storage-address coordinates are calculated from every request without building a transaction graph. FilePath tooltips are then resolved only for the sampled points. Axes or categories that require graph evidence still measure the full cohort. This separates full-coordinate shape preservation from expensive tooltip formatting.

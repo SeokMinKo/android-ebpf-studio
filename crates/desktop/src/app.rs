@@ -1599,10 +1599,9 @@ impl StudioApp {
         let origin_ns = self.time_origin();
         let shows_storage_address =
             self.x_axis.is_storage_address() || self.y_axis.is_storage_address();
-        let needs_graph = self.x_axis.needs_graph()
-            || self.y_axis.needs_graph()
-            || self.group_by.needs_graph()
-            || shows_storage_address;
+        let needs_measurement_graph =
+            self.x_axis.needs_graph() || self.y_axis.needs_graph() || self.group_by.needs_graph();
+        let needs_graph = needs_measurement_graph || shows_storage_address;
         let limit = if needs_graph {
             MAX_GRAPH_EXPLORER_POINTS
         } else {
@@ -1611,7 +1610,7 @@ impl StudioApp {
         let mut measured_groups: BTreeMap<(String, IoOperation), Vec<ExplorerPoint>> =
             BTreeMap::new();
         for io in samples {
-            let graph = needs_graph.then(|| self.analysis().transaction_for(io));
+            let graph = needs_measurement_graph.then(|| self.analysis().transaction_for(io));
             let graph = graph.as_ref();
             let (Some(x), Some(y)) = (
                 self.x_axis.value(io, origin_ns, graph),
@@ -1632,12 +1631,21 @@ impl StudioApp {
                 });
         }
         let measured: usize = measured_groups.values().map(Vec::len).sum();
+        let io_by_key: std::collections::HashMap<_, _> =
+            samples.iter().map(|io| (selection_key(io), io)).collect();
         let mut groups: BTreeMap<String, Vec<ExplorerPoint>> = BTreeMap::new();
         for ((name, _operation), points) in measured_groups {
             let quota = (limit.saturating_mul(points.len()) / measured.max(1)).max(1);
             let indices = shape_sample_indices(&points, quota);
             let target = groups.entry(name).or_default();
-            target.extend(indices.into_iter().map(|index| points[index].clone()));
+            target.extend(indices.into_iter().map(|index| {
+                let mut point = points[index].clone();
+                if shows_storage_address && point.file_tooltip.is_none() {
+                    let graph = self.analysis().transaction_for(io_by_key[&point.request]);
+                    point.file_tooltip = Some(file_origin_tooltip(&block_file_origins(&graph)));
+                }
+                point
+            }));
         }
         let displayed = groups.values().map(Vec::len).sum();
         // Caption accounts for all missing measurements separately from sampling.
