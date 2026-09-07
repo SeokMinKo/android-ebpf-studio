@@ -391,7 +391,7 @@ impl ExplorerView {
             self.displayed,
             self.available,
             if self.available > self.considered {
-                " · sampled within each operation for interactive rendering"
+                " · sampled for display; extrema and sparse-gap boundaries retained"
             } else {
                 ""
             }
@@ -1608,11 +1608,9 @@ impl StudioApp {
         } else {
             MAX_EXPLORER_POINTS
         };
-        let mut groups: BTreeMap<String, Vec<ExplorerPoint>> = BTreeMap::new();
-        let indices = operation_sample_indices(samples, limit);
-        let considered = indices.len();
-        for index in indices {
-            let io = &samples[index];
+        let mut measured_groups: BTreeMap<(String, IoOperation), Vec<ExplorerPoint>> =
+            BTreeMap::new();
+        for io in samples {
             let graph = needs_graph.then(|| self.analysis().transaction_for(io));
             let graph = graph.as_ref();
             let (Some(x), Some(y)) = (
@@ -1624,8 +1622,8 @@ impl StudioApp {
             // Not building a transaction graph for these axes is not evidence
             // that a request has no file. Keep the tooltip absent until evaluated.
             let file_tooltip = graph.map(|graph| file_origin_tooltip(&block_file_origins(graph)));
-            groups
-                .entry(self.group_by.key(io, graph))
+            measured_groups
+                .entry((self.group_by.key(io, graph), io.issue.operation))
                 .or_default()
                 .push(ExplorerPoint {
                     coordinates: [x, y],
@@ -1633,7 +1631,17 @@ impl StudioApp {
                     request: selection_key(io),
                 });
         }
+        let measured: usize = measured_groups.values().map(Vec::len).sum();
+        let mut groups: BTreeMap<String, Vec<ExplorerPoint>> = BTreeMap::new();
+        for ((name, _operation), points) in measured_groups {
+            let quota = (limit.saturating_mul(points.len()) / measured.max(1)).max(1);
+            let indices = shape_sample_indices(&points, quota);
+            let target = groups.entry(name).or_default();
+            target.extend(indices.into_iter().map(|index| points[index].clone()));
+        }
         let displayed = groups.values().map(Vec::len).sum();
+        // Caption accounts for all missing measurements separately from sampling.
+        let considered = displayed + (available - measured);
         let mut groups: Vec<_> = groups.into_iter().collect();
         if groups.len() > MAX_EXPLORER_GROUPS {
             groups.sort_by_key(|group| std::cmp::Reverse(group.1.len()));
@@ -4366,11 +4374,7 @@ mod ui_tests {
         let view = app.explorer_view.as_ref().unwrap();
         assert_eq!(view.available, 1);
         assert_eq!(view.displayed, 0);
-        assert!(
-            !view.caption().contains("sampled within"),
-            "{}",
-            view.caption()
-        );
+        assert!(!view.caption().contains("sampled"), "{}", view.caption());
         assert!(view.caption().contains("1 request"), "{}", view.caption());
     }
 
