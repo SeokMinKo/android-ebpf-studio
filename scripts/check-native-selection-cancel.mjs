@@ -1,0 +1,4 @@
+import fs from 'node:fs';import path from 'node:path';
+const dir=process.argv[2],r=JSON.parse(fs.readFileSync(path.join(dir,'result.json'))),run=JSON.parse(fs.readFileSync(path.join(dir,'run.json')));
+const checks={normal_exit:run.status.code===0,complete:r.phase==='Complete',no_timeout:r.qa_timed_out===false,input_complete:r.qa_input_step>=7,was_computing:r.clear_was_pending===true,selection_cleared:r.selection_count===null,worker_detached:r.selection_pending===false,bounds_unchanged:JSON.stringify(r.clear_before_bounds)===JSON.stringify(r.plot_bounds),read_filter_kept:r.active_filter.operation==='read'};
+const verdict={checks,pass:Object.values(checks).every(Boolean),before:r.clear_before_bounds,after:r.plot_bounds,screenshot:path.join(dir,'result.png')};fs.writeFileSync(path.join(dir,'cancellation-regression.json'),JSON.stringify(verdict,null,2));console.log(JSON.stringify(verdict,null,2));process.exitCode=verdict.pass?0:1;

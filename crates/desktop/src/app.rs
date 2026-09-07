@@ -1807,6 +1807,7 @@ impl StudioApp {
         let x_axis = self.x_axis;
         let y_axis = self.y_axis;
         let mut selection_request = None;
+        let mut selection_overlay = None;
         let mut drag_start = self.selection.drag_start;
         let selecting = self.selection.enabled;
         let bounds_command = self.selection.bounds_command.take();
@@ -1923,18 +1924,8 @@ impl StudioApp {
                     let p = plot.plot_from_screen(pos);
                     let min = [start[0].min(p.x), start[1].min(p.y)];
                     let max = [start[0].max(p.x), start[1].max(p.y)];
-                    let rectangle: PlotPoints = vec![
-                        [min[0], min[1]],
-                        [max[0], min[1]],
-                        [max[0], max[1]],
-                        [min[0], max[1]],
-                    ]
-                    .into();
-                    plot.polygon(
-                        egui_plot::Polygon::new("Selection area", rectangle)
-                            .fill_color(accent().gamma_multiply(0.15))
-                            .stroke(Stroke::new(1.5, accent())),
-                    );
+                    // Selection is a screen overlay, not data contributing to auto bounds.
+                    selection_overlay = Some((min, max));
                     if plot.response().drag_stopped() {
                         selection_request = Some(SelectionRequest::Rectangle { min, max });
                         drag_start = None;
@@ -1963,6 +1954,25 @@ impl StudioApp {
                     );
                 }
             });
+        if let Some((min, max)) = selection_overlay {
+            let rect = egui::Rect::from_two_pos(
+                plot_response
+                    .transform
+                    .position_from_point(&egui_plot::PlotPoint::new(min[0], min[1])),
+                plot_response
+                    .transform
+                    .position_from_point(&egui_plot::PlotPoint::new(max[0], max[1])),
+            );
+            ui.painter()
+                .with_clip_rect(plot_response.response.rect)
+                .rect(
+                    rect,
+                    0.0,
+                    accent().gamma_multiply(0.15),
+                    Stroke::new(1.5, accent()),
+                    egui::StrokeKind::Inside,
+                );
+        }
         self.selection.drag_start = drag_start;
         self.selection.current_bounds = Some(*plot_response.transform.bounds());
         // Comparison plots are peers: data-dependent status belongs after the

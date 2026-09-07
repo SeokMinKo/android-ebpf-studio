@@ -459,6 +459,7 @@ impl StudioApp {
         }
         if matches!(gesture.as_str(), "selection-clear" | "selection-cancel-pending") && self.render_qa.input_step >= 3 {
             let step = self.render_qa.input_step;
+            if step >= 7 { return; }
             if step == 3 {
                 if !self.selection.has_selection() { return; }
                 self.render_qa.selection_before_clear = self.selection.summary.as_ref().map(|s| s.keys.len());

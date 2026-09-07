@@ -7,3 +7,5 @@ The graph toolbar has a Clear selection button. It clears selected points and an
 Host regressions cover the default preset, independent decimal-MB conversion, cancellation, late delivery and retained bounds. Opt-in native QA gestures selection-clear and selection-cancel-pending exercise the actual toolbar button. No QA page or preset override is needed when validating the product default.
 
 Acceptance evidence is recorded separately from source tests; this change does not resolve physical capture loss or complete the all-graph acceptance matrix.
+
+A dense native cancellation regression exposed the drag rectangle contributing to automatic plot bounds. The rectangle is now painted as a clipped screen overlay after the plot, so it adds neither bounds nor a data legend series. Run node scripts/check-native-selection-cancel.mjs <native-output-directory> against the selection-cancel-pending gesture; it requires pending-before, cleared-after and identical view bounds. The original failing result remains in installed-dx12-dense/cancel-pending acceptance evidence.
