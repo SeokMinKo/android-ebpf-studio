@@ -3483,16 +3483,30 @@ fn build_transaction_graph_refs(
                         file.start_ts_ns <= block_end.saturating_add(30_000_000_000)
                             && file.end_ts_ns.saturating_add(30_000_000_000) >= block_start
                     })
+                    // A closed/recycled FD can yield an identity without a path.
+                    // Such an observation cannot replace an existing path snapshot.
+                    .filter(|file| {
+                        file.path_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.path.as_deref())
+                            .filter(|path| !path.is_empty())
+                            .or(file.path.as_deref())
+                            .is_some_and(|path| !path.is_empty())
+                    })
                     .max_by_key(|file| file.end_ts_ns)
             {
-                enriched.path = file.path_snapshot.clone().or_else(|| {
-                    file.path.clone().map(|path| PathSnapshot {
-                        deleted: path.ends_with(" (deleted)"),
-                        path: Some(path),
-                        source: PathSource::ProcFd,
-                        captured_ts_ns: file.end_ts_ns,
-                    })
-                });
+                enriched.path = file
+                    .path_snapshot
+                    .clone()
+                    .filter(|snapshot| snapshot.path.as_ref().is_some_and(|path| !path.is_empty()))
+                    .or_else(|| {
+                        file.path.clone().map(|path| PathSnapshot {
+                            deleted: path.ends_with(" (deleted)"),
+                            path: Some(path),
+                            source: PathSource::ProcFd,
+                            captured_ts_ns: file.end_ts_ns,
+                        })
+                    });
             }
             let _ = graph.add_node(enriched);
         }
