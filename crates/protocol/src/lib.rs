@@ -2951,14 +2951,17 @@ impl AnalysisEngine {
             }
         }
         if let Some(node_positions) = index.nodes_by_transaction.get(&io.issue.request_id) {
+            // Reused request IDs and multi-bio requests can repeat an identity
+            // thousands of times. Each identity contributes the same positions;
+            // expand it once before the final position sort/dedup.
+            let mut seen_identities = HashSet::new();
             for identity in node_positions
                 .iter()
                 .filter_map(|position| self.graph_nodes[*position].file.as_ref())
+                .map(file_identity_base_key)
+                .filter(|identity| seen_identities.insert(*identity))
             {
-                if let Some(positions) = index
-                    .files_by_identity
-                    .get(&file_identity_base_key(identity))
-                {
+                if let Some(positions) = index.files_by_identity.get(&identity) {
                     file_positions.extend_from_slice(positions);
                 }
             }
@@ -2967,7 +2970,7 @@ impl AnalysisEngine {
         file_positions.dedup();
         let files: Vec<_> = file_positions
             .into_iter()
-            .map(|position| self.file_ios[position].clone())
+            .map(|position| &self.file_ios[position])
             .collect();
 
         let mut observation_positions = index.long_observations.clone();
@@ -3014,7 +3017,7 @@ impl AnalysisEngine {
             .map(|&position| self.graph_edges[position].clone())
             .collect();
         drop(index_guard);
-        let graph = build_transaction_graph(io, &files, &observations, &nodes, &edges);
+        let graph = build_transaction_graph_refs(io, &files, &observations, &nodes, &edges);
         let mut cache = self.transaction_cache.borrow_mut();
         if cache.len() >= MAX_DERIVED_CACHE_ENTRIES {
             cache.clear();
@@ -3205,6 +3208,17 @@ fn pipeline_node_kind(layer: PipelineLayer) -> IoNodeKind {
 pub fn build_transaction_graph(
     io: &CompletedIo,
     files: &[FileIo],
+    observations: &[PipelineObservation],
+    raw_nodes: &[IoNode],
+    raw_edges: &[IoEdge],
+) -> IoTransactionGraph {
+    let files: Vec<_> = files.iter().collect();
+    build_transaction_graph_refs(io, &files, observations, raw_nodes, raw_edges)
+}
+
+fn build_transaction_graph_refs(
+    io: &CompletedIo,
+    files: &[&FileIo],
     observations: &[PipelineObservation],
     raw_nodes: &[IoNode],
     raw_edges: &[IoEdge],
