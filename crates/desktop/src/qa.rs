@@ -264,7 +264,9 @@ impl StudioApp {
         if gesture == "table-keyboard" {
             raw.focused = true;
             raw.events.push(egui::Event::WindowFocused(true));
-            if !self.render_qa.table_button_focused {
+            // Initial scale/layout can replace widget IDs. Wait for the settled
+            // table and its refreshed focus before sending the one Enter press.
+            if self.render_qa.frames < 32 || !self.render_qa.table_button_focused {
                 return;
             }
             if self.render_qa.input_step < 2 {

@@ -373,7 +373,30 @@ struct ExplorerView {
     groups: Vec<(String, Vec<ExplorerPoint>)>,
     available: usize,
     displayed: usize,
+    considered: usize,
     built_at: Instant,
+}
+
+impl ExplorerView {
+    fn caption(&self) -> String {
+        format!(
+            "Showing {} of {} completed I/O samples{}",
+            self.displayed,
+            self.available,
+            if self.available > self.considered {
+                " · sampled within each operation for interactive rendering"
+            } else {
+                ""
+            }
+        ) + &if self.considered > self.displayed {
+            format!(
+                " · {} requests lack axis measurements",
+                self.considered - self.displayed
+            )
+        } else {
+            String::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1579,7 +1602,9 @@ impl StudioApp {
             MAX_EXPLORER_POINTS
         };
         let mut groups: BTreeMap<String, Vec<ExplorerPoint>> = BTreeMap::new();
-        for index in operation_sample_indices(samples, limit) {
+        let indices = operation_sample_indices(samples, limit);
+        let considered = indices.len();
+        for index in indices {
             let io = &samples[index];
             let graph = needs_graph.then(|| self.analysis().transaction_for(io));
             let graph = graph.as_ref();
@@ -1621,6 +1646,7 @@ impl StudioApp {
             groups,
             available,
             displayed,
+            considered,
             built_at: Instant::now(),
         });
         self.performance.observe_explorer_rebuild(started.elapsed());
@@ -1946,20 +1972,7 @@ impl StudioApp {
                 .color(muted()),
             );
         }
-        ui.label(
-            RichText::new(format!(
-                "Showing {} of {} completed I/O samples{}",
-                view.displayed,
-                view.available,
-                if view.available > view.displayed {
-                    " · sampled within each operation for interactive rendering"
-                } else {
-                    ""
-                }
-            ))
-            .small()
-            .color(muted()),
-        );
+        ui.label(RichText::new(view.caption()).small().color(muted()));
         if let Some(request) = selection_request {
             self.begin_selection(request);
         }
@@ -4307,6 +4320,31 @@ mod ui_tests {
                 point.file_tooltip
             );
         }
+    }
+
+    #[test]
+    fn missing_layer_measurements_are_not_display_sampling() {
+        let mut app = StudioApp::default();
+        for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+            let record: android_ebpf_protocol::WireRecord = serde_json::from_str(line).unwrap();
+            if let android_ebpf_protocol::WireRecord::Event { event, .. } = record {
+                app.analyzer.ingest(event);
+            }
+        }
+        let (x, y, group) = ExplorerPreset::ALL[3].query().unwrap();
+        app.x_axis = x;
+        app.y_axis = y;
+        app.group_by = group;
+        app.rebuild_explorer_view();
+        let view = app.explorer_view.as_ref().unwrap();
+        assert_eq!(view.available, 1);
+        assert_eq!(view.displayed, 0);
+        assert!(
+            !view.caption().contains("sampled within"),
+            "{}",
+            view.caption()
+        );
+        assert!(view.caption().contains("1 request"), "{}", view.caption());
     }
 
     #[test]
