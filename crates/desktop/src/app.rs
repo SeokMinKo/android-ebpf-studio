@@ -1589,12 +1589,9 @@ impl StudioApp {
             ) else {
                 continue;
             };
-            let file_tooltip = Some({
-                graph.map_or_else(
-                    || "File: <unattributed>".into(),
-                    |graph| file_origin_tooltip(&block_file_origins(graph)),
-                )
-            });
+            // Not building a transaction graph for these axes is not evidence
+            // that a request has no file. Keep the tooltip absent until evaluated.
+            let file_tooltip = graph.map(|graph| file_origin_tooltip(&block_file_origins(graph)));
             groups
                 .entry(self.group_by.key(io, graph))
                 .or_default()
@@ -4277,6 +4274,40 @@ fn performance_metric_row(ui: &mut egui::Ui, label: &str, value: &LatencySnapsho
 mod ui_tests {
     use super::*;
     use android_ebpf_protocol::{FileIdentity, PathSnapshot, PathSource};
+
+    #[test]
+    fn direction_presets_do_not_claim_known_file_is_unattributed() {
+        for (x, y) in [
+            (AxisMetric::TimeMs, AxisMetric::TotalLatencyMs),
+            (AxisMetric::QueueDepthAtIssue, AxisMetric::TotalLatencyMs),
+        ] {
+            let mut app = StudioApp::default();
+            for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+                let record: android_ebpf_protocol::WireRecord = serde_json::from_str(line).unwrap();
+                if let android_ebpf_protocol::WireRecord::Event { event, .. } = record {
+                    app.analyzer.ingest(event);
+                }
+            }
+            assert_eq!(app.analyzer.completed_ios().len(), 1);
+            let io = &app.analyzer.completed_ios()[0];
+            let graph = app.analyzer.transaction_for(io);
+            let path = "/data/local/tmp/ebpf-acceptance-1788751800737/alpha/read-A.bin";
+            assert!(file_origin_tooltip(&block_file_origins(&graph)).contains(path));
+            app.x_axis = x;
+            app.y_axis = y;
+            app.group_by = GroupBy::Direction;
+            app.rebuild_explorer_view();
+            let point = &app.explorer_view.as_ref().unwrap().groups[0].1[0];
+            assert!(
+                point
+                    .file_tooltip
+                    .as_ref()
+                    .is_none_or(|tip| !tip.contains("<unattributed>")),
+                "An unevaluated graph is not evidence of an unattributed file: {:?}",
+                point.file_tooltip
+            );
+        }
+    }
 
     #[test]
     fn failed_capture_does_not_leave_capturing_status() {
