@@ -1209,15 +1209,19 @@ impl StudioApp {
             WireRecord::Health {
                 emitted_events,
                 kernel_drops,
+                probe_health,
                 userspace_drops,
                 correlation_ambiguous,
                 correlation_expired,
                 key_reused,
                 ..
             } => {
-                self.loss_status = format!(
-                    "Kernel loss: {} · userspace loss: {userspace_drops} · ambiguous: {correlation_ambiguous} · expired: {correlation_expired}",
-                    kernel_drops.map_or_else(|| "not reported".into(), |v| v.to_string())
+                self.loss_status = session::root_health_status(
+                    kernel_drops,
+                    userspace_drops,
+                    correlation_ambiguous,
+                    correlation_expired,
+                    &probe_health,
                 );
                 let mut record = host_record(
                     self.session_id.as_deref().unwrap_or("session"),

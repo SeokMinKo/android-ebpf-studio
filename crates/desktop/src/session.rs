@@ -294,7 +294,26 @@ pub fn load_analysis_window(
     let triggers = loaded.triggers.clone();
     let segments = loaded.segments.clone();
     let stack_fingerprints = loaded.stack_fingerprints.clone();
-    let loss_status = loaded.health.last().map_or_else(|| "Loss counters not reported".into(), |record| match record { WireRecord::Health { kernel_drops, userspace_drops, correlation_ambiguous, correlation_expired, .. } => format!("Kernel loss: {} · userspace loss: {userspace_drops} · ambiguous: {correlation_ambiguous} · expired: {correlation_expired}", kernel_drops.map_or_else(|| "not reported".into(), |v| v.to_string())), _ => "Loss counters not reported".into() });
+    let loss_status = loaded.health.last().map_or_else(
+        || "Loss counters not reported".into(),
+        |record| match record {
+            WireRecord::Health {
+                kernel_drops,
+                userspace_drops,
+                correlation_ambiguous,
+                correlation_expired,
+                probe_health,
+                ..
+            } => root_health_status(
+                *kernel_drops,
+                *userspace_drops,
+                *correlation_ambiguous,
+                *correlation_expired,
+                probe_health,
+            ),
+            _ => "Loss counters not reported".into(),
+        },
+    );
     let loss_status = loaded
         .source_info
         .last()
@@ -824,4 +843,24 @@ fn write_event_csv(writer: &mut csv::Writer<File>, event: &StorageEvent) -> anyh
         ])?,
     }
     Ok(())
+}
+
+pub(crate) fn root_health_status(
+    kernel_drops: Option<u64>,
+    userspace_drops: u64,
+    correlation_ambiguous: u64,
+    correlation_expired: u64,
+    probes: &std::collections::BTreeMap<String, android_ebpf_protocol::ProbeHealth>,
+) -> String {
+    let mut observed = None::<u64>;
+    for probe in probes.values() {
+        if let Some(value) = probe.recursion_misses {
+            observed = Some(observed.unwrap_or(0).saturating_add(value));
+        }
+    }
+    format!(
+        "Ring loss: {} · userspace loss: {userspace_drops} · BPF recursion misses: {} (observed probe calls; not unique I/O) · ambiguous: {correlation_ambiguous} · expired: {correlation_expired}",
+        kernel_drops.map_or_else(|| "not reported".into(), |v| v.to_string()),
+        observed.map_or_else(|| "not reported".into(), |v| v.to_string())
+    )
 }

@@ -69,6 +69,7 @@ dependencies = [
  "android-ebpf-types",
  "anyhow",
  "aya",
+ "aya-obj",
  "clap",
  "ctrlc",
  "libc",

@@ -847,6 +847,10 @@ pub enum CapabilityState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProbeHealth {
+    /// Cumulative observed kernel BPF recursion misses; absent means unmeasured.
+    /// Separate from ring reservation loss and not a count of unique lost I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursion_misses: Option<u64>,
     pub emitted: u64,
     pub reserve_failures: u64,
     pub paired: u64,
