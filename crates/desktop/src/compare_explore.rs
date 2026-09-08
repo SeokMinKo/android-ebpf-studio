@@ -109,6 +109,7 @@ impl StudioApp {
         if baseline.viewer.selection.pending.is_some() || current.selection.pending.is_some() {
             return;
         }
+        let export_requested = gesture == "compare-filter" && std::env::var_os("ANDROID_EBPF_QA_COMPARE_EXPORT").is_some();
         let step = self.render_qa.input_step;
         if step >= 7 {
             return;
@@ -164,9 +165,14 @@ impl StudioApp {
                 "compare-details" => self.compare_explore.tab == CompareTab::Details,
                 _ => false,
             };
-            if done {
+            if !done { return; }
+            if !export_requested {
                 self.render_qa.input_step = 7;
+                return;
             }
+        }
+        if export_requested && step == 6 {
+            if self.render_qa.compare_export_complete { self.render_qa.input_step = 7; }
             return;
         }
         if gesture == "compare-zoom-back" && step == 6 {
@@ -196,6 +202,7 @@ impl StudioApp {
             let key = match gesture {
                 "compare-point" => "Baseline point",
                 "compare-clear" => "Baseline Clear",
+                "compare-filter" if export_requested && step >= 3 => "Compare Export",
                 "compare-filter" | "compare-empty" => "Compare Apply",
                 "compare-zoom-back" => {
                     if step < 3 {
@@ -272,7 +279,7 @@ impl StudioApp {
                 "explorer_coordinates":std::env::var_os("ANDROID_EBPF_QA_DEPTH").and_then(|_|v.explorer_view.as_ref().map(|view|view.groups.iter().flat_map(|(_, points)|points.iter().map(|p|p.coordinates)).collect::<Vec<_>>())),
             })
         };
-        serde_json::json!({"rectangle":self.render_qa.compare_rectangle,"ready_ms":self.render_qa.compare_ready_ms,"baseline":self.comparison.as_ref().map(|b|describe(&b.viewer)),"current":self.compare_explore.current.as_ref().map(|b|describe(b)),"actions":self.compare_explore.actions,"linked":self.compare_explore.linked_bounds,"error":self.compare_explore.error})
+        serde_json::json!({"export_complete":self.render_qa.compare_export_complete,"rectangle":self.render_qa.compare_rectangle,"ready_ms":self.render_qa.compare_ready_ms,"baseline":self.comparison.as_ref().map(|b|describe(&b.viewer)),"current":self.compare_explore.current.as_ref().map(|b|describe(b)),"actions":self.compare_explore.actions,"linked":self.compare_explore.linked_bounds,"error":self.compare_explore.error})
     }
 
     fn comparison_viewer(&self) -> StudioApp {
@@ -603,19 +610,21 @@ fn compare_summary_ui(
     tx: &crossbeam_channel::Sender<HostMessage>,
 ) {
     ui.heading("Selection Summary");
-    if ui
+    let export_button = ui
         .add_enabled(
             baseline.selection.pending.is_none()
                 && current.selection.pending.is_none()
                 && baseline.selection.summary.is_some()
                 && current.selection.summary.is_some(),
             egui::Button::new("Export comparison JSON"),
-        )
-        .clicked()
-        && let Some(path) = rfd::FileDialog::new()
+        );
+    qa.inspector_buttons.insert("Compare Export".into(), export_button.rect.center());
+    let qa_export_path = qa.output.as_ref().and_then(|_| std::env::var_os("ANDROID_EBPF_QA_COMPARE_EXPORT")).map(PathBuf::from);
+    if export_button.clicked()
+        && let Some(path) = qa_export_path.or_else(|| rfd::FileDialog::new()
             .set_file_name("storage-session-comparison.json")
             .add_filter("Comparison JSON", &["json"])
-            .save_file()
+            .save_file())
     {
         let payload = compare_export_payload(baseline, current);
         let sources = [baseline.session_path.clone(), current.session_path.clone()];

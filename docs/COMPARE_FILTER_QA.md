@@ -11,3 +11,7 @@ Example:
 ~~~
 
 Keep fixture expectations outside product analysis code. Record source and EXE hashes, theme, fields, expected and actual request sets, and native screenshots. A partial matrix must not be called full graph acceptance.
+
+## Native export evidence
+
+With the compare-filter gesture, ANDROID_EBPF_QA_COMPARE_EXPORT supplies an output JSON path only when native render QA is explicitly active. QA applies the filters, clicks the actual Export comparison JSON button, and waits for the normal asynchronous write completion message before capture. The payload and writer are the production export path. The OS save-file dialog and filename typing are excluded from this automation. Use a new output path for every case and independently audit the saved file against raw NDJSON.

@@ -1364,6 +1364,9 @@ impl StudioApp {
                     self.push_diagnostic(error);
                 }
                 HostMessage::ViewExported(result) => {
+                    if self.render_qa.output.is_some() {
+                        self.render_qa.compare_export_complete = result.is_ok();
+                    }
                     self.status = match result {
                         Ok(path) => format!("Analysis view exported → {}", path.display()),
                         Err(error) => format!("View export failed: {error}"),

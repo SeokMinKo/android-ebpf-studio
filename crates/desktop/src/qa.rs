@@ -20,6 +20,7 @@ struct RenderQa {
     latency_expected: Option<LatencyRange>,
     latency_action_at: Option<Instant>,
     latency_elapsed_ms: Option<f64>,
+    compare_export_complete: bool,
     compare_ready_ms: Option<f64>,
     compare_rectangle: Option<[[f64; 2]; 2]>,
     compare_percentiles_open: bool,

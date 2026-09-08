@@ -147,7 +147,7 @@ cargo check -p android-ebpf-studio --features gui
 
 ## 상태와 제한
 
-Host 테스트, native renderer, 실제 설치 EXE, 물리 기기 결과는 별도 검증 범위입니다. 저장된 root 세션으로 Read FilePath와 렌더링 좌표를 대조했지만, 모든 기기에서 Exact 경로가 보장되거나 전체 그래프 매트릭스가 통과했다는 의미는 아닙니다. 2026-09-08에 root V2606A를 다시 연결하여 서로 다른 두 파일의 248회 O_DIRECT Read를 수집했습니다. 호출별 경로·PID·시간·크기는 모두 raw syscall 증거와 일치했고, 대응하는 249개 block Read의 bytes와 inode도 ground truth와 일치했습니다(한 호출은 두 block 요청으로 분할). 이 세션의 경로 분류는 Probable이며 Exact 검증 통과로 해석하지 않습니다. 전체 visible graph 상호작용 매트릭스는 계속 검증 중입니다.
+Host 테스트, native renderer, 실제 설치 EXE, 물리 기기 결과는 별도 검증 범위입니다. 저장된 root 세션으로 Read FilePath와 렌더링 좌표를 대조했지만, 모든 기기에서 Exact 경로가 보장되거나 전체 그래프 매트릭스가 통과했다는 의미는 아닙니다. 2026-09-08에 root V2606A를 다시 연결하여 서로 다른 두 파일의 248회 O_DIRECT Read를 수집했습니다. 호출별 경로·PID·시간·크기는 모두 raw syscall 증거와 일치했고, 대응하는 249개 block Read의 bytes와 inode도 ground truth와 일치했습니다(한 호출은 두 block 요청으로 분할). 이 세션의 경로 분류는 Probable이며 Exact 검증 통과로 해석하지 않습니다. 전체 visible graph 상호작용 매트릭스는 계속 검증 중입니다. Compare LBA는 저장된 두 물리 세션으로 All/Read/Write·시간·PID·process·device·file·빈 결과·복합 필터를 3개 테마에서 실행했고, 30개 설치 EXE 실행의 60개 pane에서 요청 key·Read/Write bytes·시간/MB 좌표가 독립 기준값과 일치했습니다. 이 수치 검증은 모든 화면의 시각 품질이나 전체 그래프 acceptance 통과를 뜻하지 않습니다. 재현용 필터/export QA 범위는 [Compare filter QA](docs/COMPARE_FILTER_QA.md)에 설명합니다.
 
 - Exact FilePath는 실제 경로와 인과 증거가 함께 있어야 합니다. inode만 있거나 시간상 가까운 경로 후보만 있는 요청을 Exact 경로로 승격하지 않습니다. Perfetto만으로 FilePath 검증을 통과 처리하지 않습니다.
 - 이후 pathless 관측이 앞서 기록된 경로를 덮지 않으며, 시간 기반 경로 추정은 Probable로 제한합니다. 서로 다른 후보는 미해결로 남길 수 있습니다.
