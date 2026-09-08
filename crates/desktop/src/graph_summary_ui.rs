@@ -264,7 +264,7 @@ fn distribution_ui(ui:&mut egui::Ui,d:&crate::graph_summary::Distribution,unit:&
     summary_plot(ui,ui.id().with("metric-histogram")).height(160.).allow_zoom(false).allow_drag(false)
         .grid_spacing(35.0..=120.0).x_grid_spacer(summary_grid).x_axis_formatter(summary_axis_tick)
         .x_axis_label(unit).y_axis_label(sample_label).show(ui,|plot| {
-            let bars=bins.iter().map(|b|egui_plot::Bar::new((b.lower+b.upper)*0.5,b.count as f64).width((b.upper-b.lower).max(b.lower.abs()*0.01).max(0.000001)*0.95)).collect();
+            let bars=bins.iter().map(|b|egui_plot::Bar::new((b.lower+b.upper)*0.5,b.count as f64).width(b.plot_width())).collect();
             plot.bar_chart(egui_plot::BarChart::new(sample_label,bars).color(accent()));
         });
     ui.small("Equal-width bins [lower, upper); final bin includes maximum. Constant samples form one bin.");
@@ -308,7 +308,7 @@ fn summary_plot(ui:&egui::Ui,id:impl egui::AsId)->egui_plot::Plot<'static> {
     studio_plot(id).width((ui.clip_rect().right()-ui.max_rect().left()).min(ui.available_width()).max(64.))
 }
 fn summary_axis_tick(mark:egui_plot::GridMark,range:&std::ops::RangeInclusive<f64>)->String {
-    if mark.value>*range.end()-(range.end()-range.start())*0.06 {String::new()}else{compact_tick(mark.value)}
+    if mark.value>*range.end()-(range.end()-range.start())*0.06 {String::new()}else{crate::graph_summary::summary_tick(mark.value,range.end()-range.start())}
 }
 
 fn compact_tick(value:f64)->String {

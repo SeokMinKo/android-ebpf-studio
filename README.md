@@ -2,6 +2,10 @@
 
 Windows에서 실행되는 Rust GUI가 `adb root` 가능한 Android Phone에 eBPF collector를 배포하고, block I/O를 실시간 로깅·분석하는 도구입니다.
 
+## Histogram 표시
+
+LBA Address 등 수치 분포의 막대는 실제 bin 구간 폭을 따릅니다. 큰 절대 주소나 매우 작은 bin에서도 이웃 구간을 덮지 않으며, 모든 값이 같은 분포만 단일 막대의 표시 폭을 사용합니다. Summary의 축 눈금은 표시 범위에 맞춰 소수 자릿수를 조정하여 가까운 주소와 작은 값도 구분합니다.
+
 ## 주요 기능
 
 - ADB 장치 검색과 serial 고정
