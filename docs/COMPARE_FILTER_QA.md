@@ -15,3 +15,12 @@ Keep fixture expectations outside product analysis code. Record source and EXE h
 ## Native export evidence
 
 With the compare-filter gesture, ANDROID_EBPF_QA_COMPARE_EXPORT supplies an output JSON path only when native render QA is explicitly active. QA applies the filters, clicks the actual Export comparison JSON button, and waits for the normal asynchronous write completion message before capture. The payload and writer are the production export path. The OS save-file dialog and filename typing are excluded from this automation. Use a new output path for every case and independently audit the saved file against raw NDJSON.
+
+The checked-in CLI also supports this flow (Node 24 or newer):
+
+~~~sh
+node scripts/check-compare-interaction.mjs <installed-exe> <baseline.ndjson> <current.ndjson> <new-output-dir> compare-filter 1 empty dark '{"operation":"read"}' export
+node --test scripts/compare-qa.test.mjs
+~~~
+
+The final argument is no-export (default) or export. Export always targets comparison-export.json inside the new output directory, and the gate compares its keys/count/bytes/filter with the visible selection report. This consistency check supplements, rather than replaces, an independent raw-data oracle.

@@ -3,14 +3,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { rectangleOracle } from './compare-rectangle-oracle.mjs';
 
 const parseExact = text => JSON.parse(text, (_k, v, c) => typeof v === 'number' && /^\d+$/.test(c?.source ?? '') && !Number.isSafeInteger(v) ? c.source : v);
-const [exeArg, baselineArg, currentArg, outArg, gesture, scaleArg = '1', areaMode = 'empty', theme = 'contrast'] = process.argv.slice(2);
-const gestures = ['compare-point', 'compare-percentiles', 'compare-area', 'compare-distributions', 'compare-files', 'compare-processes', 'compare-details', 'compare-zoom-back', 'compare-clear'];
+const [exeArg, baselineArg, currentArg, outArg, gesture, scaleArg = '1', areaMode = 'empty', theme = 'contrast', filterArg, exportMode = 'no-export'] = process.argv.slice(2);
+const gestures = ['compare-filter', 'compare-point', 'compare-percentiles', 'compare-area', 'compare-distributions', 'compare-files', 'compare-processes', 'compare-details', 'compare-zoom-back', 'compare-clear'];
 if (!exeArg || !baselineArg || !currentArg || !outArg || !gestures.includes(gesture)) {
-  throw Error('Usage: node scripts/check-compare-interaction.mjs <exe> <baseline.ndjson> <current.ndjson> <new-output-dir> <compare-gesture> [scale] [empty|populated] [light|dark|contrast]');
+  throw Error('Usage: node scripts/check-compare-interaction.mjs <exe> <baseline.ndjson> <current.ndjson> <new-output-dir> <compare-gesture> [scale] [empty|populated] [light|dark|contrast] [filter-json] [no-export|export]');
 }
 if (!['empty', 'populated'].includes(areaMode) || !['light','dark','contrast'].includes(theme)) throw Error('Invalid area mode or theme');
+if (!['no-export','export'].includes(exportMode)) throw Error('Invalid export mode');
+if ((filterArg !== undefined || exportMode === 'export') && gesture !== 'compare-filter') throw Error('Filter/export inputs require compare-filter');
+const filterConfig = filterArg === undefined ? undefined : JSON.parse(filterArg);
+if (filterConfig !== undefined && (!filterConfig || Array.isArray(filterConfig) || typeof filterConfig !== 'object')) throw Error('Filter JSON must be an object');
 const scale = Number(scaleArg);
 if (!Number.isFinite(scale) || scale < 0.5 || scale > 3) throw Error('Scale must be between 0.5 and 3');
 const [exe, baseline, current, out] = [exeArg, baselineArg, currentArg, outArg].map(p => path.resolve(p));
@@ -29,6 +34,8 @@ Object.assign(env, {
   ANDROID_EBPF_QA_GESTURE: gesture,
   ANDROID_EBPF_QA_SCALE: String(scale),
   ANDROID_EBPF_QA_DEPTH: '1',
+  ...(filterConfig !== undefined ? {ANDROID_EBPF_QA_COMPARE_FILTER: JSON.stringify(filterConfig)} : {}),
+  ...(exportMode === 'export' ? {ANDROID_EBPF_QA_COMPARE_EXPORT: path.join(out,'comparison-export.json')} : {}),
   ...(areaMode === 'populated' ? { ANDROID_EBPF_QA_AREA_FULL_HEIGHT: '1' } : {}),
 });
 const child = spawn(exe, [], { env, cwd: path.dirname(exe), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -55,33 +62,17 @@ if (gesture === 'compare-point') checks.selection_isolated = a?.selected === 1 &
 if (gesture === 'compare-clear') checks.clear_isolated = a?.selected === 0 && b?.selected === b?.retained;
 if (gesture === 'compare-zoom-back') checks.restored = a?.zoom_depth === 0 && b?.zoom_depth === 0;
 
-// Independent raw pairing and rectangle membership; no application analysis imports.
-function rectangleOracle(source, pane, rectangle) {
-  const pending = new Map(), ambiguous = new Set(), rows = [];
-  let origin = Infinity;
-  for (const line of fs.readFileSync(source, 'utf8').trim().split(/\r?\n/)) {
-    const e = parseExact(line).event, d = e?.data;
-    if (!d) continue;
-    const t = d.ts_ns ?? d.start_ts_ns;
-    if (typeof t === 'number') origin = Math.min(origin, t);
-    const id = [d.request_id, d.device_major, d.device_minor].join(':');
-    if (e.kind === 'block_issue') {
-      if (pending.has(id)) { ambiguous.add(id); pending.delete(id); }
-      else if (!ambiguous.has(id)) pending.set(id, d);
-    }
-    if (e.kind === 'block_complete') {
-      const i = pending.get(id); pending.delete(id);
-      if (ambiguous.delete(id) || !i || d.ts_ns < i.ts_ns || d.ts_ns-i.ts_ns > 30e9) continue;
-      rows.push({ key: [String(i.request_id), String(i.ts_ns), String(i.device_major), String(i.device_minor)], end: d.ts_ns, sector: i.sector, bytes: i.bytes, op: i.operation });
-    }
+if (exportMode === 'export') {
+  const target = path.join(out,'comparison-export.json');
+  checks.export_completed = c?.export_complete === true && fs.existsSync(target);
+  if (checks.export_completed) {
+    const saved = parseExact(fs.readFileSync(target,'utf8'));
+    const keys = ks => ks.map(k=>k.map(String).join(':')).sort();
+    checks.export_matches_visible_selection = saved.format === 'android-ebpf-comparison' && ['baseline','current'].every(side => {
+      const p=saved[side], v=c[side];
+      return p.count===v.selected && p.read.bytes===v.read_bytes && p.write.bytes===v.write_bytes && p.origin_ns===v.origin_ns && JSON.stringify(p.filters)===JSON.stringify(v.filter) && JSON.stringify(keys(p.selected_request_keys))===JSON.stringify(keys(v.selected_keys));
+    });
   }
-  const selected = rows.filter(r => {
-    const x = (r.end-origin)/1e6, y = r.sector*512/1e6;
-    return x >= rectangle[0][0] && x <= rectangle[1][0] && y >= rectangle[0][1] && y <= rectangle[1][1];
-  });
-  const normalize = keys => keys.map(k => k.map(String).join(':')).sort();
-  const expected = { count: selected.length, keys: normalize(selected.map(r=>r.key)), read_bytes: selected.filter(r=>r.op==='read').reduce((n,r)=>n+r.bytes,0), write_bytes: selected.filter(r=>r.op==='write').reduce((n,r)=>n+r.bytes,0) };
-  return { expected, actual: { count:pane.selected, keys:normalize(pane.selected_keys??[]), read_bytes:pane.read_bytes, write_bytes:pane.write_bytes }, origin, origin_matches:origin===pane.origin_ns, axes_supported:JSON.stringify(pane.axes)===JSON.stringify(['Time (ms)','Address (MB)']) };
 }
 let rectangleAudit;
 if (gesture === 'compare-area') {
