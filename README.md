@@ -6,6 +6,12 @@ Windows에서 실행되는 Rust GUI가 `adb root` 가능한 Android Phone에 eBP
 
 LBA Address 등 수치 분포의 막대는 실제 bin 구간 폭을 따릅니다. 큰 절대 주소나 매우 작은 bin에서도 이웃 구간을 덮지 않으며, 모든 값이 같은 분포만 단일 막대의 표시 폭을 사용합니다. Summary의 축 눈금은 표시 범위에 맞춰 소수 자릿수를 조정하여 가까운 주소와 작은 값도 구분합니다.
 
+## Raw block collector 검증 상태
+
+지원되는 64-bit Android 커널에서는 BTF로 request 구조와 callback 타입을 검증한 뒤 raw block tracepoint를 사용합니다. 완료 probe를 먼저 연결하고, 부분 완료 bytes를 누적하며, worker가 대신 발행한 요청은 동일 request의 큐 등록자 PID/TID/UID를 보존해 필터링합니다. raw probe를 사용할 수 없으면 연결한 프로그램을 해제한 뒤 기존 tracepoint로 되돌아갑니다.
+
+V2606A root 기기의 CPU 고정 없는 12,500회 O_DIRECT 읽기에서 1,088,000,000 bytes와 13,476개 paired block 요청을 독립 대조했습니다. 설치 desktop EXE의 LBA/CSV 경로는 전부 Probable로 일치했고, 이번 block 요청의 unmatched와 raw callback 누락은 0이었습니다. 이 결과는 전체 기능 acceptance 완료를 뜻하지 않습니다. SCSI/UFS callback 누락, 종료 직후 마지막 syscall의 path snapshot 부재, fallback 실패 주입, 모든 그래프 조합의 검증은 남아 있습니다. request 포인터만으로 FilePath를 Exact로 올리지 않습니다.
+
 ## 주요 기능
 
 - ADB 장치 검색과 serial 고정
