@@ -19,6 +19,18 @@ pub struct HistogramBin {
     pub count: usize,
 }
 
+impl HistogramBin {
+    pub fn plot_width(&self) -> f64 {
+        let span = self.upper - self.lower;
+        if span > 0.0 {
+            span * 0.95
+        } else {
+            // Constant samples have no interval; give their single bar a visible width.
+            (self.lower.abs() * 0.01).max(0.000001) * 0.95
+        }
+    }
+}
+
 impl Distribution {
     pub fn observe(&mut self, value: Option<f64>) {
         match value.filter(|v| v.is_finite()) {
