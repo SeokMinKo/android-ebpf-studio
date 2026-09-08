@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 
 const parseExact = text => JSON.parse(text, (_k, v, c) => typeof v === 'number' && /^\d+$/.test(c?.source ?? '') && !Number.isSafeInteger(v) ? c.source : v);
 const [exeArg, baselineArg, currentArg, outArg, gesture, scaleArg = '1', areaMode = 'empty', theme = 'contrast'] = process.argv.slice(2);
-const gestures = ['compare-point', 'compare-area', 'compare-distributions', 'compare-files', 'compare-processes', 'compare-details', 'compare-zoom-back', 'compare-clear'];
+const gestures = ['compare-point', 'compare-percentiles', 'compare-area', 'compare-distributions', 'compare-files', 'compare-processes', 'compare-details', 'compare-zoom-back', 'compare-clear'];
 if (!exeArg || !baselineArg || !currentArg || !outArg || !gestures.includes(gesture)) {
   throw Error('Usage: node scripts/check-compare-interaction.mjs <exe> <baseline.ndjson> <current.ndjson> <new-output-dir> <compare-gesture> [scale] [empty|populated] [light|dark|contrast]');
 }

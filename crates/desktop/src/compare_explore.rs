@@ -151,6 +151,7 @@ impl StudioApp {
                 "compare-files" => self.compare_explore.tab == CompareTab::Files,
                 "compare-processes" => self.compare_explore.tab == CompareTab::Processes,
                 "compare-distributions" => self.compare_explore.tab == CompareTab::Distributions,
+                "compare-percentiles" => self.render_qa.compare_percentiles_open,
                 "compare-details" => self.compare_explore.tab == CompareTab::Details,
                 _ => false,
             };
@@ -197,6 +198,7 @@ impl StudioApp {
                 "compare-files" => "Compare Files",
                 "compare-processes" => "Compare Processes",
                 "compare-distributions" => "Compare Distributions",
+                "compare-percentiles" => "Compare Percentiles",
                 "compare-details" => "Compare I/O details",
                 _ => return,
             };
@@ -655,7 +657,7 @@ fn compare_summary_ui(
         .zip(current.selection.summary.as_ref())
     {
         match state.tab {
-            CompareTab::Metrics => compare_metrics(ui, a, b),
+            CompareTab::Metrics => compare_metrics(ui, a, b, qa),
             CompareTab::Files | CompareTab::Processes => {
                 let tab = if state.tab == CompareTab::Files {
                     InspectorTab::Files
@@ -1080,7 +1082,7 @@ fn compare_pane(
     .inner
 }
 
-fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary) {
+fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary, qa: &mut RenderQa) {
     if a.unplaced_time_count > 0 || b.unplaced_time_count > 0 {
         ui.label(format!("Unsupported-clock I/O: Baseline {} · Current {}. Span/throughput are unavailable for an affected selection; count and volume remain complete.",a.unplaced_time_count,b.unplaced_time_count));
     }
@@ -1134,7 +1136,7 @@ fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary
                     });
                 });
         });
-    ui.collapsing("Read / Write latency percentiles", |ui| {
+    let percentiles = ui.collapsing("Read / Write latency percentiles", |ui| {
         egui::ScrollArea::horizontal()
             .id_salt("compare-timing-scroll")
             .show(ui, |ui| {
@@ -1175,6 +1177,10 @@ fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary
                     });
             });
     });
+    if qa.output.is_some() {
+        qa.inspector_buttons.insert("Compare Percentiles".into(), percentiles.header_response.rect.center());
+        qa.compare_percentiles_open = percentiles.body_returned.is_some();
+    }
     ui.small("Latency: insert (or issue) to completion; exact nearest-rank percentiles. MiB/s uses each selection's earliest known insert/issue (completion if unavailable) to latest completion span. A selection containing unsupported-clock I/O has no span or throughput. Unknown pre-completion time is excluded. Percentiles include valid timing samples only. Empty/zero-span values are unavailable (—). No event pairing or file identity equivalence is implied.");
 }
 
