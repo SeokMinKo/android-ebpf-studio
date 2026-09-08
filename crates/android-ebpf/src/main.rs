@@ -9,19 +9,28 @@ use android_ebpf_types::{
     LAYER_SCHEDULER, LAYER_SCSI, LAYER_UFS, LAYER_UIC, MODE_BALANCED, MODE_BASIC, MODE_DEEP,
     MODE_RAW_ALL, OFFSET_MISSING, OP_DISCARD, OP_FLUSH, OP_OTHER, OP_READ, OP_WRITE, ORIGIN_FILE,
     ORIGIN_INCOMPLETE, ORIGIN_INODE_GENERATION_VALID, ORIGIN_WRITEBACK, PHASE_BEGIN, PHASE_END,
-    PHASE_INSTANT, PipelineTraceLayout, RawFilterConfig, RawSyscallLayout, STACK_ID_UNAVAILABLE,
-    SchedulerWaitLayout, TraceLayout, scheduler_filter_supported,
+    PHASE_INSTANT, PipelineTraceLayout, RawBlockLayout, RawFilterConfig, RawSyscallLayout,
+    STACK_ID_UNAVAILABLE, SchedulerWaitLayout, TraceLayout, scheduler_filter_supported,
 };
 use aya_ebpf::{
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
         bpf_get_smp_processor_id, bpf_ktime_get_ns, bpf_probe_read_kernel,
     },
-    macros::{btf_tracepoint, fentry, fexit, map, tracepoint},
+    macros::{btf_tracepoint, fentry, fexit, map, raw_tracepoint, tracepoint},
     maps::{Array, HashMap, PerCpuArray, RingBuf, StackTrace},
     programs::tracing::StackIdContext,
-    programs::{BtfTracePointContext, FEntryContext, FExitContext, TracePointContext},
+    programs::{
+        BtfTracePointContext, FEntryContext, FExitContext, RawTracePointContext, TracePointContext,
+    },
 };
+
+use android_ebpf_types::raw_completion::CompletionState;
+
+#[map]
+static RAW_BLOCK_LAYOUT: Array<RawBlockLayout> = Array::with_max_entries(1, 0);
+#[map]
+static RAW_COMPLETIONS: HashMap<u64, CompletionState> = HashMap::with_max_entries(65_536, 0);
 
 const MAX_REQUEST_ORIGINS: u8 = 8;
 
@@ -820,6 +829,108 @@ fn emit_pipeline(
     Ok(0)
 }
 
+#[raw_tracepoint]
+pub fn raw_block_issue(ctx: RawTracePointContext) -> u32 {
+    handle_raw_block(ctx, KIND_BLOCK_ISSUE).unwrap_or(0)
+}
+#[raw_tracepoint]
+pub fn raw_block_insert(ctx: RawTracePointContext) -> u32 {
+    handle_raw_block(ctx, KIND_BLOCK_INSERT).unwrap_or(0)
+}
+#[raw_tracepoint]
+pub fn raw_block_complete(ctx: RawTracePointContext) -> u32 {
+    handle_raw_block(ctx, KIND_BLOCK_COMPLETE).unwrap_or(0)
+}
+
+fn handle_raw_block(ctx: RawTracePointContext, kind: u8) -> Result<u32, i32> {
+    let l = RAW_BLOCK_LAYOUT.get(0).ok_or(1_i32)?;
+    let request_id: u64 = ctx.arg(0);
+    if request_id == 0 {
+        return Err(1);
+    }
+    let queue = read_kernel_u64(request_id, l.request_queue)?;
+    let disk = read_kernel_u64(queue, l.queue_disk)?;
+    let device = if disk == 0 {
+        0
+    } else {
+        (read_kernel_u32(disk, l.disk_major)? << 20) | read_kernel_u32(disk, l.disk_minor)?
+    };
+    let sector = read_kernel_u64(request_id, l.request_sector)?;
+    let bytes = read_kernel_u32(request_id, l.request_bytes)?;
+    let operation = match read_kernel_u32(request_id, l.request_flags)? & 255 {
+        0 => OP_READ,
+        1 => OP_WRITE,
+        2 => OP_FLUSH,
+        3 => OP_DISCARD,
+        _ => OP_OTHER,
+    };
+    let mut status = 0;
+    if kind == KIND_BLOCK_ISSUE {
+        RAW_COMPLETIONS
+            .insert(&request_id, &CompletionState::new(bytes), 0)
+            .map_err(|_| 1_i32)?;
+    } else if kind == KIND_BLOCK_COMPLETE {
+        let completed: u32 = ctx.arg(2);
+        let raw_status: u8 = ctx.arg(1);
+        // Linux blk_status_to_errno for defined common status values. Reserved or
+        // unknown values remain failures, never a manufactured successful request.
+        status = match raw_status {
+            0 => 0,
+            1 => -95,
+            2 => -110,
+            3 => -28,
+            4 => -67,
+            5 => -121,
+            6 => -52,
+            7 => -61,
+            8 => -84,
+            9 => -12,
+            10 => -5,
+            11 => -78,
+            12 => -11,
+            13 => -16,
+            14 => -109,
+            15 => -75,
+            16 => -19,
+            17 => -62,
+            19 => -22,
+            _ => -5,
+        };
+        let Some(mut state) = (unsafe { RAW_COMPLETIONS.get(&request_id) }).copied() else {
+            return Ok(0);
+        };
+        match state.advance(completed, status) {
+            Ok(false) => {
+                RAW_COMPLETIONS
+                    .insert(&request_id, &state, 0)
+                    .map_err(|_| 1_i32)?;
+                return Ok(0);
+            }
+            Ok(true) => {
+                status = state.error;
+                let _ = RAW_COMPLETIONS.remove(&request_id);
+            }
+            Err(_) => {
+                return Err(1);
+            }
+        }
+    }
+    process_block(
+        ctx,
+        BlockDecoded {
+            kind,
+            device,
+            sector,
+            sectors: bytes / 512,
+            bytes,
+            operation,
+            request_id,
+            correlation_exact: 1,
+            status,
+        },
+    )
+}
+
 fn handle_block(
     ctx: TracePointContext,
     kind: u8,
@@ -849,10 +960,59 @@ fn handle_block(
     } else {
         read_i32(&ctx, layout.status_offset)?
     };
+    process_block(
+        ctx,
+        BlockDecoded {
+            kind,
+            device,
+            sector,
+            sectors,
+            bytes,
+            operation,
+            request_id,
+            correlation_exact,
+            status,
+        },
+    )
+}
+struct BlockDecoded {
+    kind: u8,
+    device: u32,
+    sector: u64,
+    sectors: u32,
+    bytes: u32,
+    operation: u8,
+    request_id: u64,
+    correlation_exact: u8,
+    status: i32,
+}
+#[inline(always)]
+fn process_block<C: StackIdContext>(ctx: C, decoded: BlockDecoded) -> Result<u32, i32> {
+    let BlockDecoded {
+        kind,
+        device,
+        sector,
+        sectors,
+        bytes,
+        operation,
+        request_id,
+        correlation_exact,
+        status,
+    } = decoded;
     let pid_tgid = bpf_get_current_pid_tgid();
-    let pid = (pid_tgid >> 32) as u32;
-    let tid = pid_tgid as u32;
-    let uid = bpf_get_current_uid_gid() as u32;
+    // A queued request may be dispatched by a worker. Preserve its original
+    // issuer only with pointer correlation and a still-unissued queue record.
+    let queued = if correlation_exact == 1 && kind == KIND_BLOCK_ISSUE {
+        unsafe { BLOCK_STARTS.get(&request_id) }
+            .copied()
+            .filter(|s| s.issue_ts_ns == 0)
+    } else {
+        None
+    };
+    let pid = queued.map_or((pid_tgid >> 32) as u32, |s| s.pid);
+    let tid = queued.map_or(pid_tgid as u32, |s| s.tid);
+    let uid = queued.map_or(bpf_get_current_uid_gid() as u32, |s| s.uid);
+    let comm = queued.map_or_else(|| bpf_get_current_comm().unwrap_or([0; 16]), |s| s.comm);
     let ts_ns = unsafe { bpf_ktime_get_ns() };
     let mut event = KernelEvent {
         ts_ns,
@@ -877,7 +1037,7 @@ fn handle_block(
         pipeline_layer: 0,
         pipeline_phase: 0,
         reserved: 0,
-        comm: bpf_get_current_comm().unwrap_or([0; 16]),
+        comm,
         ..KernelEvent::default()
     };
     let config = active_filter().unwrap_or(RawFilterConfig {
@@ -901,6 +1061,7 @@ fn handle_block(
                 bytes,
                 pid,
                 tid,
+                uid,
                 cpu: event.cpu,
                 operation,
                 correlation_exact,
@@ -933,6 +1094,7 @@ fn handle_block(
                 bytes,
                 pid,
                 tid,
+                uid,
                 cpu: event.cpu,
                 operation,
                 correlation_exact,

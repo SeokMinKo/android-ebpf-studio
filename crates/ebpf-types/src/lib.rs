@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod raw_completion;
+
 pub const OFFSET_MISSING: u16 = u16::MAX;
 pub const KIND_BLOCK_ISSUE: u8 = 1;
 pub const KIND_BLOCK_COMPLETE: u8 = 2;
@@ -43,6 +45,20 @@ pub const MODE_DEEP: u8 = 3;
 pub const MODE_RAW_ALL: u8 = 4;
 pub const HISTOGRAM_BUCKETS: usize = 32;
 pub const STACK_ID_UNAVAILABLE: u64 = u64::MAX;
+
+/// Validated offsets for a 64-bit target kernel raw block tracepoint context.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawBlockLayout {
+    pub request_queue: u16,
+    pub request_flags: u16,
+    pub request_bytes: u16,
+    pub request_sector: u16,
+    pub queue_disk: u16,
+    pub disk_major: u16,
+    pub disk_minor: u16,
+    pub reserved: u16,
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -235,6 +251,7 @@ pub struct BlockStart {
     pub bytes: u32,
     pub pid: u32,
     pub tid: u32,
+    pub uid: u32,
     pub cpu: u32,
     pub operation: u8,
     pub correlation_exact: u8,

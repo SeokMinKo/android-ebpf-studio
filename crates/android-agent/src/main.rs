@@ -14,6 +14,7 @@ use std::{
 
 mod btf_layout;
 mod probe_order;
+mod raw_block;
 mod runtime_health;
 
 use android_ebpf_agent::trace_format::{
@@ -955,31 +956,65 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
         "LAYOUT_CONFIG_FAILED",
         configure_layout(&mut bpf, "COMPLETE_LAYOUT", config.complete),
     )?;
-    probe_order::attach_block_pair(|probe| {
-        required_step(
+    let raw_fallback = raw_block::attach(&mut bpf)?;
+    if let Some(reason) = raw_fallback {
+        emit_diagnostic(
             session_id,
+            DiagnosticLevel::Warn,
             "probe.attach",
-            "PROBE_ATTACH_FAILED",
-            attach(&mut bpf, probe, "block", probe),
-        )
-    })?;
-    if let Some(layout) = config.insert {
-        let result = configure_layout(&mut bpf, "INSERT_LAYOUT", layout)
-            .and_then(|_| attach(&mut bpf, "block_rq_insert", "block", "block_rq_insert"));
-        if !emit_optional_probe_result(
-            session_id,
-            PipelineLayer::BlockQueue,
-            "block/block_rq_insert",
-            result,
-        ) {
-            config.capabilities.block_insert = false;
-            mark_attach_failed(
-                &mut config.capabilities,
+            "RAW_BLOCK_FALLBACK",
+            "fallback",
+            Some(reason),
+        );
+        probe_order::attach_block_pair(|probe| {
+            required_step(
+                session_id,
+                "probe.attach",
+                "PROBE_ATTACH_FAILED",
+                attach(&mut bpf, probe, "block", probe),
+            )
+        })?;
+        if let Some(layout) = config.insert {
+            let result = configure_layout(&mut bpf, "INSERT_LAYOUT", layout)
+                .and_then(|_| attach(&mut bpf, "block_rq_insert", "block", "block_rq_insert"));
+            if !emit_optional_probe_result(
+                session_id,
                 PipelineLayer::BlockQueue,
-                "block_rq_insert",
-                true,
-            );
+                "block/block_rq_insert",
+                result,
+            ) {
+                config.capabilities.block_insert = false;
+                mark_attach_failed(
+                    &mut config.capabilities,
+                    PipelineLayer::BlockQueue,
+                    "block_rq_insert",
+                    true,
+                );
+            }
         }
+    } else {
+        config.capabilities.block_insert = true;
+        for probe in &mut config.capabilities.attach_plan {
+            if probe.group == "block"
+                && matches!(
+                    probe.event_or_function.as_str(),
+                    "block_rq_insert" | "block_rq_issue" | "block_rq_complete"
+                )
+            {
+                probe.probe_kind = "raw_tracepoint".into();
+                probe.state = CapabilityState::Measured;
+                probe.format_hash = None;
+                probe.reason = Some("Target BTF signature and structure layout validated; raw block probes attached".into());
+            }
+        }
+        emit_diagnostic(
+            session_id,
+            DiagnosticLevel::Info,
+            "probe.attach",
+            "RAW_BLOCK_ATTACHED",
+            "success",
+            Some("raw block issue/insert/complete; target BTF validated".into()),
+        );
     }
     if let Some(layout) = config.syscall {
         let identity_result = btf_layout::file_identity_layout_from_sysfs(Path::new(VMLINUX_BTF))
