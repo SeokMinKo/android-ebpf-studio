@@ -109,6 +109,7 @@ impl StudioApp {
         if baseline.viewer.selection.pending.is_some() || current.selection.pending.is_some() {
             return;
         }
+        let export_requested = gesture == "compare-filter" && std::env::var_os("ANDROID_EBPF_QA_COMPARE_EXPORT").is_some();
         let step = self.render_qa.input_step;
         if step >= 7 {
             return;
@@ -121,7 +122,16 @@ impl StudioApp {
                 self.compare_explore.same_rectangle = true;
             }
             if gesture == "compare-filter" {
-                self.compare_explore.shared.operation = Some(IoOperation::Read);
+                match std::env::var("ANDROID_EBPF_QA_COMPARE_FILTER") {
+                    Ok(json) => match serde_json::from_str::<CompareQaFilter>(&json) {
+                        Ok(config) => {
+                            self.compare_explore.shared = config.shared();
+                            self.compare_explore.local = [config.baseline.filter(), config.current.filter()];
+                        }
+                        Err(error) => { self.compare_explore.error = Some(format!("Invalid QA filter: {error}")); return; }
+                    },
+                    Err(_) => self.compare_explore.shared.operation = Some(IoOperation::Read),
+                }
             }
             if gesture == "compare-empty" {
                 self.compare_explore.local[0].file = "does-not-exist.fixture".into();
@@ -139,14 +149,10 @@ impl StudioApp {
                         && second
                             .is_some_and(|s| s.keys.len() == current.analyzer.completed_ios().len())
                 }
-                "compare-area" => first.zip(second).is_some_and(|(a, b)| {
-                    !a.keys.is_empty()
-                        && !b.keys.is_empty()
-                        && a.keys.len() < baseline.viewer.analyzer.completed_ios().len()
-                }),
+                "compare-area" => qa_compare_area_ready(first, second, self.render_qa.compare_rectangle),
                 "compare-filter" => {
-                    baseline.viewer.query.operation == Some(IoOperation::Read)
-                        && current.query.operation == Some(IoOperation::Read)
+                    baseline.viewer.query == compare_filter(&self.compare_explore.shared, &self.compare_explore.local[0])
+                        && current.query == compare_filter(&self.compare_explore.shared, &self.compare_explore.local[1])
                 }
                 "compare-empty" => {
                     first.is_some_and(|s| s.keys.is_empty())
@@ -155,12 +161,18 @@ impl StudioApp {
                 "compare-files" => self.compare_explore.tab == CompareTab::Files,
                 "compare-processes" => self.compare_explore.tab == CompareTab::Processes,
                 "compare-distributions" => self.compare_explore.tab == CompareTab::Distributions,
+                "compare-percentiles" => qa_percentile_ready(self.render_qa.compare_percentiles_open, self.render_qa.compare_percentiles_opened_at.map_or(Duration::ZERO, |t| t.elapsed())),
                 "compare-details" => self.compare_explore.tab == CompareTab::Details,
                 _ => false,
             };
-            if done {
+            if !done { return; }
+            if !export_requested {
                 self.render_qa.input_step = 7;
+                return;
             }
+        }
+        if export_requested && step == 6 {
+            if self.render_qa.compare_export_complete { self.render_qa.input_step = 7; }
             return;
         }
         if gesture == "compare-zoom-back" && step == 6 {
@@ -181,15 +193,16 @@ impl StudioApp {
                 .get("Compare Baseline graph")
                 .map(|(r, _)| {
                     if step == 0 {
-                        egui::pos2(r.left() + r.width() * 0.05, r.top() + r.height() * 0.20)
+                        egui::pos2(r.left() + r.width() * 0.05, r.top() + r.height() * if std::env::var_os("ANDROID_EBPF_QA_AREA_FULL_HEIGHT").is_some() { 0.01 } else { 0.20 })
                     } else {
-                        egui::pos2(r.left() + r.width() * 0.70, r.top() + r.height() * 0.85)
+                        egui::pos2(r.left() + r.width() * 0.70, r.top() + r.height() * if std::env::var_os("ANDROID_EBPF_QA_AREA_FULL_HEIGHT").is_some() { 0.99 } else { 0.85 })
                     }
                 })
         } else {
             let key = match gesture {
                 "compare-point" => "Baseline point",
                 "compare-clear" => "Baseline Clear",
+                "compare-filter" if export_requested && step >= 3 => "Compare Export",
                 "compare-filter" | "compare-empty" => "Compare Apply",
                 "compare-zoom-back" => {
                     if step < 3 {
@@ -201,6 +214,7 @@ impl StudioApp {
                 "compare-files" => "Compare Files",
                 "compare-processes" => "Compare Processes",
                 "compare-distributions" => "Compare Distributions",
+                "compare-percentiles" => "Compare Percentiles",
                 "compare-details" => "Compare I/O details",
                 _ => return,
             };
@@ -265,7 +279,7 @@ impl StudioApp {
                 "explorer_coordinates":std::env::var_os("ANDROID_EBPF_QA_DEPTH").and_then(|_|v.explorer_view.as_ref().map(|view|view.groups.iter().flat_map(|(_, points)|points.iter().map(|p|p.coordinates)).collect::<Vec<_>>())),
             })
         };
-        serde_json::json!({"ready_ms":self.render_qa.compare_ready_ms,"baseline":self.comparison.as_ref().map(|b|describe(&b.viewer)),"current":self.compare_explore.current.as_ref().map(|b|describe(b)),"actions":self.compare_explore.actions,"linked":self.compare_explore.linked_bounds,"error":self.compare_explore.error})
+        serde_json::json!({"export_complete":self.render_qa.compare_export_complete,"rectangle":self.render_qa.compare_rectangle,"ready_ms":self.render_qa.compare_ready_ms,"baseline":self.comparison.as_ref().map(|b|describe(&b.viewer)),"current":self.compare_explore.current.as_ref().map(|b|describe(b)),"actions":self.compare_explore.actions,"linked":self.compare_explore.linked_bounds,"error":self.compare_explore.error})
     }
 
     fn comparison_viewer(&self) -> StudioApp {
@@ -570,6 +584,13 @@ fn compare_graphs(
     if state.linked_bounds {
         copy_bounds(current, baseline);
     }
+    if qa.output.is_some() {
+        for request in requests.iter().flatten() {
+            if let SelectionRequest::Rectangle { min, max } = request {
+                qa.compare_rectangle = Some([*min, *max]);
+            }
+        }
+    }
     if state.same_rectangle {
         if let Some(request @ SelectionRequest::Rectangle { .. }) = requests[0] {
             current.begin_selection(request);
@@ -589,19 +610,21 @@ fn compare_summary_ui(
     tx: &crossbeam_channel::Sender<HostMessage>,
 ) {
     ui.heading("Selection Summary");
-    if ui
+    let export_button = ui
         .add_enabled(
             baseline.selection.pending.is_none()
                 && current.selection.pending.is_none()
                 && baseline.selection.summary.is_some()
                 && current.selection.summary.is_some(),
             egui::Button::new("Export comparison JSON"),
-        )
-        .clicked()
-        && let Some(path) = rfd::FileDialog::new()
+        );
+    qa.inspector_buttons.insert("Compare Export".into(), export_button.rect.center());
+    let qa_export_path = qa.output.as_ref().and_then(|_| std::env::var_os("ANDROID_EBPF_QA_COMPARE_EXPORT")).map(PathBuf::from);
+    if export_button.clicked()
+        && let Some(path) = qa_export_path.or_else(|| rfd::FileDialog::new()
             .set_file_name("storage-session-comparison.json")
             .add_filter("Comparison JSON", &["json"])
-            .save_file()
+            .save_file())
     {
         let payload = compare_export_payload(baseline, current);
         let sources = [baseline.session_path.clone(), current.session_path.clone()];
@@ -652,7 +675,7 @@ fn compare_summary_ui(
         .zip(current.selection.summary.as_ref())
     {
         match state.tab {
-            CompareTab::Metrics => compare_metrics(ui, a, b),
+            CompareTab::Metrics => compare_metrics(ui, a, b, qa),
             CompareTab::Files | CompareTab::Processes => {
                 let tab = if state.tab == CompareTab::Files {
                     InspectorTab::Files
@@ -1077,7 +1100,7 @@ fn compare_pane(
     .inner
 }
 
-fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary) {
+fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary, qa: &mut RenderQa) {
     if a.unplaced_time_count > 0 || b.unplaced_time_count > 0 {
         ui.label(format!("Unsupported-clock I/O: Baseline {} · Current {}. Span/throughput are unavailable for an affected selection; count and volume remain complete.",a.unplaced_time_count,b.unplaced_time_count));
     }
@@ -1131,7 +1154,7 @@ fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary
                     });
                 });
         });
-    ui.collapsing("Read / Write latency percentiles", |ui| {
+    let percentiles = ui.collapsing("Read / Write latency percentiles", |ui| {
         egui::ScrollArea::horizontal()
             .id_salt("compare-timing-scroll")
             .show(ui, |ui| {
@@ -1172,6 +1195,15 @@ fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary
                     });
             });
     });
+    if qa.output.is_some() {
+        qa.inspector_buttons.insert("Compare Percentiles".into(), percentiles.header_response.rect.center());
+        qa.compare_percentiles_open = percentiles.body_returned.is_some();
+        if qa.compare_percentiles_open {
+            qa.compare_percentiles_opened_at.get_or_insert_with(Instant::now);
+        } else {
+            qa.compare_percentiles_opened_at = None;
+        }
+    }
     ui.small("Latency: insert (or issue) to completion; exact nearest-rank percentiles. MiB/s uses each selection's earliest known insert/issue (completion if unavailable) to latest completion span. A selection containing unsupported-clock I/O has no span or throughput. Unknown pre-completion time is excluded. Percentiles include valid timing samples only. Empty/zero-span values are unavailable (—). No event pairing or file identity equivalence is implied.");
 }
 
@@ -1770,5 +1802,55 @@ mod compare_explore_tests {
             });
         });
         output.textures_delta.clear();
+    }
+}
+
+fn qa_compare_area_ready(a: Option<&SelectionSummary>, b: Option<&SelectionSummary>, rectangle: Option<[[f64; 2]; 2]>) -> bool {
+    rectangle.is_some() && a.is_some() && b.is_some()
+}
+#[cfg(test)]
+mod compare_area_qa_tests {
+    use super::*;
+    #[test]
+    fn completed_empty_rectangle_is_a_valid_selection_result() {
+        let empty = SelectionSummary::default();
+        let rectangle = Some([[0.0, 0.0], [1.0, 1.0]]);
+        assert!(qa_compare_area_ready(Some(&empty), Some(&empty), rectangle));
+        assert!(!qa_compare_area_ready(None, Some(&empty), rectangle));
+        assert!(!qa_compare_area_ready(Some(&empty), Some(&empty), None));
+    }
+}
+
+fn qa_percentile_ready(open: bool, elapsed: Duration) -> bool {
+    open && elapsed >= Duration::from_millis(500)
+}
+#[cfg(test)]
+mod percentile_settle_tests {
+    use super::*;
+    #[test]
+    fn percentile_capture_waits_for_expansion_to_settle() {
+        assert!(!qa_percentile_ready(true, Duration::ZERO));
+        assert!(qa_percentile_ready(true, Duration::from_millis(500)));
+        assert!(!qa_percentile_ready(false, Duration::from_secs(1)));
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompareQaLocal { pid: u32, file: String, device: String }
+impl CompareQaLocal {
+    fn filter(&self) -> AnalysisFilter {
+        AnalysisFilter { pid:self.pid, file:self.file.clone(), device:self.device.clone(), ..Default::default() }
+    }
+}
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompareQaFilter {
+    operation: Option<IoOperation>, start_ms: f64, end_ms: f64, process: String,
+    baseline: CompareQaLocal, current: CompareQaLocal,
+}
+impl CompareQaFilter {
+    fn shared(&self) -> AnalysisFilter {
+        AnalysisFilter { operation:self.operation, start_ms:self.start_ms, end_ms:self.end_ms, process:self.process.clone(), ..Default::default() }
     }
 }

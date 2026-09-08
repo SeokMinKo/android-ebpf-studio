@@ -1364,6 +1364,9 @@ impl StudioApp {
                     self.push_diagnostic(error);
                 }
                 HostMessage::ViewExported(result) => {
+                    if self.render_qa.output.is_some() {
+                        self.render_qa.compare_export_complete = result.is_ok();
+                    }
                     self.status = match result {
                         Ok(path) => format!("Analysis view exported → {}", path.display()),
                         Err(error) => format!("View export failed: {error}"),
@@ -4666,13 +4669,10 @@ fn file_origin_tooltip(origins: &[FileOriginView]) -> String {
         return "File: <unattributed>\nReason: no observed file identity or defensible file correlation for this request".into();
     }
 
-    let mut lines = Vec::with_capacity(origins.len().min(4) + 2);
-    lines.push(if origins.len() == 1 {
-        "File:".into()
-    } else {
-        format!("Files ({}):", origins.len())
-    });
-    for origin in origins.iter().take(4) {
+    // Collapse identical display evidence, not the underlying file identities.
+    // Distinct confidence and unresolved identity labels remain separate.
+    let mut labels = Vec::new();
+    for origin in origins {
         let path = origin
             .path
             .as_ref()
@@ -4685,13 +4685,19 @@ fn file_origin_tooltip(origins: &[FileOriginView]) -> String {
                     origin.file.fallback_label()
                 )
             });
-        lines.push(format!(
-            "  {path} [{}]",
-            edge_confidence_label(origin.confidence)
-        ));
+        let label = format!("  {path} [{}]", edge_confidence_label(origin.confidence));
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
     }
-    if origins.len() > 4 {
-        lines.push(format!("  +{} more", origins.len() - 4));
+    let mut lines = vec![if labels.len() == 1 {
+        "File:".into()
+    } else {
+        format!("File evidence ({}):", labels.len())
+    }];
+    lines.extend(labels.iter().take(4).cloned());
+    if labels.len() > 4 {
+        lines.push(format!("  +{} more", labels.len() - 4));
     }
     if origins.iter().any(|v| v.incomplete) {
         lines.push("FilePath Unresolved: collector dropped additional origins; listed file evidence is incomplete".into());
@@ -4976,6 +4982,38 @@ mod ui_tests {
         assert!(AxisMetric::Sector.is_storage_address());
         assert!(AxisMetric::AddressKiB.is_storage_address());
         assert!(!AxisMetric::TimeMs.is_storage_address());
+    }
+
+    #[test]
+    fn tooltip_deduplicates_equal_path_evidence_without_losing_confidence_or_incomplete() {
+        let origin = FileOriginView {
+            incomplete: false,
+            file: FileIdentity {
+                fs_device_major: 254,
+                fs_device_minor: 63,
+                inode: 42,
+                inode_generation: None,
+                mount_id: None,
+            },
+            path: Some(PathSnapshot {
+                path: Some("/data/known.bin".into()),
+                source: PathSource::ProcFd,
+                captured_ts_ns: 100,
+                deleted: false,
+            }),
+            confidence: EdgeConfidence::Probable,
+        };
+        let mut mounted = origin.clone();
+        mounted.file.mount_id = Some(138);
+        let text = file_origin_tooltip(&[origin.clone(), mounted.clone()]);
+        assert_eq!(text.matches("/data/known.bin").count(), 1);
+        assert!(!text.contains("Files (2)"));
+        mounted.incomplete = true;
+        assert!(file_origin_tooltip(&[origin.clone(), mounted]).contains("incomplete"));
+        let mut different = origin.clone();
+        different.confidence = EdgeConfidence::Exact;
+        let text = file_origin_tooltip(&[origin, different]);
+        assert!(text.contains("[Exact]") && text.contains("[Probable]"));
     }
 
     #[test]

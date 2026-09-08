@@ -20,7 +20,11 @@ struct RenderQa {
     latency_expected: Option<LatencyRange>,
     latency_action_at: Option<Instant>,
     latency_elapsed_ms: Option<f64>,
+    compare_export_complete: bool,
     compare_ready_ms: Option<f64>,
+    compare_rectangle: Option<[[f64; 2]; 2]>,
+    compare_percentiles_open: bool,
+    compare_percentiles_opened_at: Option<Instant>,
     started: Option<Instant>,
     regions: BTreeMap<String, (egui::Rect, egui::Rect)>,
     session_button: Option<egui::Pos2>,
@@ -674,6 +678,7 @@ impl StudioApp {
             self.compare_explore.needs_apply = true;
             self.compare_explore.fit = true;
             self.render_qa.compare_ready_ms = None;
+            self.render_qa.compare_rectangle = None;
         }
         if let Ok(filter) = std::env::var("ANDROID_EBPF_QA_FILTER") {
             match filter.as_str() {
@@ -950,21 +955,7 @@ impl StudioApp {
         } else if !self.render_qa.requested
             && (timed_out
                 || (self.render_qa.frames >= 40
-                    && self.selection.pending.is_none()
-                    && self.selection.all_pending.is_none()
-                    && (self.y_axis!=AxisMetric::SchedulerIoWait || (self.scheduler.pending.is_none() && self.scheduler.selected_pending.is_none()))
-                    && self.footprint.pending.is_none()
-                    && self.raw_log.pending.is_none()
-                    && self.compare_explore.pending.is_none()
-                    && self
-                        .comparison
-                        .as_ref()
-                        .is_none_or(|b| b.viewer.selection.pending.is_none())
-                    && self
-                        .compare_explore
-                        .current
-                        .as_ref()
-                        .is_none_or(|b| b.selection.pending.is_none())
+                    && self.qa_visible_work_ready()
                     && !self.render_qa.requested
                     && !self.is_running()
                     && (std::env::var_os("ANDROID_EBPF_QA_GESTURE").is_none()
@@ -1079,5 +1070,43 @@ mod live_capture_qa_tests {
         }
         assert_eq!(app.trend_view.as_ref().unwrap().1.coverage.iter().sum::<u64>(),count as u64);
         eprintln!("live overview: count={count} UI enqueue_ms={enqueue_ms:.2}, background result verified");
+    }
+}
+
+impl StudioApp {
+    fn qa_visible_work_ready(&self) -> bool {
+        self.selection.pending.is_none()
+                    // Whole-graph summary results are polled only by the Explore panel.
+                    && (self.page != Page::Explore || self.selection.all_pending.is_none())
+                    && (self.y_axis!=AxisMetric::SchedulerIoWait || (self.scheduler.pending.is_none() && self.scheduler.selected_pending.is_none()))
+                    && self.footprint.pending.is_none()
+                    && self.raw_log.pending.is_none()
+                    && self.compare_explore.pending.is_none()
+                    && self
+                        .comparison
+                        .as_ref()
+                        .is_none_or(|b| b.viewer.selection.pending.is_none())
+                    && self
+                        .compare_explore
+                        .current
+                        .as_ref()
+                        .is_none_or(|b| b.selection.pending.is_none())
+    }
+}
+
+#[cfg(test)]
+mod qa_readiness_tests {
+    use super::*;
+    #[test]
+    fn navigation_does_not_wait_for_hidden_explore_summary() {
+        let mut app = StudioApp { page: Page::Explore, ..Default::default() };
+        let (_tx, rx) = bounded(1);
+        app.selection.all_pending = Some((0, AxisMetric::TimeMs, AxisMetric::Sector,
+            SummaryWork { receiver: rx, cancelled: Arc::new(AtomicBool::new(false)) }));
+        assert!(!app.qa_visible_work_ready(), "visible summary must finish before capture");
+        app.page = Page::Investigate;
+        assert!(app.qa_visible_work_ready(), "hidden summary is only polled in Explore");
+        app.page = Page::Explore;
+        assert!(!app.qa_visible_work_ready(), "returning to Explore must still wait");
     }
 }
