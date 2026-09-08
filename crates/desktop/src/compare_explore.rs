@@ -121,7 +121,16 @@ impl StudioApp {
                 self.compare_explore.same_rectangle = true;
             }
             if gesture == "compare-filter" {
-                self.compare_explore.shared.operation = Some(IoOperation::Read);
+                match std::env::var("ANDROID_EBPF_QA_COMPARE_FILTER") {
+                    Ok(json) => match serde_json::from_str::<CompareQaFilter>(&json) {
+                        Ok(config) => {
+                            self.compare_explore.shared = config.shared();
+                            self.compare_explore.local = [config.baseline.filter(), config.current.filter()];
+                        }
+                        Err(error) => { self.compare_explore.error = Some(format!("Invalid QA filter: {error}")); return; }
+                    },
+                    Err(_) => self.compare_explore.shared.operation = Some(IoOperation::Read),
+                }
             }
             if gesture == "compare-empty" {
                 self.compare_explore.local[0].file = "does-not-exist.fixture".into();
@@ -141,8 +150,8 @@ impl StudioApp {
                 }
                 "compare-area" => qa_compare_area_ready(first, second, self.render_qa.compare_rectangle),
                 "compare-filter" => {
-                    baseline.viewer.query.operation == Some(IoOperation::Read)
-                        && current.query.operation == Some(IoOperation::Read)
+                    baseline.viewer.query == compare_filter(&self.compare_explore.shared, &self.compare_explore.local[0])
+                        && current.query == compare_filter(&self.compare_explore.shared, &self.compare_explore.local[1])
                 }
                 "compare-empty" => {
                     first.is_some_and(|s| s.keys.is_empty())
@@ -1814,5 +1823,25 @@ mod percentile_settle_tests {
         assert!(!qa_percentile_ready(true, Duration::ZERO));
         assert!(qa_percentile_ready(true, Duration::from_millis(500)));
         assert!(!qa_percentile_ready(false, Duration::from_secs(1)));
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompareQaLocal { pid: u32, file: String, device: String }
+impl CompareQaLocal {
+    fn filter(&self) -> AnalysisFilter {
+        AnalysisFilter { pid:self.pid, file:self.file.clone(), device:self.device.clone(), ..Default::default() }
+    }
+}
+#[derive(Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompareQaFilter {
+    operation: Option<IoOperation>, start_ms: f64, end_ms: f64, process: String,
+    baseline: CompareQaLocal, current: CompareQaLocal,
+}
+impl CompareQaFilter {
+    fn shared(&self) -> AnalysisFilter {
+        AnalysisFilter { operation:self.operation, start_ms:self.start_ms, end_ms:self.end_ms, process:self.process.clone(), ..Default::default() }
     }
 }
