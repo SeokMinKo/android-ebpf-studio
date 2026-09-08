@@ -178,3 +178,11 @@ and detailed local run logs are kept outside the public source repository.
 ## Current audit: BPF runtime misses
 
 See [BPF runtime health](BPF_RUNTIME_HEALTH.md). The full acceptance goal remains open. Known-file direct-read syscall evidence passed for 248 calls; only 242 were paired by the original collector in the first physical run. A native startup access violation also recurred once. Updated physical collector validation and the full graph matrix are still pending.
+
+## Root multipath revalidation (2026-09-08)
+
+Full acceptance remains incomplete. V2606A root collection matched 248 successful O_DIRECT reads across two absolute paths and three PIDs to raw syscall path/PID/time/size evidence. The corresponding 249 block Read requests matched ground-truth bytes and origin inode; one read split into two block requests. The 378 paired requests (249 Read, 129 Write) resolve as Probable, not Exact. Raw SHA-256: `3c74204ced97840a4fccbd89ebe8364ce829d1114dd11db8c2b94f0b27a3fd8f`.
+
+Installed-native checks have partial independent coordinate/bin/filter/CSV coverage. Full graph, theme and interaction acceptance is still pending. Compare area QA has a dataset-dependent empty rectangle and is not a PASS. Earlier single-file capture runtime misses remain recorded; a later zero-miss capture does not erase them.
+
+A tooltip fix deduplicates identical displayed path/confidence evidence without changing raw origins or confidence. A separate QA readiness regression reproduces a hidden Explore summary blocking screenshot completion after successful keyboard navigation to Investigate; only the hidden whole-graph summary wait is bypassed. The visible Explore summary still must finish. Parallel scheduler fixture filenames now include a process-local atomic sequence to avoid coarse clock collisions.
