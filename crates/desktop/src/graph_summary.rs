@@ -329,6 +329,26 @@ impl AddressAccumulator {
     }
 }
 
+/// Numeric labels for compact Summary plots, with precision set by the visible span.
+pub fn summary_tick(value: f64, span: f64) -> String {
+    if !value.is_finite() || !span.is_finite() || span <= 0.0 {
+        return value.to_string();
+    }
+    let (divisor, suffix) = if value.abs() >= 1e9 {
+        (1e9, "G")
+    } else if value.abs() >= 1e6 {
+        (1e6, "M")
+    } else if value.abs() >= 1e3 {
+        (1e3, "k")
+    } else {
+        (1.0, "")
+    };
+    // The Summary grid targets four intervals; retain enough digits for each.
+    let precision = (-(span / 4.0 / divisor).log10()).ceil().clamp(0.0, 16.0) as usize;
+    let scaled = value / divisor;
+    format!("{scaled:.precision$}{suffix}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

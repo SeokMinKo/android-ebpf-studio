@@ -308,7 +308,7 @@ fn summary_plot(ui:&egui::Ui,id:impl egui::AsId)->egui_plot::Plot<'static> {
     studio_plot(id).width((ui.clip_rect().right()-ui.max_rect().left()).min(ui.available_width()).max(64.))
 }
 fn summary_axis_tick(mark:egui_plot::GridMark,range:&std::ops::RangeInclusive<f64>)->String {
-    if mark.value>*range.end()-(range.end()-range.start())*0.06 {String::new()}else{compact_tick(mark.value)}
+    if mark.value>*range.end()-(range.end()-range.start())*0.06 {String::new()}else{crate::graph_summary::summary_tick(mark.value,range.end()-range.start())}
 }
 
 fn compact_tick(value:f64)->String {
