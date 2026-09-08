@@ -160,6 +160,7 @@ Host 테스트, native renderer, 실제 설치 EXE, 물리 기기 결과는 별�
 - Exact FilePath는 실제 경로와 인과 증거가 함께 있어야 합니다. inode만 있거나 시간상 가까운 경로 후보만 있는 요청을 Exact 경로로 승격하지 않습니다. Perfetto만으로 FilePath 검증을 통과 처리하지 않습니다.
 - 이후 pathless 관측이 앞서 기록된 경로를 덮지 않으며, 시간 기반 경로 추정은 Probable로 제한합니다. 서로 다른 후보는 미해결로 남길 수 있습니다.
 - Pipeline은 관측된 Read/Write 방향을 유지하고, waterfall은 음수 시작 offset을 포함한 전체 구간을 그립니다. Critical path는 겹치는 후손 구간을 중복 합산하지 않습니다.
+- block completion 프로브를 issue 프로브보다 먼저 부착해, issue 부착 직후 완료되는 요청을 관측할 준비를 합니다. 이 시작 순서 보완은 기존 세션의 모든 누락 원인이 해결됐다는 의미가 아닙니다.
 - eBPF recursion misses는 ring loss와 별도인 probe 호출 손실 지표입니다. 기존 물리 수집에서 completion 누락과 일부 Unresolved가 남았으므로 전체 acceptance는 미완료입니다.
 - Explorer downsampling은 실제 측정값의 extrema·endpoint·sparse gap 보존을 검증합니다. queue_depth_at_issue와 queue_depth_after는 서로 다른 관측치이며 하드웨어 queue depth로 해석하지 않습니다.
 

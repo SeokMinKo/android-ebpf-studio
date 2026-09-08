@@ -13,6 +13,7 @@ use std::{
 };
 
 mod btf_layout;
+mod probe_order;
 mod runtime_health;
 
 use android_ebpf_agent::trace_format::{
@@ -954,18 +955,14 @@ fn capture(object: &Path, health_interval_ms: u64, session_id: &str) -> Result<(
         "LAYOUT_CONFIG_FAILED",
         configure_layout(&mut bpf, "COMPLETE_LAYOUT", config.complete),
     )?;
-    required_step(
-        session_id,
-        "probe.attach",
-        "PROBE_ATTACH_FAILED",
-        attach(&mut bpf, "block_rq_issue", "block", "block_rq_issue"),
-    )?;
-    required_step(
-        session_id,
-        "probe.attach",
-        "PROBE_ATTACH_FAILED",
-        attach(&mut bpf, "block_rq_complete", "block", "block_rq_complete"),
-    )?;
+    probe_order::attach_block_pair(|probe| {
+        required_step(
+            session_id,
+            "probe.attach",
+            "PROBE_ATTACH_FAILED",
+            attach(&mut bpf, probe, "block", probe),
+        )
+    })?;
     if let Some(layout) = config.insert {
         let result = configure_layout(&mut bpf, "INSERT_LAYOUT", layout)
             .and_then(|_| attach(&mut bpf, "block_rq_insert", "block", "block_rq_insert"));
