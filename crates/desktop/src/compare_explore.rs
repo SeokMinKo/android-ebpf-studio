@@ -151,7 +151,7 @@ impl StudioApp {
                 "compare-files" => self.compare_explore.tab == CompareTab::Files,
                 "compare-processes" => self.compare_explore.tab == CompareTab::Processes,
                 "compare-distributions" => self.compare_explore.tab == CompareTab::Distributions,
-                "compare-percentiles" => self.render_qa.compare_percentiles_open,
+                "compare-percentiles" => qa_percentile_ready(self.render_qa.compare_percentiles_open, self.render_qa.compare_percentiles_opened_at.map_or(Duration::ZERO, |t| t.elapsed())),
                 "compare-details" => self.compare_explore.tab == CompareTab::Details,
                 _ => false,
             };
@@ -1180,6 +1180,11 @@ fn compare_metrics(ui: &mut egui::Ui, a: &SelectionSummary, b: &SelectionSummary
     if qa.output.is_some() {
         qa.inspector_buttons.insert("Compare Percentiles".into(), percentiles.header_response.rect.center());
         qa.compare_percentiles_open = percentiles.body_returned.is_some();
+        if qa.compare_percentiles_open {
+            qa.compare_percentiles_opened_at.get_or_insert_with(Instant::now);
+        } else {
+            qa.compare_percentiles_opened_at = None;
+        }
     }
     ui.small("Latency: insert (or issue) to completion; exact nearest-rank percentiles. MiB/s uses each selection's earliest known insert/issue (completion if unavailable) to latest completion span. A selection containing unsupported-clock I/O has no span or throughput. Unknown pre-completion time is excluded. Percentiles include valid timing samples only. Empty/zero-span values are unavailable (—). No event pairing or file identity equivalence is implied.");
 }
@@ -1795,5 +1800,19 @@ mod compare_area_qa_tests {
         assert!(qa_compare_area_ready(Some(&empty), Some(&empty), rectangle));
         assert!(!qa_compare_area_ready(None, Some(&empty), rectangle));
         assert!(!qa_compare_area_ready(Some(&empty), Some(&empty), None));
+    }
+}
+
+fn qa_percentile_ready(open: bool, elapsed: Duration) -> bool {
+    open && elapsed >= Duration::from_millis(500)
+}
+#[cfg(test)]
+mod percentile_settle_tests {
+    use super::*;
+    #[test]
+    fn percentile_capture_waits_for_expansion_to_settle() {
+        assert!(!qa_percentile_ready(true, Duration::ZERO));
+        assert!(qa_percentile_ready(true, Duration::from_millis(500)));
+        assert!(!qa_percentile_ready(false, Duration::from_secs(1)));
     }
 }

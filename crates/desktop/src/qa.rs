@@ -23,6 +23,7 @@ struct RenderQa {
     compare_ready_ms: Option<f64>,
     compare_rectangle: Option<[[f64; 2]; 2]>,
     compare_percentiles_open: bool,
+    compare_percentiles_opened_at: Option<Instant>,
     started: Option<Instant>,
     regions: BTreeMap<String, (egui::Rect, egui::Rect)>,
     session_button: Option<egui::Pos2>,
