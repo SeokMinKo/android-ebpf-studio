@@ -2223,8 +2223,8 @@ impl StudioApp {
             })
             .x_axis_label(self.x_axis.label())
             .y_axis_label(self.y_axis.label())
-            .x_axis_formatter(|m, _| view.x_categories.tick(x_axis, m.value))
-            .y_axis_formatter(|m, _| view.y_categories.tick(y_axis, m.value))
+            .x_axis_formatter(|m, _| view.x_categories.tick(x_axis, m.value, m.step_size))
+            .y_axis_formatter(|m, _| view.y_categories.tick(y_axis, m.value, m.step_size))
             .label_formatter(|hover| match hover {
                 HoverPosition::NearDataPoint {
                     plot_name,

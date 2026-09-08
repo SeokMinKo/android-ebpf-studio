@@ -49,6 +49,23 @@ impl StudioApp {
 mod summary_layout_tests {
     use super::*;
     #[test]
+    fn narrow_address_tick_labels_do_not_overlap() {
+        let mut metric=crate::graph_summary::MetricDistribution::default();
+        metric.total.values=(0..16).map(|i|46088.04864+i as f64*0.065536).collect();
+        let ctx=egui::Context::default();
+        let mut inspected=0;
+        for _ in 0..3 {
+            let mut output=ctx.run_ui(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(280.,700.))),..Default::default()},|root| {
+                egui::CentralPanel::default().show(root,|ui|metric_distribution_ui(ui,&metric,"Address (MB)"));
+            });
+            output.textures_delta.clear();
+            let labels:Vec<_>=output.shapes.iter().filter_map(|s| {if let egui::Shape::Text(t)=&s.shape && t.galley.text().starts_with("46.08") && t.galley.text().ends_with('k') {return Some(s.shape.visual_bounding_rect());} None}).collect();
+            inspected+=labels.len();
+            for (i,a) in labels.iter().enumerate() {for b in labels.iter().skip(i+1) {assert!(!a.intersects(*b),"adjacent address label rectangles overlap: {a:?} {b:?}");}}
+        }
+        assert!(inspected>=2,"inspect actual rendered address labels");
+    }
+    #[test]
     fn wide_lba_histogram_tick_text_stays_within_the_summary_panel() {
         let mut metric=crate::graph_summary::MetricDistribution::default();
         metric.total.values=vec![2_629_824.,987_000_000.];
@@ -323,10 +340,10 @@ fn compact_tick(value:f64)->String {
 fn summary_grid(input:egui_plot::GridInput)->Vec<egui_plot::GridMark> {
     let range=input.bounds.1-input.bounds.0;
     if !range.is_finite() || range<=0. {return Vec::new();}
-    let raw=range/4.;
+    let raw=range/3.;
     let power=10f64.powf(raw.log10().floor());
     let fraction=raw/power;
-    let step=power*if fraction<1.5 {1.} else if fraction<3.5 {2.} else if fraction<7.5 {5.} else {10.};
+    let step=power*if fraction<=1. {1.} else if fraction<=2. {2.} else if fraction<=5. {5.} else {10.};
     let first=(input.bounds.0/step).ceil()*step;
     (0..10).map(|i|first+i as f64*step).take_while(|v|*v<=input.bounds.1)
         .map(|value|egui_plot::GridMark{value,step_size:range}).collect()

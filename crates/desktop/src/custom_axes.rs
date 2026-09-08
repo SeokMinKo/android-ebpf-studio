@@ -111,7 +111,7 @@ impl AxisCategories {
             axis.value(io, origin, graph)
         }
     }
-    fn tick(&self, axis: AxisMetric, value: f64) -> String {
+    fn tick(&self, axis: AxisMetric, value: f64, step: f64) -> String {
         if axis == AxisMetric::AddressMB {
             return format!("{value:.6}").trim_end_matches('0').trim_end_matches('.').to_owned();
         }
@@ -131,7 +131,7 @@ impl AxisCategories {
                 })
                 .unwrap_or_default()
         } else {
-            compact_tick(value)
+            crate::graph_summary::summary_tick(value, step.abs()*4.)
         }
     }
 }
@@ -269,10 +269,16 @@ mod custom_axes_tests {
 mod mb_tick_regression {
     use super::*;
     #[test]
+    fn narrow_time_ticks_keep_adjacent_instants_distinct() {
+        let categories=AxisCategories::default();
+        let labels:Vec<_>=(7290..=7460).step_by(10).map(|v|categories.tick(AxisMetric::TimeMs,v as f64,10.)).collect();
+        assert_eq!(labels.iter().collect::<std::collections::BTreeSet<_>>().len(),labels.len(),"distinct 10 ms ticks must not repeat");
+    }
+    #[test]
     fn adjacent_mb_ticks_do_not_collapse_to_one_abbreviation() {
         let categories = AxisCategories::default();
-        assert_ne!(categories.tick(AxisMetric::AddressMB,45615.0), categories.tick(AxisMetric::AddressMB,45616.0));
-        assert_eq!(categories.tick(AxisMetric::AddressMB,45615.000512), "45615.000512");
-        assert_eq!(categories.tick(AxisMetric::AddressMB,45615.0), "45615");
+        assert_ne!(categories.tick(AxisMetric::AddressMB,45615.0,1.), categories.tick(AxisMetric::AddressMB,45616.0,1.));
+        assert_eq!(categories.tick(AxisMetric::AddressMB,45615.000512,0.000512), "45615.000512");
+        assert_eq!(categories.tick(AxisMetric::AddressMB,45615.0,1.), "45615");
     }
 }

@@ -486,8 +486,10 @@ impl StudioApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(if self.y_axis==AxisMetric::SchedulerIoWait {"Process (waiting task comm)"}else{"Process (issuer comm)"}); let process=ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
                 qa_region(&mut self.render_qa,"process-filter",process.rect,ui.clip_rect());
-                ui.label("FilePath / inode"); ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
-                ui.label("Device major:minor"); ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
+                ui.label("FilePath / inode"); let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
+                qa_region(&mut self.render_qa,"file-filter",file.rect,ui.clip_rect());
+                ui.label("Device major:minor"); let device=ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
+                qa_region(&mut self.render_qa,"device-filter",device.rect,ui.clip_rect());
                 let clear=ui.button("Clear filters");qa_region(&mut self.render_qa,"clear-filters",clear.rect,ui.clip_rect());
                 if clear.clicked() { self.query = AnalysisFilter::default();self.filter_edit_epoch=self.filter_edit_epoch.wrapping_add(1); }
             });

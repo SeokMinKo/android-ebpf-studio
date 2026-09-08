@@ -108,11 +108,12 @@ impl StudioApp {
             }
             return;
         }
-        if gesture=="process-filter" || gesture=="pid-filter" {
+        if matches!(gesture.as_str(), "process-filter" | "pid-filter" | "file-filter" | "device-filter") {
+            if self.render_qa.input_step >= 7 { return; }
             let pid=gesture=="pid-filter";
             if self.render_qa.frames<20 || self.render_qa.frames<self.render_qa.range_wait_frame+6 {return;}
             let step=self.render_qa.filter_step;
-            let target=match step {0|1=>Some("analysis-filters"),2|3=>Some(if pid {"pid-filter"}else{"process-filter"}),8|9=>Some("clear-filters"),_=>None};
+            let target=match step {0|1=>Some("analysis-filters"),2|3=>Some(gesture.as_str()),8|9=>Some("clear-filters"),_=>None};
             if let Some(target)=target {
                 if let Some((rect,_))=self.render_qa.regions.get(target) {
                     let pos=rect.center();raw.events.push(egui::Event::PointerMoved(pos));
@@ -120,7 +121,15 @@ impl StudioApp {
                 }else{return;}
             }else if step==4 || step==6 {
                 raw.events.push(egui::Event::Key{key:egui::Key::A,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers{ctrl:true,command:true,..Default::default()}});
-                raw.events.push(egui::Event::Text(if pid {if step==4 {std::env::var("ANDROID_EBPF_QA_PID").unwrap_or("1".into())}else{"2147483647".into()}}else if step==4 {std::env::var("ANDROID_EBPF_QA_PROCESS").unwrap_or("F2FS".into())}else{"__no_such_process__".into()}));
+                let value = if pid {if step==4 {std::env::var("ANDROID_EBPF_QA_PID").unwrap_or("1".into())}else{"2147483647".into()}} else {
+                    let (variable, fallback, empty) = match gesture.as_str() {
+                        "file-filter" => ("ANDROID_EBPF_QA_FILE", "final-A.bin", "__no_such_file__"),
+                        "device-filter" => ("ANDROID_EBPF_QA_DEVICE_TEXT", "8:0", "4095:4095"),
+                        _ => ("ANDROID_EBPF_QA_PROCESS", "F2FS", "__no_such_process__"),
+                    };
+                    if step==4 {std::env::var(variable).unwrap_or(fallback.into())} else {empty.into()}
+                };
+                raw.events.push(egui::Event::Text(value));
             }else if [5,7,10].contains(&step) {
                 if self.y_axis==AxisMetric::SchedulerIoWait {
                     let Some(s)=&self.scheduler.view else{return;};
@@ -128,7 +137,7 @@ impl StudioApp {
                     let path=self.render_qa.output.as_ref().unwrap().with_extension(format!("filter-{step}.csv"));
                     let result=write_scheduler_csv(&path,s,false).map_err(|e|e.to_string());
                     self.render_qa.filter_states.push(serde_json::json!({"step":step,"query":self.query,"scheduler_count":s.rows.len(),"p50":s.distribution.percentile(50),"csv":path,"export":result}));
-                    if step==10 {self.render_qa.input_step=7;self.render_qa.filter_step=11;return;}
+                    if step==10 || std::env::var("ANDROID_EBPF_QA_FILTER_STOP_STEP").ok().and_then(|v|v.parse::<u32>().ok()) == Some(step) {self.render_qa.input_step=7;self.render_qa.filter_step=11;return;}
                     self.render_qa.filter_step+=1;self.render_qa.range_wait_frame=self.render_qa.frames;return;
                 }
                 let Some((g,x,y,s))=&self.selection.all_summary else{return;};
@@ -138,7 +147,7 @@ impl StudioApp {
                 let io_path=self.render_qa.output.as_ref().unwrap().with_extension(format!("filter-{step}.io.csv"));
                 let io_result=session::export_completed_io_csv(&io_path,self.analysis()).map_err(|e|e.to_string());
                 self.render_qa.filter_states.push(serde_json::json!({"step":step,"query":self.query,"filtered":self.analysis().completed_ios().len(),"summary":s.keys.len(),"lane_unique":self.footprint.view.as_ref().map(|v|v.unique),"host_bw":s.host_bw,"csv":path,"export":result,"io_csv":io_path,"io_export":io_result}));
-                if step==10 {self.render_qa.input_step=7;self.render_qa.filter_step=11;return;}
+                if step==10 || std::env::var("ANDROID_EBPF_QA_FILTER_STOP_STEP").ok().and_then(|v|v.parse::<u32>().ok()) == Some(step) {self.render_qa.input_step=7;self.render_qa.filter_step=11;return;}
             }else {return;}
             self.render_qa.filter_step+=1;self.render_qa.range_wait_frame=self.render_qa.frames;
             return;
