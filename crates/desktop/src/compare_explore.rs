@@ -139,11 +139,7 @@ impl StudioApp {
                         && second
                             .is_some_and(|s| s.keys.len() == current.analyzer.completed_ios().len())
                 }
-                "compare-area" => first.zip(second).is_some_and(|(a, b)| {
-                    !a.keys.is_empty()
-                        && !b.keys.is_empty()
-                        && a.keys.len() < baseline.viewer.analyzer.completed_ios().len()
-                }),
+                "compare-area" => qa_compare_area_ready(first, second, self.render_qa.compare_rectangle),
                 "compare-filter" => {
                     baseline.viewer.query.operation == Some(IoOperation::Read)
                         && current.query.operation == Some(IoOperation::Read)
@@ -181,9 +177,9 @@ impl StudioApp {
                 .get("Compare Baseline graph")
                 .map(|(r, _)| {
                     if step == 0 {
-                        egui::pos2(r.left() + r.width() * 0.05, r.top() + r.height() * 0.20)
+                        egui::pos2(r.left() + r.width() * 0.05, r.top() + r.height() * if std::env::var_os("ANDROID_EBPF_QA_AREA_FULL_HEIGHT").is_some() { 0.01 } else { 0.20 })
                     } else {
-                        egui::pos2(r.left() + r.width() * 0.70, r.top() + r.height() * 0.85)
+                        egui::pos2(r.left() + r.width() * 0.70, r.top() + r.height() * if std::env::var_os("ANDROID_EBPF_QA_AREA_FULL_HEIGHT").is_some() { 0.99 } else { 0.85 })
                     }
                 })
         } else {
@@ -265,7 +261,7 @@ impl StudioApp {
                 "explorer_coordinates":std::env::var_os("ANDROID_EBPF_QA_DEPTH").and_then(|_|v.explorer_view.as_ref().map(|view|view.groups.iter().flat_map(|(_, points)|points.iter().map(|p|p.coordinates)).collect::<Vec<_>>())),
             })
         };
-        serde_json::json!({"ready_ms":self.render_qa.compare_ready_ms,"baseline":self.comparison.as_ref().map(|b|describe(&b.viewer)),"current":self.compare_explore.current.as_ref().map(|b|describe(b)),"actions":self.compare_explore.actions,"linked":self.compare_explore.linked_bounds,"error":self.compare_explore.error})
+        serde_json::json!({"rectangle":self.render_qa.compare_rectangle,"ready_ms":self.render_qa.compare_ready_ms,"baseline":self.comparison.as_ref().map(|b|describe(&b.viewer)),"current":self.compare_explore.current.as_ref().map(|b|describe(b)),"actions":self.compare_explore.actions,"linked":self.compare_explore.linked_bounds,"error":self.compare_explore.error})
     }
 
     fn comparison_viewer(&self) -> StudioApp {
@@ -569,6 +565,13 @@ fn compare_graphs(
     }
     if state.linked_bounds {
         copy_bounds(current, baseline);
+    }
+    if qa.output.is_some() {
+        for request in requests.iter().flatten() {
+            if let SelectionRequest::Rectangle { min, max } = request {
+                qa.compare_rectangle = Some([*min, *max]);
+            }
+        }
     }
     if state.same_rectangle {
         if let Some(request @ SelectionRequest::Rectangle { .. }) = requests[0] {
@@ -1770,5 +1773,21 @@ mod compare_explore_tests {
             });
         });
         output.textures_delta.clear();
+    }
+}
+
+fn qa_compare_area_ready(a: Option<&SelectionSummary>, b: Option<&SelectionSummary>, rectangle: Option<[[f64; 2]; 2]>) -> bool {
+    rectangle.is_some() && a.is_some() && b.is_some()
+}
+#[cfg(test)]
+mod compare_area_qa_tests {
+    use super::*;
+    #[test]
+    fn completed_empty_rectangle_is_a_valid_selection_result() {
+        let empty = SelectionSummary::default();
+        let rectangle = Some([[0.0, 0.0], [1.0, 1.0]]);
+        assert!(qa_compare_area_ready(Some(&empty), Some(&empty), rectangle));
+        assert!(!qa_compare_area_ready(None, Some(&empty), rectangle));
+        assert!(!qa_compare_area_ready(Some(&empty), Some(&empty), None));
     }
 }

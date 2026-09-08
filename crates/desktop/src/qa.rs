@@ -21,6 +21,7 @@ struct RenderQa {
     latency_action_at: Option<Instant>,
     latency_elapsed_ms: Option<f64>,
     compare_ready_ms: Option<f64>,
+    compare_rectangle: Option<[[f64; 2]; 2]>,
     started: Option<Instant>,
     regions: BTreeMap<String, (egui::Rect, egui::Rect)>,
     session_button: Option<egui::Pos2>,
@@ -674,6 +675,7 @@ impl StudioApp {
             self.compare_explore.needs_apply = true;
             self.compare_explore.fit = true;
             self.render_qa.compare_ready_ms = None;
+            self.render_qa.compare_rectangle = None;
         }
         if let Ok(filter) = std::env::var("ANDROID_EBPF_QA_FILTER") {
             match filter.as_str() {
