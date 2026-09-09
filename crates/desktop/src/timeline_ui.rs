@@ -190,7 +190,7 @@ impl StudioApp {
         let bounds_command=self.selection.bounds_command.take();let auto=std::mem::take(&mut self.selection.auto_bounds);
         let visible_clip=ui.clip_rect();
         let response=studio_plot("request-timeline").height(430.).x_axis_label("Time (ms)").y_axis_label(view.mode.label())
-            .allow_drag(!selecting).allow_boxed_zoom(!selecting).x_axis_formatter(|m,_|compact_tick(m.value))
+            .allow_drag(!selecting).allow_boxed_zoom(!selecting).x_axis_formatter(timeline_time_tick)
             .y_axis_formatter(|m,_|{let n=m.value.abs().round();if (m.value.abs()-n).abs()<0.001&&n>=1. {view.lanes.get(n as usize-1).cloned().unwrap_or_default()}else{String::new()}})
             .y_grid_spacer(|_|{let mut marks:Vec<_>=(first..=last).map(|row|egui_plot::GridMark{value:if mode==TimelineMode::Requests {-(row as f64)}else{row as f64},step_size:(last-first+1) as f64}).collect();marks.sort_by(|a,b|a.value.total_cmp(&b.value));marks})
             .label_formatter(|hover|match hover {
@@ -251,3 +251,23 @@ impl StudioApp {
     }
 }
 
+
+fn timeline_time_tick(mark: egui_plot::GridMark, _: &std::ops::RangeInclusive<f64>) -> String {
+    crate::graph_summary::summary_tick(mark.value, mark.step_size.abs() * 4.0)
+}
+
+#[cfg(test)]
+mod timeline_tick_tests {
+    use super::*;
+    #[test]
+    fn nearby_time_ticks_keep_distinct_millisecond_values() {
+        for (base, step) in [(8890.0, 10.0), (8890.0, 0.1), (0.001, 0.001)] {
+            let labels: Vec<_> = (0..4).map(|i| timeline_time_tick(egui_plot::GridMark {value: base + i as f64 * step, step_size: step}, &(base..=base + 4.0 * step))).collect();
+            assert!(labels.windows(2).all(|w| w[0] != w[1]), "{labels:?}");
+            for (i, label) in labels.iter().enumerate() {
+                let actual = if let Some(n) = label.strip_suffix('k') { n.parse::<f64>().unwrap() * 1000.0 } else { label.parse::<f64>().unwrap() };
+                assert!((actual - (base + i as f64 * step)).abs() < step / 2.0);
+            }
+        }
+    }
+}
