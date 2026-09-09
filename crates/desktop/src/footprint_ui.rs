@@ -221,6 +221,7 @@ impl StudioApp {
         let mut area_keys=None;
         let selecting=self.selection.enabled;
         let bounds_command=self.selection.bounds_command.take();
+        let storage_y_max=(self.explorer_preset==ExplorerPreset::LbaDistribution).then(||self.storage_range.y_max(self.y_axis)).flatten();
         ui.small("Drag a rectangle to summarize I/O in that lane. Disable Select points / area to pan linked axes.");
         for (name,points) in view.lanes.iter().skip(page*4).take(4) {
             ui.push_id(name,|ui| {
@@ -231,7 +232,9 @@ impl StudioApp {
                 let step=points.len().div_ceil(3000).max(1);
                 let drag_id=ui.id().with("lane-drag");
                 let mut drag=ui.data_mut(|d|d.get_temp::<[f64;2]>(drag_id));
-                studio_plot(ui.id().with("lane")).height(if view.mode==FootprintMode::Combined {330.}else{175.}).link_axis("footprint-shared-axes",[true,true])
+                let lane_plot=studio_plot(ui.id().with("lane"));
+                let lane_plot=if let Some(max)=storage_y_max {lane_plot.default_y_bounds(0.,max)}else{lane_plot};
+                lane_plot.height(if view.mode==FootprintMode::Combined {330.}else{175.}).link_axis("footprint-shared-axes",[true,true])
                     .allow_drag(false)
                     .allow_boxed_zoom(!selecting).boxed_zoom_pointer_button(egui::PointerButton::Primary)
                     .y_axis_formatter(|m,_|compact_tick(m.value))
@@ -241,7 +244,7 @@ impl StudioApp {
                         HoverPosition::NearDataPoint{plot_name,index,..}=>points.iter().filter(|p|operation_label(p.operation)==*plot_name).step_by(step).nth(*index).and_then(|p|p.point.file_tooltip.clone()),
                         _=>None,
                     }).show(ui,|plot| {
-                        if fit {plot.set_plot_bounds(egui_plot::PlotBounds::from_min_max([view.min[0],view.min[1]/divisor],[view.max[0],view.max[1]/divisor]));}
+                        if fit {plot.set_plot_bounds(egui_plot::PlotBounds::from_min_max([view.min[0],if storage_y_max.is_some(){0.}else{view.min[1]/divisor}],[view.max[0],storage_y_max.unwrap_or(view.max[1]/divisor)]));}
                         if let Some(bounds)=bounds_command {plot.set_plot_bounds(bounds);}
                         self.selection.current_bounds=Some(plot.plot_bounds());
                         if page==0 && name==view.lanes.first_key_value().unwrap().0 {

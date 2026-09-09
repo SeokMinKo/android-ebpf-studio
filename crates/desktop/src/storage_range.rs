@@ -46,9 +46,9 @@ impl StudioApp {
                     ui.selectable_value(&mut self.storage_range.override_bytes,Some(gb*1_000_000_000),if gb==1000 {"1 TB".into()}else{format!("{gb} GB")});
                 }
             });
-            if ui.add_enabled(self.storage_range.bytes().is_some(),egui::Button::new("Reset to storage size")).clicked() { self.selection.fit_axis_ranges(); }
+            if ui.add_enabled(self.storage_range.bytes().is_some(),egui::Button::new("Reset to storage size")).clicked() { self.selection.fit_axis_ranges();self.footprint.fit=true; }
         });
-        if previous!=self.storage_range.override_bytes {self.selection.fit_axis_ranges();}
+        if previous!=self.storage_range.override_bytes {self.selection.fit_axis_ranges();self.footprint.fit=true;}
         if self.storage_range.bytes().is_none() {ui.small("Storage capacity is absent from this session. Choose the phone capacity above; Auto fits the observed data until capacity is known.");}
         else {ui.small("Capacity sets the default viewport only. Out-of-range I/O remains in the analysis, tables and exports.");}
     }
