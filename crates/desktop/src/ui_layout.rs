@@ -370,3 +370,99 @@ mod ui_layout_tests {
         assert!(count >= 3, "Need real painted numeric ticks, got {count}");
     }
 }
+
+fn activity_plot(id: impl egui::AsId) -> egui_plot::Plot<'static> {
+    studio_plot(id).y_grid_spacer(|input| {
+        let span = input.bounds.1 - input.bounds.0;
+        if !span.is_finite() || span <= 0. {
+            return Vec::new();
+        }
+        // Four intervals keep numeric ticks readable in the short activity panels.
+        let raw = span / 4.;
+        let power = 10_f64.powf(raw.log10().floor());
+        let fraction = raw / power;
+        let step = power
+            * if fraction <= 1. {
+                1.
+            } else if fraction <= 2. {
+                2.
+            } else if fraction <= 5. {
+                5.
+            } else {
+                10.
+            };
+        if !step.is_finite() || step <= 0. {
+            return Vec::new();
+        }
+        let first = (input.bounds.0 / step).ceil() * step;
+        (0..6)
+            .map(|i| first + i as f64 * step)
+            .take_while(|value| *value <= input.bounds.1)
+            .map(|value| egui_plot::GridMark {
+                value,
+                step_size: step,
+            })
+            .collect()
+    })
+}
+
+#[cfg(test)]
+mod activity_axis_tests {
+    use super::*;
+    #[test]
+    fn short_iops_plot_has_readable_nonzero_ticks() {
+        let ctx = egui::Context::default();
+        let mut labels = Vec::new();
+        fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        texts(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for _ in 0..8 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200., 250.),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        activity_plot("regression-iops")
+                            .height(170.)
+                            .show_axes([false, true])
+                            .include_y(0.)
+                            .include_y(65.)
+                            .show(ui, |plot| {
+                                plot.points(Points::new(
+                                    "Read",
+                                    vec![[0.5, 11.], [1.5, 55.], [4.5, 65.]],
+                                ));
+                            });
+                    });
+                },
+            );
+            labels.clear();
+            for shape in &output.shapes {
+                texts(&shape.shape, &mut labels);
+            }
+            output.textures_delta.clear();
+        }
+        let nonzero: Vec<_> = labels
+            .iter()
+            .filter_map(|s| s.parse::<f64>().ok())
+            .filter(|v| *v > 0. && *v <= 65.)
+            .collect();
+        assert!(
+            nonzero.len() >= 2,
+            "Y axis must expose at least two nonzero tick labels, got {labels:?}"
+        );
+    }
+}

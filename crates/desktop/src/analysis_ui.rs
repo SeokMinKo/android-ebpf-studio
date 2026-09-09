@@ -614,7 +614,7 @@ impl StudioApp {
                 );
             }
             let clip = ui.clip_rect();
-            studio_plot(id)
+            activity_plot(id)
                 .include_x(activity_points[offset].full().first().unwrap().x)
                 .include_x(activity_points[offset].full().last().unwrap().x)
                 .include_y(

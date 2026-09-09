@@ -179,3 +179,7 @@ Host 테스트, native renderer, 실제 설치 EXE, 물리 기기 결과는 별�
 ## License
 
 MIT OR Apache-2.0. eBPF program은 커널 호환을 위해 `Dual MIT/GPL` license section을 사용합니다.
+
+### Activity timeline axis readability
+
+Overview IOPS and throughput use readable numeric Y-axis intervals in their short panels. See [activity axis regression](docs/ACTIVITY_AXIS_TICKS.md). Full graph and revised PYK110 collector acceptance remain incomplete; host checks do not establish physical FilePath accuracy.
