@@ -68,7 +68,7 @@ impl StudioApp {
         let selecting=self.selection.enabled;let mut drag=self.selection.drag_start;let mut selected=None;
         let visible_clip=ui.clip_rect();
         let response=studio_plot("window-series").height(330.).x_axis_label(if bursts {"Time (ms) · markers at burst centers"}else if intervals {"Interval center (ms)"}else{"Time-window center (ms)"}).y_axis_label(metric.label())
-            .legend(Legend::default()).allow_drag(!selecting).allow_boxed_zoom(!selecting)
+            .legend(Legend::default()).allow_drag(false).allow_boxed_zoom(!selecting).boxed_zoom_pointer_button(egui::PointerButton::Primary)
             .x_axis_formatter(|m,_|compact_tick(m.value)).y_axis_formatter(|m,_|compact_tick(m.value))
             .show(ui,|plot| {
                 if let Some(bounds)=bounds_command {plot.set_plot_bounds(bounds);}else if auto {plot.set_auto_bounds(true);}

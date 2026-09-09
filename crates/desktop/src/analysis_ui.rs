@@ -18,6 +18,43 @@ mod filter_input_tests {
         for _ in 0..6 {frame(app,ctx,time,vec![]);}
     }
     #[test]
+    fn visible_filepath_input_filters_actual_paths_and_clears() {
+        let mut app=StudioApp::default();
+        for (i,path) in ["/data/read-A.bin","/data/read-A.bin.bak","/data/other.bin"].into_iter().enumerate() {
+            for line in include_str!("../tests/fixtures/known-read-tooltip.ndjson").lines() {
+                let mut record:serde_json::Value=serde_json::from_str(line).unwrap();
+                record["event"]["data"]["request_id"]=serde_json::json!(i+1);
+                if record["event"]["kind"]=="request_origin" {
+                    record["event"]["data"]["path"]["path"]=serde_json::json!(path);
+                    record["event"]["data"]["file"]["inode"]=serde_json::json!(100+i);
+                    record["event"]["data"]["origin_id"]=serde_json::json!(100+i);
+                }
+                if let WireRecord::Event {event,..}=serde_json::from_value(record).unwrap() {app.analyzer.ingest(event);}
+            }
+        }
+        app.render_qa.output=Some(PathBuf::from("unused-test-region-marker"));
+        let ctx=egui::Context::default();let mut time=0.;
+        frame(&mut app,&ctx,&mut time,vec![]);
+        // The FilePath input works without opening Analysis filters.
+        click(&mut app,&ctx,&mut time,"file-filter");
+        frame(&mut app,&ctx,&mut time,vec![egui::Event::Text("/data/read-A.bin".into())]);
+        assert_eq!(app.analysis().completed_ios().len(),2);
+        click(&mut app,&ctx,&mut time,"file-exact");
+        assert_eq!(app.analysis().completed_ios().len(),1);
+        assert_eq!(app.analysis().completed_ios()[0].issue.request_id,1);
+        assert_eq!(app.analysis_summary().completed_ios,1);
+        app.rebuild_explorer_view();
+        assert_eq!(app.explorer_view.as_ref().unwrap().displayed,1);
+        click(&mut app,&ctx,&mut time,"clear-file-filter");
+        assert_eq!(app.analysis().completed_ios().len(),3);
+        assert!(app.query.file.is_empty());assert!(!app.query.file_exact);
+        app.query.file="/data/READ-A.bin".into();app.query.file_exact=true;
+        assert!(app.analyzer.completed_ios().iter().all(|io|!app.query.matches(&app.analyzer,io,0)));
+        app.query.file_exact=false;
+        assert_eq!(app.analyzer.completed_ios().iter().filter(|io|app.query.matches(&app.analyzer,io,0)).count(),2);
+    }
+
+    #[test]
     fn clear_filters_does_not_restore_pid_from_numeric_editor_on_lost_focus() {
         let mut app=StudioApp::default();
         for pid in [10,20] {
@@ -193,6 +230,7 @@ struct AnalysisFilter {
     tid: u32,
     process: String,
     file: String,
+    file_exact: bool,
     device: String,
     operation: Option<IoOperation>,
     confidence: Option<PathConfidence>,
@@ -265,8 +303,8 @@ impl AnalysisFilter {
                     v.path
                         .as_ref()
                         .and_then(|p| p.path.as_ref())
-                        .is_some_and(|p| p.to_lowercase().contains(&self.file.to_lowercase()))
-                        || v.file.fallback_label().contains(&self.file)
+                        .is_some_and(|p| if self.file_exact {p == &self.file} else {p.to_lowercase().contains(&self.file.to_lowercase())})
+                        || (!self.file_exact && v.file.fallback_label().contains(&self.file))
                 }))
     }
 }
@@ -452,6 +490,17 @@ impl StudioApp {
             return;
         }
         let previous = self.query.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("FilePath");
+            let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(360.0).hint_text("Enter a path or filename, e.g. /data/local/tmp/read-A.bin"));
+            qa_region(&mut self.render_qa,"file-filter",file.rect,ui.clip_rect());
+            let exact=ui.checkbox(&mut self.query.file_exact,"Match full path");
+            qa_region(&mut self.render_qa,"file-exact",exact.rect,ui.clip_rect());
+            let clear=ui.add_enabled(!self.query.file.is_empty(),egui::Button::new("Clear FilePath"));
+            qa_region(&mut self.render_qa,"clear-file-filter",clear.rect,ui.clip_rect());
+            if clear.clicked() {self.query.file.clear();self.query.file_exact=false;}
+        });
+        ui.small(if self.query.file_exact {"Full path: case-sensitive equality. Any matching observed file candidate keeps the I/O."} else {"Type part of a path or filename to filter graphs, summaries and I/O details. Search ignores case; inode text is also supported."});
         if let Some(range) = self.query.latency_range {
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("Total latency: {}", range.label()));
@@ -464,6 +513,7 @@ impl StudioApp {
             // A numeric editor commits its buffered text when it loses focus.
             // Replace input identities after Clear so a delayed commit cannot
             // restore a previous PID, time or size into the reset query.
+            ui.set_max_width(ui.available_width().min(ui.clip_rect().right()-ui.max_rect().left()).max(160.0));
             ui.push_id(self.filter_edit_epoch,|ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(if self.y_axis==AxisMetric::SchedulerIoWait {"Scheduler event time (ms)"}else{"Completion time (ms)"});
@@ -478,16 +528,14 @@ impl StudioApp {
                     ui.selectable_value(&mut self.query.operation, None, "All operations");
                     for op in [IoOperation::Read, IoOperation::Write,IoOperation::Flush,IoOperation::Discard,IoOperation::Other] { ui.selectable_value(&mut self.query.operation, Some(op), operation_label(op)); }
                 });
-                egui::ComboBox::from_id_salt("analysis-confidence").selected_text(self.query.confidence.map_or("All FilePath confidence".into(), |v| format!("{v:?}"))).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.query.confidence, None, "All FilePath confidence");
+                egui::ComboBox::from_id_salt("analysis-confidence").selected_text(self.query.confidence.map_or("Confidence: All".into(), |v| format!("Confidence: {v:?}"))).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.query.confidence, None, "All confidence levels");
                     for value in [PathConfidence::Exact, PathConfidence::Probable, PathConfidence::Unresolved] { ui.selectable_value(&mut self.query.confidence, Some(value), format!("{value:?}")); }
                 });
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label(if self.y_axis==AxisMetric::SchedulerIoWait {"Process (waiting task comm)"}else{"Process (issuer comm)"}); let process=ui.add(egui::TextEdit::singleline(&mut self.query.process).desired_width(100.0));
                 qa_region(&mut self.render_qa,"process-filter",process.rect,ui.clip_rect());
-                ui.label("FilePath / inode"); let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(220.0));
-                qa_region(&mut self.render_qa,"file-filter",file.rect,ui.clip_rect());
                 ui.label("Device major:minor"); let device=ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
                 qa_region(&mut self.render_qa,"device-filter",device.rect,ui.clip_rect());
                 let clear=ui.button("Clear filters");qa_region(&mut self.render_qa,"clear-filters",clear.rect,ui.clip_rect());

@@ -11,6 +11,7 @@ fn main() -> eframe::Result {
         persist_window: std::env::var_os("ANDROID_EBPF_QA_OUTPUT").is_none(),
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1500.0, 940.0])
+            .with_maximized(std::env::var_os("ANDROID_EBPF_QA_MAXIMIZED").is_some())
             .with_min_inner_size([800.0, 600.0]),
         ..Default::default()
     };

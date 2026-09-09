@@ -190,7 +190,7 @@ impl StudioApp {
         let bounds_command=self.selection.bounds_command.take();let auto=std::mem::take(&mut self.selection.auto_bounds);
         let visible_clip=ui.clip_rect();
         let response=studio_plot("request-timeline").height(430.).x_axis_label("Time (ms)").y_axis_label(view.mode.label())
-            .allow_drag(!selecting).allow_boxed_zoom(!selecting).x_axis_formatter(timeline_time_tick)
+            .allow_drag(false).allow_boxed_zoom(!selecting).boxed_zoom_pointer_button(egui::PointerButton::Primary).x_axis_formatter(timeline_time_tick)
             .y_axis_formatter(|m,_|{let n=m.value.abs().round();if (m.value.abs()-n).abs()<0.001&&n>=1. {view.lanes.get(n as usize-1).cloned().unwrap_or_default()}else{String::new()}})
             .y_grid_spacer(|_|{let mut marks:Vec<_>=(first..=last).map(|row|egui_plot::GridMark{value:if mode==TimelineMode::Requests {-(row as f64)}else{row as f64},step_size:(last-first+1) as f64}).collect();marks.sort_by(|a,b|a.value.total_cmp(&b.value));marks})
             .label_formatter(|hover|match hover {

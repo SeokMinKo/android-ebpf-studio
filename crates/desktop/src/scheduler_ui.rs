@@ -221,7 +221,7 @@ impl StudioApp {
         let selecting=self.selection.enabled;let mut drag=self.selection.drag_start;let mut request=None;
         let auto=std::mem::take(&mut self.selection.auto_bounds);let clip=ui.clip_rect();
         let response=studio_plot("scheduler-iowait").height(430.).x_axis_label("Time (ms)").y_axis_label("I/O wait delay (us)")
-            .allow_drag(!selecting).allow_boxed_zoom(!selecting).label_formatter(|hover|match hover {
+            .allow_drag(false).allow_boxed_zoom(!selecting).boxed_zoom_pointer_button(egui::PointerButton::Primary).label_formatter(|hover|match hover {
                 HoverPosition::NearDataPoint{index,..}=>drawn.get(*index).map(|(_,w)|format!("{} · TID {} · PID {}\nDelay {} ns · event {} ns\nObserver CPU {}\n{}",w.comm,w.tid,identity_number(w.pid),w.delay_ns,w.ts_ns,identity_number(w.cpu),w.source)),_=>None,
             }).show(ui,|plot| {
                 if auto {

@@ -1,3 +1,16 @@
+fn explorer_numeric_grid(input: egui_plot::GridInput, spacing_factor: f64) -> Vec<egui_plot::GridMark> {
+    let raw = input.base_step_size * spacing_factor;
+    if !raw.is_finite() || raw <= 0.0 { return Vec::new(); }
+    let power = 10f64.powf(raw.log10().floor());
+    let fraction = raw / power;
+    let multiplier = [1.0, 2.0, 2.5, 5.0, 10.0].into_iter().find(|v| *v >= fraction).unwrap_or(10.0);
+    let step = power * multiplier;
+    let first = (input.bounds.0 / step).ceil();
+    (0..512).map(|i| (first + i as f64) * step)
+        .take_while(|v| *v <= input.bounds.1)
+        .map(|value| egui_plot::GridMark { value, step_size: step }).collect()
+}
+
 fn studio_plot(id: impl egui::AsId) -> egui_plot::Plot<'static> {
     Plot::new(id)
         .custom_x_axes(vec![

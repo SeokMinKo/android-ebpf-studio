@@ -79,6 +79,7 @@ fn compare_filter(shared: &AnalysisFilter, local: &AnalysisFilter) -> AnalysisFi
         cpu:local.cpu,
         process: shared.process.clone(),
         file: local.file.clone(),
+        file_exact: local.file_exact,
         device: local.device.clone(),
         pid: local.pid,
         tid: local.tid,
@@ -1009,7 +1010,7 @@ fn compare_pane(
         );
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut v.selection.enabled, true, "Select");
-            ui.selectable_value(&mut v.selection.enabled, false, "Pan");
+            ui.selectable_value(&mut v.selection.enabled, false, "Zoom mode");
             for action in ["Select all filtered", "Zoom", "Back", "Clear"] {
                 let enabled = match action {
                     "Zoom" => {

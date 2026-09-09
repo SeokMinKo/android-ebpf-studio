@@ -232,8 +232,8 @@ impl StudioApp {
                 let drag_id=ui.id().with("lane-drag");
                 let mut drag=ui.data_mut(|d|d.get_temp::<[f64;2]>(drag_id));
                 studio_plot(ui.id().with("lane")).height(if view.mode==FootprintMode::Combined {330.}else{175.}).link_axis("footprint-shared-axes",[true,true])
-                    .allow_drag(!selecting)
-                    .allow_boxed_zoom(!selecting)
+                    .allow_drag(false)
+                    .allow_boxed_zoom(!selecting).boxed_zoom_pointer_button(egui::PointerButton::Primary)
                     .y_axis_formatter(|m,_|compact_tick(m.value))
                     .y_grid_spacer(summary_grid)
                     .link_cursor("footprint-shared-cursor",[true,true]).x_axis_label(if connected {"Issue to completion time (ms)"}else{"Completion time (ms)"}).y_axis_label(self.y_axis.label()).legend(Legend::default())
