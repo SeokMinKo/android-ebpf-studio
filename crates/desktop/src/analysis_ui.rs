@@ -602,7 +602,7 @@ impl StudioApp {
                 .and_then(|_| std::env::var("ANDROID_EBPF_QA_GESTURE").ok());
             let qa_active = qa_gesture.as_deref().is_some_and(|g| {
                 g.starts_with("activity-")
-                    && (offset == if g == "activity-throughput" { 2 } else { 0 })
+                    && (offset == if g.starts_with("activity-throughput") { 2 } else { 0 })
             });
             if qa_active && self.render_qa.frames >= 28 && self.render_qa.input_step == 0 {
                 ui.scroll_to_rect(
@@ -672,6 +672,12 @@ impl StudioApp {
                                     .then_some(target);
                                 qa.expected_second = Some(middle.x.floor() as u64);
                             }
+                        }
+                        if qa_active {
+                            self.render_qa.activity.plotted_series.insert(
+                                format!("{id}/{label}"),
+                                samples.iter().map(|p| [p.x, p.y]).collect(),
+                            );
                         }
                         plot.points(Points::new(label, samples).radius(4.0).color(color));
                     }

@@ -18,6 +18,7 @@ struct ActivityQa {
     mean_spacing: f64,
     initial_spacing: Option<f64>,
     elapsed_ms: Option<f64>,
+    plotted_series: std::collections::BTreeMap<String, Vec<[f64; 2]>>,
 }
 
 impl StudioApp {
@@ -29,7 +30,7 @@ impl StudioApp {
         if qa.input_step == 0 && qa.activity.stable_frames < 8 {
             return;
         }
-        if gesture == "activity-view" {
+        if gesture == "activity-view" || gesture == "activity-throughput-view" {
             qa.input_step = 7;
             return;
         }
