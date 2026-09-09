@@ -4,7 +4,7 @@ level: L2
 route: REQUIREMENTS_FIRST
 execution_mode: EPHEMERAL
 confirmation: CONFIRMED-AUTO
-lifecycle: CONFIRMED
+lifecycle: IMPLEMENTED
 ---
 
 # 분석 UI 가독성·조작성 개선
