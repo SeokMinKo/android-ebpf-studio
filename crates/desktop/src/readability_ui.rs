@@ -152,6 +152,7 @@ mod readability_tests {
             if frame == 8 {
                 events.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -220.0),
+                    phase: egui::TouchPhase::Move,
                     modifiers: Default::default(),
                 });
             }
