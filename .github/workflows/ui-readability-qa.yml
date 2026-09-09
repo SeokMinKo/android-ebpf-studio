@@ -51,6 +51,17 @@ jobs:
           if ($process.ExitCode -ne 0 -or -not (Test-Path $env:ANDROID_EBPF_QA_OUTPUT)) {
             throw 'Narrow native replay did not produce capture'
           }
+          Remove-Item Env:ANDROID_EBPF_QA_SMALL
+          $env:ANDROID_EBPF_QA_TABLE_KEYBOARD = '1'
+          $env:ANDROID_EBPF_QA_OUTPUT = "$PWD/ui-evidence/table.png"
+          $process = Start-Process -FilePath './target/debug/android-ebpf-studio.exe' -PassThru
+          if (-not $process.WaitForExit(90000)) {
+            Stop-Process -Id $process.Id
+            throw 'Table native replay timed out'
+          }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $env:ANDROID_EBPF_QA_OUTPUT)) {
+            throw 'Table native replay did not produce capture'
+          }
       - name: Preserve native captures and measurement reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -61,7 +72,7 @@ jobs:
       - name: Emit review preview
         shell: pwsh
         run: |
-          foreach ($name in @('light', 'narrow')) {
+          foreach ($name in @('light', 'narrow', 'table')) {
             $bytes = [IO.File]::ReadAllBytes("$PWD/ui-evidence/$name.png")
             Write-Output "UI_PREVIEW_${name}=$([Convert]::ToBase64String($bytes))"
           }

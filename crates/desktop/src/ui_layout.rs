@@ -265,7 +265,7 @@ impl StudioApp {
                         ui.clip_rect(),
                     );
                 });
-                if !self.is_running() && self.selected_serial.is_none() {
+                if !self.is_running() && self.selected_serial.is_none() && self.session_path.is_none() {
                     ui.label("To record: connect and authorize an Android phone. To review an existing capture: Open session.");
                 }
                 ui.horizontal_wrapped(|ui| {

@@ -2043,6 +2043,7 @@ impl StudioApp {
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
         self.storage_range_ui(ui);
         let previous_axes = (self.x_axis, self.y_axis);
+        let compact_controls = ui.ctx().content_rect().width() < 1100.0;
         ui.heading("Explore I/O");
         ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
@@ -2117,6 +2118,12 @@ impl StudioApp {
                 }
             });
             }
+                    if compact_controls {
+                        if self.explorer_preset == ExplorerPreset::Custom {
+                            self.custom_geometry_ui(ui);
+                        }
+                        self.footprint_controls(ui);
+                    }
                     self.axis_ranges_ui(ui);
                     let cache_valid = self.explorer_view.as_ref().is_some_and(|view| view.generation == self.analysis_generation && view.x_axis == self.x_axis && view.y_axis == self.y_axis && view.group_by == self.group_by);
                     if !cache_valid { self.rebuild_explorer_view(); }
@@ -2133,10 +2140,12 @@ impl StudioApp {
                 ..Default::default()
             };
         }
-        if self.explorer_preset == ExplorerPreset::Custom {
-            self.custom_geometry_ui(ui);
+        if !compact_controls {
+            if self.explorer_preset == ExplorerPreset::Custom {
+                self.custom_geometry_ui(ui);
+            }
+            self.footprint_controls(ui);
         }
-        self.footprint_controls(ui);
         if (self.footprint.mode != FootprintMode::Combined || self.connected_footprint())
             && self.x_axis == AxisMetric::TimeMs
             && matches!(
