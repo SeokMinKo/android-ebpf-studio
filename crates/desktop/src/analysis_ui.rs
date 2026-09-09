@@ -529,11 +529,12 @@ impl StudioApp {
             }
             ui.label("Applies to Overview, Explore and Investigate");
         });
-        if self.query.active() {
-            let summary = self.query.scope_description();
-            ui.add(egui::Label::new(RichText::new(&summary).color(accent())).truncate())
-                .on_hover_text(summary);
-        }
+        // Reserve this row even before typing. Conditional insertion here moves
+        // controls under the pointer and changes egui's automatic input IDs.
+        let summary = self.query.scope_description();
+        let scope_color = if self.query.active() { accent() } else { muted() };
+        ui.add(egui::Label::new(RichText::new(&summary).color(scope_color)).truncate())
+            .on_hover_text(summary);
         ui.horizontal_wrapped(|ui| {
             ui.label("FilePath");
             let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(ui.available_width().min(360.0).max(120.0)).hint_text("Enter a path or filename, e.g. /data/local/tmp/read-A.bin"));
