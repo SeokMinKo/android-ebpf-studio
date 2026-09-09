@@ -55,6 +55,35 @@ mod filter_input_tests {
     }
 
     #[test]
+    fn collapsed_filters_offer_reset_without_opening_advanced_controls() {
+        let mut app = StudioApp::default();
+        for pid in [10, 20] {
+            app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue {
+                ts_ns: pid as u64 * 1000, request_id: pid as u64,
+                device_major: 8, device_minor: 0, sector: 0, sectors: 8,
+                bytes: 4096, operation: IoOperation::Read, pid, tid: pid,
+                cpu: 0, comm: "same".into(),
+            }));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None, ts_ns: pid as u64 * 1000 + 100, request_id: pid as u64,
+                device_major: 8, device_minor: 0, status: 0,
+            }));
+        }
+        app.query.pid = 10;
+        app.render_qa.output = Some(PathBuf::from("unused-test-region-marker"));
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        frame(&mut app, &ctx, &mut time, vec![]);
+        assert_eq!(app.analysis().completed_ios().len(), 1);
+        assert!(app.render_qa.regions.contains_key("clear-filters"),
+            "Reset must be available while advanced filters are collapsed");
+        click(&mut app, &ctx, &mut time, "clear-filters");
+        assert_eq!(app.query, AnalysisFilter::default());
+        assert_eq!(app.analysis().completed_ios().len(), 2);
+        assert_eq!(app.filter_edit_epoch, 1);
+    }
+
+    #[test]
     fn clear_filters_does_not_restore_pid_from_numeric_editor_on_lost_focus() {
         let mut app=StudioApp::default();
         for pid in [10,20] {
@@ -1306,3 +1335,4 @@ impl StudioApp {
         }
     }
 }
+
