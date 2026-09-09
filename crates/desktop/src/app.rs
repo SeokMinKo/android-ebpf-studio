@@ -41,6 +41,7 @@ include!("custom_axes.rs");
 include!("overall_ui.rs");
 include!("raw_log_ui.rs");
 include!("full_graph_tests.rs");
+include!("storage_range.rs");
 include!("analysis_ui.rs");
 include!("latency_distribution.rs");
 include!("qa.rs");
@@ -744,6 +745,7 @@ pub struct StudioApp {
     devices: Vec<AdbDevice>,
     selected_serial: Option<String>,
     preflight: Option<PreflightReport>,
+    storage_range: StorageRange,
     status: String,
     diagnostics: VecDeque<DiagnosticRecord>,
     analyzer: AnalysisEngine,
@@ -838,6 +840,7 @@ impl Default for StudioApp {
             devices: Vec::new(),
             selected_serial: None,
             preflight: None,
+            storage_range: StorageRange::default(),
             status: "Ready".into(),
             diagnostics: VecDeque::new(),
             analyzer: AnalysisEngine::new(),
@@ -1173,6 +1176,7 @@ impl StudioApp {
     }
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
+        self.storage_range = StorageRange::from_session(&path);
         self.activity = loaded.activity;
         self.footprint.view = None;
         self.footprint.pending = None;
@@ -1346,6 +1350,13 @@ impl StudioApp {
                     } else {
                         "Preflight incomplete — see capabilities".into()
                     };
+                    let capacity = phone_storage_bytes(&report.block_devices);
+                    if capacity != self.storage_range.detected_bytes
+                        && self.storage_range.override_bytes.is_none()
+                    {
+                        self.selection.auto_bounds = true;
+                    }
+                    self.storage_range.detected_bytes = capacity;
                     self.preflight = Some(report);
                 }
                 HostMessage::Status(status) => self.status = status,
@@ -1625,6 +1636,7 @@ impl StudioApp {
     }
 
     fn reset_analysis(&mut self) {
+        self.storage_range = StorageRange::default();
         self.scheduler = SchedulerState::default();
         self.activity = Arc::default();
         self.footprint = FootprintState::default();
@@ -2028,6 +2040,7 @@ impl StudioApp {
     }
 
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
+        self.storage_range_ui(ui);
         let previous_axes = (self.x_axis, self.y_axis);
         ui.heading("Explore I/O");
         ui.scope(|ui| {
@@ -2053,13 +2066,13 @@ impl StudioApp {
                     self.group_by = group;
                 }
                 ui.selectable_value(&mut self.selection.enabled, true, "Select");
-                ui.selectable_value(&mut self.selection.enabled, false, "Pan");
+                ui.selectable_value(&mut self.selection.enabled, false, "Zoom");
                 let clear = ui.add_enabled(self.selection.has_selection(), egui::Button::new("Clear selection"));
                 qa_region(&mut self.render_qa, "clear-selection", clear.rect, ui.clip_rect());
                 if clear.clicked() {
                     self.selection.clear_selection();
                 }
-                ui.label(RichText::new("Click or drag to select").color(muted())).on_hover_text("Select includes all plottable I/O in the area. Pan drags the view. The wheel zooms.");
+                ui.label(RichText::new(if self.selection.enabled { "Click or drag to select" } else { "Drag an area to zoom" }).color(muted())).on_hover_text("Select includes all plottable I/O in the area. Zoom enlarges the area dragged with the left mouse button. The wheel zooms; double-click resets the view.");
             });
             egui::CollapsingHeader::new("Plot settings")
                 .open((self.render_qa.output.is_some() && (std::env::var_os("ANDROID_EBPF_QA_RANGE").is_some() || std::env::var_os("ANDROID_EBPF_QA_PLOT_STYLE").is_some() || std::env::var_os("ANDROID_EBPF_QA_SETTINGS").is_some())).then_some(true))
@@ -2184,6 +2197,9 @@ impl StudioApp {
         let point_radius = self.plot_style.point_diameter * 0.5;
         let x_axis = self.x_axis;
         let y_axis = self.y_axis;
+        let storage_y_max = (self.explorer_preset == ExplorerPreset::LbaDistribution)
+            .then(|| self.storage_range.y_max(y_axis))
+            .flatten();
         let mut selection_request = None;
         let mut selection_overlay = None;
         let mut drag_start = self.selection.drag_start;
@@ -2200,6 +2216,22 @@ impl StudioApp {
             ui.label("Observed in-flight requests across all captured devices: at issue includes this request; after completion excludes it. Filters preserve the original context. Loss, ID ambiguity and expiry can reduce the count; this is not hardware queue depth.");
         }
         let plot = studio_plot("interactive-storage-explorer");
+        let plot = if let Some(max) = storage_y_max {
+            plot.default_y_bounds(0.0, max)
+        } else {
+            plot
+        };
+        let plot = plot.grid_spacing(40.0..=100.0);
+        let plot = if matches!(x_axis, AxisMetric::Category(_)) {
+            plot
+        } else {
+            plot.x_grid_spacer(|input| explorer_numeric_grid(input, 2.5))
+        };
+        let plot = if matches!(y_axis, AxisMetric::Category(_)) {
+            plot
+        } else {
+            plot.y_grid_spacer(|input| explorer_numeric_grid(input, 1.0))
+        };
         let plot = if self.explorer_preset == ExplorerPreset::Overall {
             plot.link_axis("overall-time", [true, false])
                 .link_cursor("overall-cursor", [true, false])
@@ -2212,8 +2244,9 @@ impl StudioApp {
             plot
         };
         let plot_response = plot
-            .allow_drag(!selecting)
+            .allow_drag(false)
             .allow_boxed_zoom(!selecting)
+            .boxed_zoom_pointer_button(egui::PointerButton::Primary)
             // Outer scrolling must not increase the plot height and continually
             // push the event table farther away from the visible viewport.
             .height(if compact {
@@ -2254,7 +2287,10 @@ impl StudioApp {
             })
             .show(ui, |plot| {
                 if auto_bounds {
-                    plot.set_auto_bounds(true);
+                    plot.set_auto_bounds([true, storage_y_max.is_none()]);
+                    if let Some(max) = storage_y_max {
+                        plot.set_plot_bounds_y(0.0..=max);
+                    }
                 }
                 if let Some(bounds) = bounds_command {
                     plot.set_plot_bounds(bounds);

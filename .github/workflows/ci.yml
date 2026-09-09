@@ -32,7 +32,10 @@ jobs:
       - name: Check Windows GUI
         run: cargo +1.98.0 check -p android-ebpf-studio --features gui
       - name: Test protocol and GUI analysis
-        run: cargo +1.98.0 test -p android-ebpf-protocol -p android-ebpf-studio --features gui
+        run: cargo +1.98.0 test -p android-ebpf-protocol -p android-ebpf-studio --features gui -- --skip selection_of_100000_requests_finishes_within_five_seconds
+      # Keep the five-second gate, without contention from the large graph matrix.
+      - name: Benchmark 100k-request selection
+        run: cargo +1.98.0 test -p android-ebpf-studio --features gui --lib app::selection_tests::selection_of_100000_requests_finishes_within_five_seconds -- --exact --nocapture
       - name: Build host ADB fixtures
         run: cargo +1.98.0 build -p android-ebpf-studio --example fake_adb --example fake_perfetto_adb
       - name: Verify capture and recovery transport with host fixtures

@@ -673,6 +673,122 @@ mod selection_tests {
     use super::*;
     use android_ebpf_protocol::{BlockComplete, BlockIssue, StorageEvent};
 
+    #[test]
+    fn lba_default_uses_phone_capacity_without_overriding_manual_zoom() {
+        for gb in [128,256,512,1000] {
+            let mut app=StudioApp {analyzer:fixture(100),..Default::default()};
+            app.storage_range.detected_bytes=Some(gb*1_000_000_000);
+            app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue {ts_ns:101_000_000,request_id:101,device_major:8,device_minor:0,sector:u64::MAX/2,sectors:8,bytes:4096,operation:IoOperation::Read,pid:1,tid:1,cpu:0,comm:"outlier".into()}));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,ts_ns:102_000_000,request_id:101,device_major:8,device_minor:0,status:0}));
+            let ctx=egui::Context::default();
+            let frame=|app:&mut StudioApp| {
+                let mut output=ctx.run_ui(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1600.,1000.))),..Default::default()},|root| {egui::CentralPanel::default().show(root,|ui| {app.explorer_plot_ui(ui,true);});});
+                output.textures_delta.clear();
+            };
+            for _ in 0..3 {frame(&mut app);}
+            let bounds=app.selection.current_bounds.unwrap();
+            assert_eq!([bounds.min()[1],bounds.max()[1]],[0.,gb as f64*1000.]);
+            assert_eq!(app.analysis().completed_ios().len(),101,"Outliers stay in the cohort");
+            app.selection.bounds_command=Some(egui_plot::PlotBounds::from_min_max([0.,10.],[100.,20.]));
+            for _ in 0..3 {frame(&mut app);}
+            assert_eq!(app.selection.current_bounds.unwrap().max()[1],20.,"Manual zoom persists");
+            app.selection.fit_axis_ranges();frame(&mut app);
+            assert_eq!(app.selection.current_bounds.unwrap().max()[1],gb as f64*1000.);
+        }
+    }
+
+    #[test]
+    fn address_axis_labels_survive_maximized_viewports() {
+        let mut failures=Vec::new();
+        for size in [egui::vec2(1500.,940.), egui::vec2(1920.,1080.), egui::vec2(2880.,1660.), egui::vec2(3840.,2160.)] {
+            for (lo,hi) in [(0.,500_000.),(45000.,47000.),(45615.,45616.),(45615.02,45615.07)] {
+                let mut app = StudioApp {analyzer:fixture(100),..Default::default()};
+                app.x_axis=AxisMetric::TimeMs; app.y_axis=AxisMetric::AddressMB;
+                app.selection.bounds_command=Some(egui_plot::PlotBounds::from_min_max([7290.,lo],[7460.,hi]));
+                let ctx=egui::Context::default();
+                for n in 0..4 {
+                    let mut output=ctx.run_ui(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,size)),..Default::default()},|root| {
+                        egui::CentralPanel::default().show(root,|ui| {app.explorer_plot_ui(ui,false);});
+                    });
+                    output.textures_delta.clear();
+                    if n<3 {continue;}
+                    let plot=app.render_qa.plot_rect.unwrap();
+                    let labels:Vec<_>=output.shapes.iter().filter_map(|s| {
+                        if let egui::Shape::Text(t)=&s.shape {
+                            let rect=s.shape.visual_bounding_rect();
+                            if t.galley.text().parse::<f64>().is_ok() && rect.center().x<plot.left() && rect.center().y>plot.top() && rect.center().y<plot.bottom() && rect.intersects(s.clip_rect) {
+                                return Some(t.galley.text().to_string());
+                            }
+                        }
+                        None
+                    }).collect();
+                    if labels.len()<2 {failures.push(format!("Y labels missing at {size:?}, {lo}..{hi}: {labels:?}"));}
+                    let x_labels:Vec<_>=output.shapes.iter().filter_map(|s| {
+                        if let egui::Shape::Text(t)=&s.shape {
+                            let rect=s.shape.visual_bounding_rect();
+                            if rect.center().y>plot.bottom() && rect.top()<plot.bottom()+35. && rect.center().x>plot.left() && rect.center().x<plot.right() && t.galley.text().parse::<f64>().is_ok() {return Some((t.galley.text().to_string(),rect));}
+                        }
+                        None
+                    }).collect();
+                    assert!(x_labels.len()>=4,"Need detailed time ticks at {size:?}: {x_labels:?}");
+                    for (i,(_,a)) in x_labels.iter().enumerate() {for (_,b) in x_labels.iter().skip(i+1) {assert!(!a.intersects(*b),"Time labels overlap");}}
+                }
+            }
+        }
+        assert!(failures.is_empty(),"{}",failures.join("\n"));
+    }
+
+    #[test]
+    fn explore_primary_drag_zooms_only_in_zoom_mode() {
+        for selecting in [false, true] {
+            for reverse in [false, true] {
+                let mut app = StudioApp { analyzer: fixture(100), ..Default::default() };
+                app.selection.enabled = selecting;
+                app.x_axis = AxisMetric::TimeMs;
+                app.y_axis = AxisMetric::Sector;
+                let ctx = egui::Context::default();
+                let mut time = 0.0;
+                let mut frame = |app: &mut StudioApp, events| {
+                    time += 0.1;
+                    let mut output = ctx.run_ui(egui::RawInput {
+                        time: Some(time),
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                        events,
+                        ..Default::default()
+                    }, |root| {
+                        egui::CentralPanel::default().show(root, |ui| { app.explorer_plot_ui(ui, true); });
+                    });
+                    output.textures_delta.clear();
+                };
+                for _ in 0..4 { frame(&mut app, vec![]); }
+                let before = app.selection.current_bounds.unwrap();
+                let rect = app.render_qa.plot_rect.unwrap();
+                let a = rect.min + rect.size() * 0.3;
+                let b = rect.min + rect.size() * 0.7;
+                let (start, end) = if reverse { (b, a) } else { (a, b) };
+                frame(&mut app, vec![egui::Event::PointerMoved(start), egui::Event::PointerButton {
+                    pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default()
+                }]);
+                frame(&mut app, vec![egui::Event::PointerMoved(start + (end - start) * 0.1)]);
+                frame(&mut app, vec![egui::Event::PointerMoved(end)]);
+                frame(&mut app, vec![egui::Event::PointerButton {
+                    pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default()
+                }]);
+                frame(&mut app, vec![]);
+                let after = app.selection.current_bounds.unwrap();
+                if selecting {
+                    assert_eq!(before, after, "Select must not change the viewport");
+                    assert!(app.selection.pending.is_some() || app.selection.summary.is_some());
+                } else {
+                    assert!(after.width() < before.width() * 0.6);
+                    assert!(after.height() < before.height() * 0.6);
+                    assert!(after.min()[0] > before.min()[0] && after.max()[0] < before.max()[0]);
+                    assert!(!app.selection.has_selection(), "Zoom must not select I/O");
+                }
+            }
+        }
+    }
+
     fn fixture(count: u64) -> AnalysisEngine {
         let mut engine = AnalysisEngine::new();
         for id in 1..=count {

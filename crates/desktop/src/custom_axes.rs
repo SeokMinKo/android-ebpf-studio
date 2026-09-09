@@ -115,6 +115,9 @@ impl AxisCategories {
         if axis == AxisMetric::AddressMB {
             return format!("{value:.6}").trim_end_matches('0').trim_end_matches('.').to_owned();
         }
+        if axis == AxisMetric::TimeMs {
+            return format!("{value:.9}").trim_end_matches('0').trim_end_matches('.').to_owned();
+        }
         if matches!(axis, AxisMetric::Category(_)) {
             if (value - value.round()).abs() > 0.001 || value < 0. {
                 return String::new();
