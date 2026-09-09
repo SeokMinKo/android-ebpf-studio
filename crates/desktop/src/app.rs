@@ -59,6 +59,7 @@ include!("file_evidence.rs");
 include!("plot_sampling.rs");
 include!("view_export.rs");
 include!("ui_layout.rs");
+include!("readability_ui.rs");
 include!("page_purpose.rs");
 include!("compare_explore.rs");
 include!("perfetto_ui.rs");
@@ -2042,6 +2043,7 @@ impl StudioApp {
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
         self.storage_range_ui(ui);
         let previous_axes = (self.x_axis, self.y_axis);
+        let compact_controls = ui.ctx().content_rect().width() < 1100.0;
         ui.heading("Explore I/O");
         ui.scope(|ui| {
             ui.horizontal_wrapped(|ui| {
@@ -2065,8 +2067,11 @@ impl StudioApp {
                     self.y_axis = y;
                     self.group_by = group;
                 }
-                ui.selectable_value(&mut self.selection.enabled, true, "Select");
-                ui.selectable_value(&mut self.selection.enabled, false, "Zoom");
+                ui.label("Mouse mode");
+                ui.selectable_value(&mut self.selection.enabled, true, "Select")
+                    .on_hover_text("Select requests to read their summary and file/process evidence. This does not apply an analysis filter.");
+                ui.selectable_value(&mut self.selection.enabled, false, "Zoom")
+                    .on_hover_text("Change the visible range. Zooming does not change the analysis filter.");
                 let clear = ui.add_enabled(self.selection.has_selection(), egui::Button::new("Clear selection"));
                 qa_region(&mut self.render_qa, "clear-selection", clear.rect, ui.clip_rect());
                 if clear.clicked() {
@@ -2113,6 +2118,12 @@ impl StudioApp {
                 }
             });
             }
+                    if compact_controls {
+                        if self.explorer_preset == ExplorerPreset::Custom {
+                            self.custom_geometry_ui(ui);
+                        }
+                        self.footprint_controls(ui);
+                    }
                     self.axis_ranges_ui(ui);
                     let cache_valid = self.explorer_view.as_ref().is_some_and(|view| view.generation == self.analysis_generation && view.x_axis == self.x_axis && view.y_axis == self.y_axis && view.group_by == self.group_by);
                     if !cache_valid { self.rebuild_explorer_view(); }
@@ -2129,10 +2140,12 @@ impl StudioApp {
                 ..Default::default()
             };
         }
-        if self.explorer_preset == ExplorerPreset::Custom {
-            self.custom_geometry_ui(ui);
+        if !compact_controls {
+            if self.explorer_preset == ExplorerPreset::Custom {
+                self.custom_geometry_ui(ui);
+            }
+            self.footprint_controls(ui);
         }
-        self.footprint_controls(ui);
         if (self.footprint.mode != FootprintMode::Combined || self.connected_footprint())
             && self.x_axis == AxisMetric::TimeMs
             && matches!(
@@ -3346,17 +3359,25 @@ impl StudioApp {
         section_header(
             ui,
             "Completed block I/O",
-            "Current filters · all loaded detail rows · focus an Open button and press Enter for full I/O and FilePath evidence",
+            "Current filters · scroll horizontally for more columns · Open I/O shows request and file evidence (Enter also works)",
         );
         if ui.button("Export table I/O CSV").clicked() {
             self.export_io_cohort_csv(None);
+        }
+        if self.analysis().completed_ios().is_empty() {
+            ui.label(if self.query.active() {
+                "No completed I/O matches this scope. Use Clear filters above to restore all loaded requests."
+            } else {
+                "No completed I/O is available in this session. Check Diagnostics for capture support and missing observations."
+            });
+            return;
         }
         let mut open = None;
         let mut table_focused = false;
         card_frame().show(ui, |ui| {
             let items = self.analysis().completed_ios();
             let title = ui.label(format!(
-                "{} requests · newest first · rows render as you scroll",
+                "{} requests · newest first · header stays visible while scrolling",
                 items.len()
             ));
             if self.render_qa.output.is_some()
@@ -3365,102 +3386,88 @@ impl StudioApp {
             {
                 title.scroll_to_me(Some(egui::Align::Min));
             }
-            egui::ScrollArea::both()
-                .id_salt("completed-io-table")
-                .max_height(320.0)
-                .show_rows(ui, 28.0, items.len() + 1, |ui, range| {
-                    for position in range {
-                        ui.horizontal(|ui| {
-                            if position == 0 {
-                                for (title, width) in [
-                                    ("Details", 85.0),
-                                    ("Time ns", 145.0),
-                                    ("Op", 65.0),
-                                    ("Access", 100.0),
-                                    ("Bytes", 80.0),
-                                    ("Sector", 110.0),
-                                    ("Device", 85.0),
-                                    ("Queue", 90.0),
-                                    ("Device latency", 110.0),
-                                    ("Total latency", 110.0),
-                                    ("File / Origin", 260.0),
-                                    ("Confidence", 100.0),
-                                    ("PID / TID", 115.0),
-                                    ("Process", 140.0),
-                                ] {
-                                    ui.add_sized(
-                                        [width, 25.0],
-                                        egui::Label::new(RichText::new(title).strong()),
-                                    );
-                                }
-                                return;
-                            }
-                            let io = &items[items.len() - position];
-                            let key = selection_key(io);
-                            let response = ui
-                                .push_id(key, |ui| {
-                                    ui.add_sized([85.0, 25.0], egui::Button::new("Open I/O"))
-                                })
-                                .inner;
-                            if self.render_qa.output.is_some()
-                                && std::env::var_os("ANDROID_EBPF_QA_TABLE_KEYBOARD").is_some()
-                                && position == 1
-                                && self.render_qa.input_step == 0
-                            {
-                                response.request_focus();
-                                response.scroll_to_me(Some(egui::Align::Center));
-                                table_focused = response.has_focus();
-                            }
-                            if response.clicked() {
-                                open = Some(key);
-                            }
-                            let graph = self.analysis().transaction_for(io);
-                            let origins = block_file_origins(&graph);
-                            let file = if origins.is_empty() {
-                                "Unresolved · see I/O details".into()
-                            } else if origins.len() > 1 {
-                                format!("{} candidates · see I/O details", origins.len())
-                            } else {
-                                origins[0]
-                                    .path
-                                    .as_ref()
-                                    .and_then(|p| p.path.clone())
-                                    .unwrap_or_else(|| origins[0].file.fallback_label())
-                            };
-                            for (value, width) in [
-                                (
-                                    io.completion_timestamp()
-                                        .map_or("Unavailable".into(), |ts| ts.to_string()),
-                                    145.0,
-                                ),
-                                (operation_label(io.issue.operation).into(), 65.0),
-                                (access_label(io.access_pattern).into(), 100.0),
-                                (io.issue.bytes.to_string(), 80.0),
-                                (io.issue.sector.to_string(), 110.0),
-                                (
-                                    format!("{}:{}", io.issue.device_major, io.issue.device_minor),
-                                    85.0,
-                                ),
-                                (format_latency(io.queue_latency_ns), 90.0),
-                                (format_latency(io.device_latency_ns), 110.0),
-                                (format_latency(io.total_latency_ns), 110.0),
-                                (file, 260.0),
-                                (format!("{:?}", path_confidence(&origins)), 100.0),
-                                (
-                                    format!(
-                                        "{} / {}",
-                                        identity_number(io.issuer_pid()),
-                                        identity_number(io.issuer_tid())
-                                    ),
-                                    115.0,
-                                ),
-                                (io.issue.comm.clone(), 140.0),
-                            ] {
-                                ui.add_sized([width, 25.0], egui::Label::new(&value).truncate())
-                                    .on_hover_text(value);
+            // One horizontal owner keeps the header and body on the same columns.
+            egui::ScrollArea::horizontal()
+                .id_salt("completed-io-table-horizontal")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (column, (title, _, _)) in IO_TABLE_COLUMNS.iter().enumerate() {
+                            io_table_cell(ui, column, title, true);
+                        }
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("completed-io-table")
+                        .max_height(320.0)
+                        .show_rows(ui, 28.0, items.len(), |ui, range| {
+                            for index in range {
+                                let position = index + 1;
+                                ui.horizontal(|ui| {
+                                    let io = &items[items.len() - position];
+                                    let key = selection_key(io);
+                                    let response = ui
+                                        .push_id(key, |ui| {
+                                            ui.add_sized(
+                                                [85.0, 25.0],
+                                                egui::Button::new("Open I/O"),
+                                            )
+                                        })
+                                        .inner;
+                                    if self.render_qa.output.is_some()
+                                        && std::env::var_os("ANDROID_EBPF_QA_TABLE_KEYBOARD")
+                                            .is_some()
+                                        && position == 1
+                                        && self.render_qa.input_step == 0
+                                    {
+                                        response.request_focus();
+                                        response.scroll_to_me(Some(egui::Align::Center));
+                                        table_focused = response.has_focus();
+                                    }
+                                    if response.clicked() {
+                                        open = Some(key);
+                                    }
+                                    let graph = self.analysis().transaction_for(io);
+                                    let origins = block_file_origins(&graph);
+                                    let file = if origins.is_empty() {
+                                        "Unresolved · see I/O details".into()
+                                    } else if origins.len() > 1 {
+                                        format!("{} candidates · see I/O details", origins.len())
+                                    } else {
+                                        origins[0]
+                                            .path
+                                            .as_ref()
+                                            .and_then(|p| p.path.clone())
+                                            .unwrap_or_else(|| origins[0].file.fallback_label())
+                                    };
+                                    let values = [
+                                        io.completion_timestamp()
+                                            .map_or("Unavailable".into(), |ts| ts.to_string()),
+                                        operation_label(io.issue.operation).into(),
+                                        access_label(io.access_pattern).into(),
+                                        io.issue.bytes.to_string(),
+                                        io.issue.sector.to_string(),
+                                        format!(
+                                            "{}:{}",
+                                            io.issue.device_major, io.issue.device_minor
+                                        ),
+                                        format_latency(io.queue_latency_ns),
+                                        format_latency(io.device_latency_ns),
+                                        format_latency(io.total_latency_ns),
+                                        file,
+                                        format!("{:?}", path_confidence(&origins)),
+                                        format!(
+                                            "{} / {}",
+                                            identity_number(io.issuer_pid()),
+                                            identity_number(io.issuer_tid())
+                                        ),
+                                        io.issue.comm.clone(),
+                                    ];
+                                    for (column, value) in values.iter().enumerate() {
+                                        io_table_cell(ui, column + 1, value, false);
+                                    }
+                                });
                             }
                         });
-                    }
                 });
         });
         self.render_qa.table_button_focused |= table_focused;

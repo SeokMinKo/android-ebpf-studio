@@ -55,6 +55,35 @@ mod filter_input_tests {
     }
 
     #[test]
+    fn collapsed_filters_offer_reset_without_opening_advanced_controls() {
+        let mut app = StudioApp::default();
+        for pid in [10, 20] {
+            app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue {
+                ts_ns: pid as u64 * 1000, request_id: pid as u64,
+                device_major: 8, device_minor: 0, sector: 0, sectors: 8,
+                bytes: 4096, operation: IoOperation::Read, pid, tid: pid,
+                cpu: 0, comm: "same".into(),
+            }));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete {
+                cpu: None, ts_ns: pid as u64 * 1000 + 100, request_id: pid as u64,
+                device_major: 8, device_minor: 0, status: 0,
+            }));
+        }
+        app.query.pid = 10;
+        app.render_qa.output = Some(PathBuf::from("unused-test-region-marker"));
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        frame(&mut app, &ctx, &mut time, vec![]);
+        assert_eq!(app.analysis().completed_ios().len(), 1);
+        assert!(app.render_qa.regions.contains_key("clear-filters"),
+            "Reset must be available while advanced filters are collapsed");
+        click(&mut app, &ctx, &mut time, "clear-filters");
+        assert_eq!(app.query, AnalysisFilter::default());
+        assert_eq!(app.analysis().completed_ios().len(), 2);
+        assert_eq!(app.filter_edit_epoch, 1);
+    }
+
+    #[test]
     fn clear_filters_does_not_restore_pid_from_numeric_editor_on_lost_focus() {
         let mut app=StudioApp::default();
         for pid in [10,20] {
@@ -491,8 +520,24 @@ impl StudioApp {
         }
         let previous = self.query.clone();
         ui.horizontal_wrapped(|ui| {
+            ui.strong("Analysis scope");
+            let reset = ui.add_enabled(self.query.active(), egui::Button::new("Clear filters"));
+            qa_region(&mut self.render_qa, "clear-filters", reset.rect, ui.clip_rect());
+            if reset.clicked() {
+                self.query = AnalysisFilter::default();
+                self.filter_edit_epoch = self.filter_edit_epoch.wrapping_add(1);
+            }
+            ui.label("Applies to Overview, Explore and Investigate");
+        });
+        // Reserve this row even before typing. Conditional insertion here moves
+        // controls under the pointer and changes egui's automatic input IDs.
+        let summary = self.query.scope_description();
+        let scope_color = if self.query.active() { accent() } else { muted() };
+        ui.add(egui::Label::new(RichText::new(&summary).color(scope_color)).truncate())
+            .on_hover_text(summary);
+        ui.horizontal_wrapped(|ui| {
             ui.label("FilePath");
-            let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(360.0).hint_text("Enter a path or filename, e.g. /data/local/tmp/read-A.bin"));
+            let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(ui.available_width().min(360.0).max(120.0)).hint_text("Enter a path or filename, e.g. /data/local/tmp/read-A.bin"));
             qa_region(&mut self.render_qa,"file-filter",file.rect,ui.clip_rect());
             let exact=ui.checkbox(&mut self.query.file_exact,"Match full path");
             qa_region(&mut self.render_qa,"file-exact",exact.rect,ui.clip_rect());
@@ -509,7 +554,7 @@ impl StudioApp {
                 }
             });
         }
-        let header=ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
+        let header=ui.collapsing("Analysis filters · time, process, device and measurement", |ui| {
             // A numeric editor commits its buffered text when it loses focus.
             // Replace input identities after Clear so a delayed commit cannot
             // restore a previous PID, time or size into the reset query.
@@ -538,8 +583,6 @@ impl StudioApp {
                 qa_region(&mut self.render_qa,"process-filter",process.rect,ui.clip_rect());
                 ui.label("Device major:minor"); let device=ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
                 qa_region(&mut self.render_qa,"device-filter",device.rect,ui.clip_rect());
-                let clear=ui.button("Clear filters");qa_region(&mut self.render_qa,"clear-filters",clear.rect,ui.clip_rect());
-                if clear.clicked() { self.query = AnalysisFilter::default();self.filter_edit_epoch=self.filter_edit_epoch.wrapping_add(1); }
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Size (bytes)");
@@ -569,17 +612,6 @@ impl StudioApp {
         qa_region(&mut self.render_qa,"analysis-filters",header.header_response.rect,ui.clip_rect());
         if previous != self.query {
             self.invalidate_query();
-        }
-        if self.query.active() {
-            ui.label(self.query.request_keys.as_ref().map_or_else(
-                || "Filters active".to_string(),
-                |keys| {
-                    format!(
-                        "Filters active · {} explicitly selected request identities",
-                        keys.len()
-                    )
-                },
-            ));
         }
         self.time_filter_scope_ui(ui);
     }
@@ -1201,6 +1233,14 @@ impl StudioApp {
             ui.label("2. Select a target if more than one phone is connected, then choose Start analysis.");
             ui.label("3. Run the workload on your phone. Stop & analyze saves the session and opens the results.");
             ui.add_space(18.0);
+            if !self.is_running() {
+                ui.strong("Already have a capture?");
+                if ui.button("Open saved session").clicked() {
+                    self.open_session();
+                }
+                ui.label("Analyze a saved session without connecting a phone.");
+                ui.add_space(12.0);
+            }
             info_banner(
                 ui,
                 "Root and kernel capabilities are checked at every Start. The app prepares tracing automatically and explains FilePath confidence or unsupported metrics. No mapping file or kernel offset is required.",
@@ -1306,3 +1346,4 @@ impl StudioApp {
         }
     }
 }
+

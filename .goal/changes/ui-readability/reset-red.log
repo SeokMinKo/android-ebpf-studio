@@ -1,0 +1,10 @@
+2026-09-09T14:01:36.2072257Z ##[group]Run cargo +1.98.0 test -p android-ebpf-protocol -p android-ebpf-studio --features gui -- --skip selection_of_100000_requests_finishes_within_five_seconds
+2026-09-09T14:01:36.2073461Z [36;1mcargo +1.98.0 test -p android-ebpf-protocol -p android-ebpf-studio --features gui -- --skip selection_of_100000_requests_finishes_within_five_seconds[0m
+2026-09-09T14:05:22.7276482Z test app::filter_input_tests::collapsed_filters_offer_reset_without_opening_advanced_controls ... FAILED
+2026-09-09T14:05:38.9761911Z ---- app::filter_input_tests::collapsed_filters_offer_reset_without_opening_advanced_controls stdout ----
+2026-09-09T14:05:38.9763566Z thread 'app::filter_input_tests::collapsed_filters_offer_reset_without_opening_advanced_controls' (1604) panicked at crates\desktop\src\analysis_ui.rs:78:9:
+2026-09-09T14:05:38.9764732Z Reset must be available while advanced filters are collapsed
+2026-09-09T14:05:38.9766616Z     app::filter_input_tests::collapsed_filters_offer_reset_without_opening_advanced_controls
+2026-09-09T14:05:38.9767605Z test result: FAILED. 135 passed; 1 failed; 3 ignored; 0 measured; 1 filtered out; finished in 16.52s
+2026-09-09T14:05:38.9820989Z error: test failed, to rerun pass `-p android-ebpf-studio --lib`
+
