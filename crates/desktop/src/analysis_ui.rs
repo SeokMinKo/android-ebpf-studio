@@ -520,8 +520,23 @@ impl StudioApp {
         }
         let previous = self.query.clone();
         ui.horizontal_wrapped(|ui| {
+            ui.strong("Analysis scope");
+            let reset = ui.add_enabled(self.query.active(), egui::Button::new("Clear filters"));
+            qa_region(&mut self.render_qa, "clear-filters", reset.rect, ui.clip_rect());
+            if reset.clicked() {
+                self.query = AnalysisFilter::default();
+                self.filter_edit_epoch = self.filter_edit_epoch.wrapping_add(1);
+            }
+            ui.label("Applies to Overview, Explore and Investigate");
+        });
+        if self.query.active() {
+            let summary = self.query.scope_description();
+            ui.add(egui::Label::new(RichText::new(&summary).color(accent())).truncate())
+                .on_hover_text(summary);
+        }
+        ui.horizontal_wrapped(|ui| {
             ui.label("FilePath");
-            let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(360.0).hint_text("Enter a path or filename, e.g. /data/local/tmp/read-A.bin"));
+            let file=ui.add(egui::TextEdit::singleline(&mut self.query.file).desired_width(ui.available_width().min(360.0).max(120.0)).hint_text("Enter a path or filename, e.g. /data/local/tmp/read-A.bin"));
             qa_region(&mut self.render_qa,"file-filter",file.rect,ui.clip_rect());
             let exact=ui.checkbox(&mut self.query.file_exact,"Match full path");
             qa_region(&mut self.render_qa,"file-exact",exact.rect,ui.clip_rect());
@@ -538,7 +553,7 @@ impl StudioApp {
                 }
             });
         }
-        let header=ui.collapsing("Analysis filters · shared across Overview, Explore and Investigate", |ui| {
+        let header=ui.collapsing("Analysis filters · time, process, device and measurement", |ui| {
             // A numeric editor commits its buffered text when it loses focus.
             // Replace input identities after Clear so a delayed commit cannot
             // restore a previous PID, time or size into the reset query.
@@ -567,8 +582,6 @@ impl StudioApp {
                 qa_region(&mut self.render_qa,"process-filter",process.rect,ui.clip_rect());
                 ui.label("Device major:minor"); let device=ui.add(egui::TextEdit::singleline(&mut self.query.device).desired_width(80.0));
                 qa_region(&mut self.render_qa,"device-filter",device.rect,ui.clip_rect());
-                let clear=ui.button("Clear filters");qa_region(&mut self.render_qa,"clear-filters",clear.rect,ui.clip_rect());
-                if clear.clicked() { self.query = AnalysisFilter::default();self.filter_edit_epoch=self.filter_edit_epoch.wrapping_add(1); }
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Size (bytes)");
@@ -598,17 +611,6 @@ impl StudioApp {
         qa_region(&mut self.render_qa,"analysis-filters",header.header_response.rect,ui.clip_rect());
         if previous != self.query {
             self.invalidate_query();
-        }
-        if self.query.active() {
-            ui.label(self.query.request_keys.as_ref().map_or_else(
-                || "Filters active".to_string(),
-                |keys| {
-                    format!(
-                        "Filters active · {} explicitly selected request identities",
-                        keys.len()
-                    )
-                },
-            ));
         }
         self.time_filter_scope_ui(ui);
     }
@@ -1230,6 +1232,14 @@ impl StudioApp {
             ui.label("2. Select a target if more than one phone is connected, then choose Start analysis.");
             ui.label("3. Run the workload on your phone. Stop & analyze saves the session and opens the results.");
             ui.add_space(18.0);
+            if !self.is_running() {
+                ui.strong("Already have a capture?");
+                if ui.button("Open saved session").clicked() {
+                    self.open_session();
+                }
+                ui.label("Analyze a saved session without connecting a phone.");
+                ui.add_space(12.0);
+            }
             info_banner(
                 ui,
                 "Root and kernel capabilities are checked at every Start. The app prepares tracing automatically and explains FilePath confidence or unsupported metrics. No mapping file or kernel offset is required.",
