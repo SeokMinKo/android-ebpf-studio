@@ -41,6 +41,7 @@ include!("custom_axes.rs");
 include!("overall_ui.rs");
 include!("raw_log_ui.rs");
 include!("full_graph_tests.rs");
+include!("storage_range.rs");
 include!("analysis_ui.rs");
 include!("latency_distribution.rs");
 include!("qa.rs");
@@ -744,6 +745,7 @@ pub struct StudioApp {
     devices: Vec<AdbDevice>,
     selected_serial: Option<String>,
     preflight: Option<PreflightReport>,
+    storage_range: StorageRange,
     status: String,
     diagnostics: VecDeque<DiagnosticRecord>,
     analyzer: AnalysisEngine,
@@ -838,6 +840,7 @@ impl Default for StudioApp {
             devices: Vec::new(),
             selected_serial: None,
             preflight: None,
+            storage_range: StorageRange::default(),
             status: "Ready".into(),
             diagnostics: VecDeque::new(),
             analyzer: AnalysisEngine::new(),
@@ -1173,6 +1176,7 @@ impl StudioApp {
     }
 
     fn apply_loaded_session(&mut self, path: PathBuf, loaded: session::LoadedAnalysis) {
+        self.storage_range = StorageRange::from_session(&path);
         self.activity = loaded.activity;
         self.footprint.view = None;
         self.footprint.pending = None;
@@ -1346,6 +1350,13 @@ impl StudioApp {
                     } else {
                         "Preflight incomplete — see capabilities".into()
                     };
+                    let capacity = phone_storage_bytes(&report.block_devices);
+                    if capacity != self.storage_range.detected_bytes
+                        && self.storage_range.override_bytes.is_none()
+                    {
+                        self.selection.auto_bounds = true;
+                    }
+                    self.storage_range.detected_bytes = capacity;
                     self.preflight = Some(report);
                 }
                 HostMessage::Status(status) => self.status = status,
@@ -1625,6 +1636,7 @@ impl StudioApp {
     }
 
     fn reset_analysis(&mut self) {
+        self.storage_range = StorageRange::default();
         self.scheduler = SchedulerState::default();
         self.activity = Arc::default();
         self.footprint = FootprintState::default();
@@ -2028,6 +2040,7 @@ impl StudioApp {
     }
 
     fn explorer_ui(&mut self, ui: &mut egui::Ui) {
+        self.storage_range_ui(ui);
         let previous_axes = (self.x_axis, self.y_axis);
         ui.heading("Explore I/O");
         ui.scope(|ui| {
@@ -2184,6 +2197,9 @@ impl StudioApp {
         let point_radius = self.plot_style.point_diameter * 0.5;
         let x_axis = self.x_axis;
         let y_axis = self.y_axis;
+        let storage_y_max = (self.explorer_preset == ExplorerPreset::LbaDistribution)
+            .then(|| self.storage_range.y_max(y_axis))
+            .flatten();
         let mut selection_request = None;
         let mut selection_overlay = None;
         let mut drag_start = self.selection.drag_start;
@@ -2200,6 +2216,11 @@ impl StudioApp {
             ui.label("Observed in-flight requests across all captured devices: at issue includes this request; after completion excludes it. Filters preserve the original context. Loss, ID ambiguity and expiry can reduce the count; this is not hardware queue depth.");
         }
         let plot = studio_plot("interactive-storage-explorer");
+        let plot = if let Some(max) = storage_y_max {
+            plot.default_y_bounds(0.0, max)
+        } else {
+            plot
+        };
         let plot = plot.grid_spacing(40.0..=100.0);
         let plot = if matches!(x_axis, AxisMetric::Category(_)) {
             plot
@@ -2266,7 +2287,10 @@ impl StudioApp {
             })
             .show(ui, |plot| {
                 if auto_bounds {
-                    plot.set_auto_bounds(true);
+                    plot.set_auto_bounds([true, storage_y_max.is_none()]);
+                    if let Some(max) = storage_y_max {
+                        plot.set_plot_bounds_y(0.0..=max);
+                    }
                 }
                 if let Some(bounds) = bounds_command {
                     plot.set_plot_bounds(bounds);

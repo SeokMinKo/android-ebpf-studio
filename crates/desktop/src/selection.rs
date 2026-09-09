@@ -674,6 +674,30 @@ mod selection_tests {
     use android_ebpf_protocol::{BlockComplete, BlockIssue, StorageEvent};
 
     #[test]
+    fn lba_default_uses_phone_capacity_without_overriding_manual_zoom() {
+        for gb in [128,256,512,1000] {
+            let mut app=StudioApp {analyzer:fixture(100),..Default::default()};
+            app.storage_range.detected_bytes=Some(gb*1_000_000_000);
+            app.analyzer.ingest(StorageEvent::BlockIssue(BlockIssue {ts_ns:101_000_000,request_id:101,device_major:8,device_minor:0,sector:u64::MAX/2,sectors:8,bytes:4096,operation:IoOperation::Read,pid:1,tid:1,cpu:0,comm:"outlier".into()}));
+            app.analyzer.ingest(StorageEvent::BlockComplete(BlockComplete {cpu:None,ts_ns:102_000_000,request_id:101,device_major:8,device_minor:0,status:0}));
+            let ctx=egui::Context::default();
+            let frame=|app:&mut StudioApp| {
+                let mut output=ctx.run_ui(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1600.,1000.))),..Default::default()},|root| {egui::CentralPanel::default().show(root,|ui| {app.explorer_plot_ui(ui,true);});});
+                output.textures_delta.clear();
+            };
+            for _ in 0..3 {frame(&mut app);}
+            let bounds=app.selection.current_bounds.unwrap();
+            assert_eq!([bounds.min()[1],bounds.max()[1]],[0.,gb as f64*1000.]);
+            assert_eq!(app.analysis().completed_ios().len(),101,"Outliers stay in the cohort");
+            app.selection.bounds_command=Some(egui_plot::PlotBounds::from_min_max([0.,10.],[100.,20.]));
+            for _ in 0..3 {frame(&mut app);}
+            assert_eq!(app.selection.current_bounds.unwrap().max()[1],20.,"Manual zoom persists");
+            app.selection.fit_axis_ranges();frame(&mut app);
+            assert_eq!(app.selection.current_bounds.unwrap().max()[1],gb as f64*1000.);
+        }
+    }
+
+    #[test]
     fn address_axis_labels_survive_maximized_viewports() {
         let mut failures=Vec::new();
         for size in [egui::vec2(1500.,940.), egui::vec2(1920.,1080.), egui::vec2(2880.,1660.), egui::vec2(3840.,2160.)] {
