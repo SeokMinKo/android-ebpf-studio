@@ -137,7 +137,7 @@ impl<'a> Btf<'a> {
         }
         Ok(())
     }
-    fn pointer(&self, id: u32, to: &str) -> Result<(), String> {
+    fn pointer(&self, id: u32, to: &str) -> Result<&Ty<'a>, String> {
         let t = self.base(id)?;
         if t.kind != 2 {
             return Err("expected pointer".into());
@@ -146,16 +146,15 @@ impl<'a> Btf<'a> {
         if (to.is_empty() && t.size != 0) || (!to.is_empty() && (b.kind != 4 || b.name != to)) {
             return Err("pointer target mismatch".into());
         }
-        Ok(())
+        Ok(b)
     }
     fn field(
         &self,
-        owner: &str,
+        t: &Ty<'a>,
         field: &str,
         width: u32,
         target: Option<&str>,
     ) -> Result<u16, String> {
-        let t = self.named(owner, 4)?;
         let mut found = None;
         for m in t.data.as_chunks::<3>().0 {
             if name(self.strings, m[0])? != field {
@@ -182,9 +181,9 @@ impl<'a> Btf<'a> {
             }
             found = Some((bit / 8) as u16);
         }
-        found.ok_or_else(|| format!("missing {owner}.{field}"))
+        found.ok_or_else(|| format!("missing {}.{field}", t.name))
     }
-    fn callback(&self, n: &str, complete: bool) -> Result<(), String> {
+    fn callback(&self, n: &str, complete: bool) -> Result<&Ty<'a>, String> {
         let t = self.named(n, 8)?;
         let ptr = self.base(t.size)?;
         if ptr.kind != 2 {
@@ -196,32 +195,51 @@ impl<'a> Btf<'a> {
             return Err("callback signature mismatch".into());
         }
         self.pointer(proto.data[1], "")?;
-        self.pointer(proto.data[3], "request")?;
+        let request = self.pointer(proto.data[3], "request")?;
         if complete {
             self.integer(proto.data[5], 1)?;
             self.integer(proto.data[7], 4)?;
         }
-        Ok(())
+        Ok(request)
+    }
+    fn field_target(&self, owner: &Ty<'a>, field: &str, target: &str) -> Result<&Ty<'a>, String> {
+        self.field(owner, field, 8, Some(target))?;
+        for m in owner.data.as_chunks::<3>().0 {
+            if name(self.strings, m[0])? == field {
+                return self.pointer(m[1], target);
+            }
+        }
+        Err("missing pointer field".into())
     }
 }
 pub fn parse(bytes: &[u8]) -> Result<BlockLayout, String> {
     let b = Btf::read(bytes)?;
+    let mut layout = None;
     for (n, c) in [
         ("btf_trace_block_rq_issue", false),
         ("btf_trace_block_rq_insert", false),
         ("btf_trace_block_rq_complete", true),
     ] {
-        b.callback(n, c)?;
+        // Follow each callback's concrete types; unrelated compilation units
+        // can legitimately define different structures with the same name.
+        let request = b.callback(n, c)?;
+        let queue = b.field_target(request, "q", "request_queue")?;
+        let disk = b.field_target(queue, "disk", "gendisk")?;
+        let current = BlockLayout {
+            request_queue: b.field(request, "q", 8, Some("request_queue"))?,
+            request_flags: b.field(request, "cmd_flags", 4, None)?,
+            request_bytes: b.field(request, "__data_len", 4, None)?,
+            request_sector: b.field(request, "__sector", 8, None)?,
+            queue_disk: b.field(queue, "disk", 8, Some("gendisk"))?,
+            disk_major: b.field(disk, "major", 4, None)?,
+            disk_minor: b.field(disk, "first_minor", 4, None)?,
+        };
+        if layout.as_ref().is_some_and(|previous| previous != &current) {
+            return Err("block callback layouts disagree".into());
+        }
+        layout = Some(current);
     }
-    Ok(BlockLayout {
-        request_queue: b.field("request", "q", 8, Some("request_queue"))?,
-        request_flags: b.field("request", "cmd_flags", 4, None)?,
-        request_bytes: b.field("request", "__data_len", 4, None)?,
-        request_sector: b.field("request", "__sector", 8, None)?,
-        queue_disk: b.field("request_queue", "disk", 8, Some("gendisk"))?,
-        disk_major: b.field("gendisk", "major", 4, None)?,
-        disk_minor: b.field("gendisk", "first_minor", 4, None)?,
-    })
+    layout.ok_or("missing block callbacks".into())
 }
 
 #[cfg(test)]
@@ -338,6 +356,28 @@ mod tests {
         out.extend(strings);
         out
     }
+
+    #[test]
+    fn follows_callback_type_instead_of_unrelated_same_name() {
+        let mut b = fixture();
+        let old_len = u32::from_le_bytes(b[12..16].try_into().unwrap());
+        let insert = 24 + old_len as usize;
+        let parsed = Btf::read(&b).unwrap();
+        let request_name = parsed
+            .strings
+            .windows(8)
+            .position(|v| v == b"request\0")
+            .unwrap() as u32;
+        let mut duplicate = Vec::new();
+        for word in [request_name, 4_u32 << 24, 1] {
+            duplicate.extend(word.to_le_bytes());
+        }
+        b.splice(insert..insert, duplicate);
+        b[12..16].copy_from_slice(&(old_len + 12).to_le_bytes());
+        b[16..20].copy_from_slice(&(old_len + 12).to_le_bytes());
+        assert_eq!(parse(&b).unwrap().request_sector, 48);
+    }
+
     #[test]
     fn resolves_layout_and_callbacks() {
         let r = parse(&fixture()).unwrap();

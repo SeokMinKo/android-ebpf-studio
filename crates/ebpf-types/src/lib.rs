@@ -79,7 +79,7 @@ pub struct RawSyscallLayout {
     pub enter_id_offset: u16,
     pub enter_args_offset: u16,
     pub exit_ret_offset: u16,
-    pub reserved: u16,
+    pub exit_id_offset: u16,
 }
 
 #[repr(C)]
@@ -196,6 +196,7 @@ pub struct PipelineTraceLayout {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FileStart {
+    pub syscall: i64,
     pub start_ts_ns: u64,
     pub requested_bytes: u64,
     pub inode: u64,

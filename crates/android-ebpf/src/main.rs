@@ -842,6 +842,7 @@ pub fn raw_block_complete(ctx: RawTracePointContext) -> u32 {
     handle_raw_block(ctx, KIND_BLOCK_COMPLETE).unwrap_or(0)
 }
 
+#[inline(always)]
 fn handle_raw_block(ctx: RawTracePointContext, kind: u8) -> Result<u32, i32> {
     let l = RAW_BLOCK_LAYOUT.get(0).ok_or(1_i32)?;
     let request_id: u64 = ctx.arg(0);
@@ -931,6 +932,7 @@ fn handle_raw_block(ctx: RawTracePointContext, kind: u8) -> Result<u32, i32> {
     )
 }
 
+#[inline(always)]
 fn handle_block(
     ctx: TracePointContext,
     kind: u8,
@@ -1339,6 +1341,9 @@ fn histogram_index(value: u64) -> usize {
 }
 
 fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    // Every observed entry supersedes a pending call, including filtered calls.
+    let _ = FILE_STARTS.remove(&pid_tgid);
     let layout = RAW_SYSCALL_LAYOUT.get(0).ok_or(1_i32)?;
     let syscall = read_i64(&ctx, layout.enter_id_offset)?;
     // arm64 Linux syscall numbers: read, write, pread64, pwrite64.
@@ -1349,7 +1354,6 @@ fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
     };
     let fd = read_i64(&ctx, layout.enter_args_offset)? as i32;
     let requested_bytes = read_u64_at(&ctx, layout.enter_args_offset as usize + 16)?;
-    let pid_tgid = bpf_get_current_pid_tgid();
     let pid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
     let uid = bpf_get_current_uid_gid() as u32;
@@ -1369,6 +1373,7 @@ fn capture_sys_enter(ctx: TracePointContext) -> Result<u32, i32> {
         file_offset = read_u64_at(&ctx, layout.enter_args_offset as usize + 24)?;
     }
     let start = FileStart {
+        syscall,
         start_ts_ns: unsafe { bpf_ktime_get_ns() },
         requested_bytes,
         inode,
@@ -1475,6 +1480,10 @@ fn capture_sys_exit(ctx: TracePointContext) -> Result<u32, i32> {
         .copied()
         .ok_or(0_i32)?;
     let _ = FILE_STARTS.remove(&pid_tgid);
+    // A lost exit must not consume a later, unrelated syscall return value.
+    if read_i64(&ctx, layout.exit_id_offset)? != start.syscall {
+        return Ok(0);
+    }
     let ts_ns = unsafe { bpf_ktime_get_ns() };
     let return_value = read_i64(&ctx, layout.exit_ret_offset)?;
     let config = active_filter().unwrap_or(RawFilterConfig {

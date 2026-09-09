@@ -53,7 +53,7 @@ pub fn parse_raw_syscall_layout(enter: &str, exit: &str) -> Result<RawSyscallLay
         enter_id_offset: required(&enter, "id")?,
         enter_args_offset: required(&enter, "args")?,
         exit_ret_offset: required(&exit, "ret")?,
-        reserved: 0,
+        exit_id_offset: required(&exit, "id")?,
     })
 }
 
