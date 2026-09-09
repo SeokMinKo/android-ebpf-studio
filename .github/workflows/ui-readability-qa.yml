@@ -1,0 +1,67 @@
+name: Native UI readability replay
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/trace-ui-readability]
+    paths:
+      - 'crates/desktop/src/**'
+      - '.github/workflows/ui-readability-qa.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-replay:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install repository Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Build native GUI
+        run: cargo +1.98.0 build -p android-ebpf-studio --features gui
+      - name: Replay saved fixture in native renderer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ui-evidence | Out-Null
+          $env:ANDROID_EBPF_QA_SESSION = "$PWD/crates/desktop/tests/fixtures/known-read-tooltip.ndjson"
+          $env:ANDROID_EBPF_QA_PAGE = 'explore'
+          $env:ANDROID_EBPF_QA_SCALE = '1'
+          foreach ($theme in @('light', 'dark', 'contrast')) {
+            $env:ANDROID_EBPF_QA_THEME = $theme
+            $env:ANDROID_EBPF_QA_OUTPUT = "$PWD/ui-evidence/$theme.png"
+            $process = Start-Process -FilePath './target/debug/android-ebpf-studio.exe' -PassThru
+            if (-not $process.WaitForExit(90000)) {
+              Stop-Process -Id $process.Id
+              throw "Native replay timed out: $theme"
+            }
+            if ($process.ExitCode -ne 0 -or -not (Test-Path $env:ANDROID_EBPF_QA_OUTPUT)) {
+              throw "Native replay did not produce $theme capture"
+            }
+          }
+          $env:ANDROID_EBPF_QA_SMALL = '1'
+          $env:ANDROID_EBPF_QA_THEME = 'light'
+          $env:ANDROID_EBPF_QA_OUTPUT = "$PWD/ui-evidence/narrow.png"
+          $process = Start-Process -FilePath './target/debug/android-ebpf-studio.exe' -PassThru
+          if (-not $process.WaitForExit(90000)) {
+            Stop-Process -Id $process.Id
+            throw 'Narrow native replay timed out'
+          }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $env:ANDROID_EBPF_QA_OUTPUT)) {
+            throw 'Narrow native replay did not produce capture'
+          }
+      - name: Preserve native captures and measurement reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ui-readability
+          path: ui-evidence/
+          if-no-files-found: warn
+      - name: Emit review preview
+        shell: pwsh
+        run: |
+          foreach ($name in @('light', 'narrow')) {
+            $bytes = [IO.File]::ReadAllBytes("$PWD/ui-evidence/$name.png")
+            Write-Output "UI_PREVIEW_${name}=$([Convert]::ToBase64String($bytes))"
+          }

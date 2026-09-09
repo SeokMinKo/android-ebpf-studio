@@ -3391,61 +3391,73 @@ impl StudioApp {
                         .id_salt("completed-io-table")
                         .max_height(320.0)
                         .show_rows(ui, 28.0, items.len(), |ui, range| {
-                    for index in range {
-                        let position = index + 1;
-                        ui.horizontal(|ui| {
-                            let io = &items[items.len() - position];
-                            let key = selection_key(io);
-                            let response = ui
-                                .push_id(key, |ui| {
-                                    ui.add_sized([85.0, 25.0], egui::Button::new("Open I/O"))
-                                })
-                                .inner;
-                            if self.render_qa.output.is_some()
-                                && std::env::var_os("ANDROID_EBPF_QA_TABLE_KEYBOARD").is_some()
-                                && position == 1
-                                && self.render_qa.input_step == 0
-                            {
-                                response.request_focus();
-                                response.scroll_to_me(Some(egui::Align::Center));
-                                table_focused = response.has_focus();
+                            for index in range {
+                                let position = index + 1;
+                                ui.horizontal(|ui| {
+                                    let io = &items[items.len() - position];
+                                    let key = selection_key(io);
+                                    let response = ui
+                                        .push_id(key, |ui| {
+                                            ui.add_sized(
+                                                [85.0, 25.0],
+                                                egui::Button::new("Open I/O"),
+                                            )
+                                        })
+                                        .inner;
+                                    if self.render_qa.output.is_some()
+                                        && std::env::var_os("ANDROID_EBPF_QA_TABLE_KEYBOARD")
+                                            .is_some()
+                                        && position == 1
+                                        && self.render_qa.input_step == 0
+                                    {
+                                        response.request_focus();
+                                        response.scroll_to_me(Some(egui::Align::Center));
+                                        table_focused = response.has_focus();
+                                    }
+                                    if response.clicked() {
+                                        open = Some(key);
+                                    }
+                                    let graph = self.analysis().transaction_for(io);
+                                    let origins = block_file_origins(&graph);
+                                    let file = if origins.is_empty() {
+                                        "Unresolved · see I/O details".into()
+                                    } else if origins.len() > 1 {
+                                        format!("{} candidates · see I/O details", origins.len())
+                                    } else {
+                                        origins[0]
+                                            .path
+                                            .as_ref()
+                                            .and_then(|p| p.path.clone())
+                                            .unwrap_or_else(|| origins[0].file.fallback_label())
+                                    };
+                                    let values = [
+                                        io.completion_timestamp()
+                                            .map_or("Unavailable".into(), |ts| ts.to_string()),
+                                        operation_label(io.issue.operation).into(),
+                                        access_label(io.access_pattern).into(),
+                                        io.issue.bytes.to_string(),
+                                        io.issue.sector.to_string(),
+                                        format!(
+                                            "{}:{}",
+                                            io.issue.device_major, io.issue.device_minor
+                                        ),
+                                        format_latency(io.queue_latency_ns),
+                                        format_latency(io.device_latency_ns),
+                                        format_latency(io.total_latency_ns),
+                                        file,
+                                        format!("{:?}", path_confidence(&origins)),
+                                        format!(
+                                            "{} / {}",
+                                            identity_number(io.issuer_pid()),
+                                            identity_number(io.issuer_tid())
+                                        ),
+                                        io.issue.comm.clone(),
+                                    ];
+                                    for (column, value) in values.iter().enumerate() {
+                                        io_table_cell(ui, column + 1, value, false);
+                                    }
+                                });
                             }
-                            if response.clicked() {
-                                open = Some(key);
-                            }
-                            let graph = self.analysis().transaction_for(io);
-                            let origins = block_file_origins(&graph);
-                            let file = if origins.is_empty() {
-                                "Unresolved · see I/O details".into()
-                            } else if origins.len() > 1 {
-                                format!("{} candidates · see I/O details", origins.len())
-                            } else {
-                                origins[0]
-                                    .path
-                                    .as_ref()
-                                    .and_then(|p| p.path.clone())
-                                    .unwrap_or_else(|| origins[0].file.fallback_label())
-                            };
-                            let values = [
-                                io.completion_timestamp().map_or("Unavailable".into(), |ts| ts.to_string()),
-                                operation_label(io.issue.operation).into(),
-                                access_label(io.access_pattern).into(),
-                                io.issue.bytes.to_string(),
-                                io.issue.sector.to_string(),
-                                format!("{}:{}", io.issue.device_major, io.issue.device_minor),
-                                format_latency(io.queue_latency_ns),
-                                format_latency(io.device_latency_ns),
-                                format_latency(io.total_latency_ns),
-                                file,
-                                format!("{:?}", path_confidence(&origins)),
-                                format!("{} / {}", identity_number(io.issuer_pid()), identity_number(io.issuer_tid())),
-                                io.issue.comm.clone(),
-                            ];
-                            for (column, value) in values.iter().enumerate() {
-                                io_table_cell(ui, column + 1, value, false);
-                            }
-                        });
-                    }
                         });
                 });
         });
@@ -5116,4 +5128,3 @@ mod waterfall_time_regression {
         assert!((points[1] - points[0] - 3.509792).abs() < 1e-9);
     }
 }
-
